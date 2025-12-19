@@ -161,4 +161,4 @@ See [STAGE4_COMPLETE.md](STAGE4_COMPLETE.md) for detailed documentation.
 
 ## License
 
-MIT
+BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
