@@ -359,11 +359,15 @@ def create_app(tracker) -> FastAPI:
                             screenshot_b64=latest_frame["jpeg_b64"],
                         )
                         if narration:
+                            # Generate audio (async)
+                            audio_data = await ng_tracker.narrator.generate_audio_async(narration)
+                            
                             # Send narration message
                             narration_msg = {
                                 "type": "narration",
                                 "text": narration,
                                 "timestamp": time.time(),
+                                "audio": audio_data,  # base64 MP3 or None
                             }
                             await websocket.send_json(narration_msg)
                             print(f"[NARRATOR] Sent: {narration}", flush=True)

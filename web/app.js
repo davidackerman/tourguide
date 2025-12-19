@@ -387,30 +387,79 @@ class NGLiveStream {
         // Update the narration display
         this.updateNarrationDisplay();
         
-        // Speak the narration using Web Speech API
-        this.speakNarration(data.text);
+        // Queue audio if available
+        if (data.audio) {
+            this.queueAudio(data.audio);
+        }
     }
     
-    speakNarration(text) {
-        // Check if Web Speech API is available
-        if (!('speechSynthesis' in window)) {
-            console.warn('Web Speech API not supported in this browser');
+    queueAudio(base64Audio) {
+        // Initialize audio queue if needed
+        if (!this.audioQueue) {
+            this.audioQueue = [];
+            this.isPlayingAudio = false;
+        }
+        
+        // Add to queue
+        this.audioQueue.push(base64Audio);
+        
+        // Start playing if not already playing
+        if (!this.isPlayingAudio) {
+            this.playNextAudio();
+        }
+    }
+    
+    playNextAudio() {
+        // Check if there's audio to play
+        if (this.audioQueue.length === 0) {
+            this.isPlayingAudio = false;
             return;
         }
         
-        // Cancel any ongoing speech
-        window.speechSynthesis.cancel();
-        
-        // Create speech utterance
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 0.9;  // Slightly slower for clarity
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-        
-        // Speak it
-        window.speechSynthesis.speak(utterance);
-        
-        console.log('Speaking:', text);
+        this.isPlayingAudio = true;
+        const base64Audio = this.audioQueue.shift();
+        this.playAudio(base64Audio);
+    }
+    
+    playAudio(base64Audio) {
+        try {
+            // Decode base64 audio
+            const binaryString = atob(base64Audio);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            // Create blob and URL (MP3 format from edge-tts)
+            const blob = new Blob([bytes], { type: 'audio/mpeg' });
+            const audioUrl = URL.createObjectURL(blob);
+            
+            // Play audio
+            const audio = new Audio(audioUrl);
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                // Play next audio in queue
+                this.playNextAudio();
+            };
+            audio.onerror = (err) => {
+                console.error('Audio playback failed:', err);
+                URL.revokeObjectURL(audioUrl);
+                // Continue to next audio even on error
+                this.playNextAudio();
+            };
+            audio.play().catch(err => {
+                console.error('Audio play error:', err);
+                URL.revokeObjectURL(audioUrl);
+                // Continue to next audio even on error
+                this.playNextAudio();
+            });
+            
+            console.log('Playing audio narration');
+        } catch (err) {
+            console.error('Audio decode failed:', err);
+            // Continue to next audio even on error
+            this.playNextAudio();
+        }
     }
 
     updateNarrationDisplay() {

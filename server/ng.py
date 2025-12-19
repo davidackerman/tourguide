@@ -215,7 +215,7 @@ class NG_StateTracker:
 
         print(f"[STATE] {' | '.join(parts)}")
 
-    def start_screenshot_loop(self, max_fps=0.25):
+    def start_screenshot_loop(self, max_fps=0.1):
         """Start background thread for screenshot capture."""
         if self.screenshot_thread is not None:
             print("Screenshot loop already running")

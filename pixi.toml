@@ -20,6 +20,7 @@ python-dotenv = "*"
 neuroglancer = "*"
 anthropic = "*"
 ollama = "*"
+edge-tts = "*"
 
 [tasks]
 start = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py" }

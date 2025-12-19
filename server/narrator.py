@@ -44,16 +44,6 @@ class Narrator:
                 self.client = ollama
                 self.enabled = True
                 print("[NARRATOR] Using Local Mode (Ollama llama3.2-vision)")
-                # Initialize Kokoro TTS if available
-                try:
-                    from kokoro import KPipeline
-                    import sounddevice as sd
-                    self.tts_pipeline = KPipeline(lang_code='a')  # American English
-                    self.tts_available = True
-                    print("[NARRATOR] Kokoro TTS enabled")
-                except ImportError:
-                    print("[NARRATOR] WARNING: Kokoro TTS not available (pip install kokoro soundfile sounddevice)")
-                    self.tts_available = False
             except ImportError:
                 print("[NARRATOR] ERROR: ollama not installed. Run: pip install ollama")
                 self.enabled = False
@@ -72,7 +62,7 @@ class Narrator:
                 import google.generativeai as genai
 
                 genai.configure(api_key=google_key)
-                self.client = genai.GenerativeModel("gemini-1.5-flash-8b")
+                self.client = genai.GenerativeModel("gemini-3-flash-preview")
                 self.enabled = True
                 print("[NARRATOR] Using Gemini 1.5 Flash 8B")
             except ImportError:
@@ -109,6 +99,15 @@ class Narrator:
         self.max_history = 10
         self.last_state: Optional[Dict[str, Any]] = None
         self.generating_narration = False  # Track if generation is in progress
+        
+        # Initialize edge-tts for server-side TTS
+        self.tts_available = False
+        try:
+            import edge_tts
+            self.tts_available = True
+            print("[NARRATOR] TTS engine initialized (edge-tts)", flush=True)
+        except Exception as e:
+            print(f"[NARRATOR] TTS engine not available: {e}", flush=True)
 
         # Thresholds for triggering narration
         self.min_narration_interval = 3.0  # seconds between narrations
@@ -195,11 +194,6 @@ class Narrator:
                 narration = self._call_claude(prompt, screenshot_b64)
             elif self.provider == "local":
                 narration = self._call_local(prompt, screenshot_b64)
-                # Optionally speak using local TTS
-                if narration and self.tts_available:
-                    import threading
-                    # Speak in background to not block
-                    threading.Thread(target=self.speak_local, args=(narration,), daemon=True).start()
             else:
                 return None
 
@@ -265,27 +259,19 @@ class Narrator:
         ]
         layers_info = ", ".join(visible_layers) if visible_layers else "None"
 
-        base_context = f"""You are an AI narrator for a scientific tour of electron microscopy (EM) data. You will receive a stream of Neuroglancer viewer snapshots showing navigation through 3D EM datasets of cells and tissues.
+        base_context = f"""Role: You are an expert cellular morphologist narrating a live EM data stream.
 
-**Your Role:**
-- Provide real-time narration as the viewer explores the dataset in Neuroglancer
-- Each image is a snapshot from the Neuroglancer 3D viewer showing the current view
-- Images may show raw EM data (grayscale) and/or colored segmentations of cellular structures
-- Narrate what you observe in each frame to create an engaging scientific tour
-- Be concise, accurate, and scientifically informative
+Task: Provide a 2-3 sentence description of the current view, focusing on the shapes, textures, and spatial organization of the biological structures.
 
-**About Neuroglancer:**
-- Interactive web-based viewer for volumetric data
-- Displays EM imagery and segmentation layers that can be toggled on/off
-- Supports 3D navigation: panning, zooming, rotating through the dataset
-- Each snapshot shows the current cross-section and visible layers
+Guidelines:
 
-**Dataset Information:**
-- Type: High-resolution 3D EM imaging of cells and tissues
-- Raw data: Grayscale EM showing cell membranes, organelles, and subcellular structures
-- Segmentations: Colored overlays identifying specific organelles, cells, or structures
-- Coordinate system: Position in nanometers (nm)
-- Resolution: ~4-8 nm/pixel in XY, varies in Z
+- Flexible Identification: If color segmentations are visible, use them for identification. If not, identify structures by their morphology (e.g., "ellipsoid bodies with internal folds" for mitochondria, or "large, spherical void" for the nucleus).
+
+- Describe Shapes: Use descriptive geometry—mention if structures appear tubular, branched, stacked, or granular.
+
+- Biological Context: Relate the shapes to their function.
+
+- Pacing: Aim for 50–80 words (roughly 20-30 seconds of speech).
 
 **Current Viewer State:**
 {context}
@@ -297,54 +283,9 @@ class Narrator:
 """
 
         if screenshot_b64:
-            prompt = """\n**Context:** You are viewing electron microscopy (EM) data of cells and tissue cultures displayed as 2D orthogonal cross-sections in Neuroglancer. The image shows 4 panels representing different viewing planes through 3D volumetric data.
-
-**What you're looking at:**
-- EM data: Grayscale imagery showing cellular ultrastructure (membranes, organelles, subcellular details)
-- Colored regions: These are segmented organelles overlaid on the grayscale EM data
-- Each color represents a different segmented organelle or cellular structure
-
-**CRITICAL: Describe ONLY what you literally see in the image - do not invent details.**
-
-**What the data looks like when loaded:**
-- Textured grayscale EM imagery with visible cellular structures
-- Colored overlays (if present) marking segmented organelles
-- Visible detail, patterns, and variation in brightness
-
-**What indicates data is NOT loaded:**
-- Flat uniform gray/black panels with no texture
-- Only coordinate axes and scale bar visible
-- No cellular structures or patterns
-
-**Task:**
-Generate ONE concise sentence (max 20 words) that:
-1. Confirms if EM data is visible or still loading
-2. If visible, describes the cellular structures you observe in the grayscale EM
-3. Mentions colored segmented organelles if present
-
-Examples:
-- "Data is still loading."
-- "Grayscale EM cross-sections show cellular membranes with colored organelle segmentations."
-- "EM data displays textured cellular ultrastructure with various colored segmented regions."
-
-Narration:"""
+            prompt = base_context + "\n\nDescribe what you see in the image.\n\nNarration:"
         else:
-            prompt = (
-                base_context
-                + """\n**Task:**
-Based on the viewer position and zoom level, generate a single, concise sentence (max 20 words) that:
-1. Describes what the user might be looking at based on zoom level and any visible layers
-2. Provides brief scientific context when relevant
-3. Is engaging like a museum tour guide
-4. Avoids hallucinating specific structures without visual confirmation
-
-Focus on zoom-appropriate features:
-- Scale <5: Subcellular details (organelles, synapses)
-- Scale 5-50: Cellular level (individual cells, nuclei)  
-- Scale >50: Tissue organization
-
-Narration:"""
-            )
+            prompt = base_context + "\n\nBased on the current position and zoom level, narrate what the viewer might be seeing.\n\nNarration:"
 
         return prompt
 
@@ -469,29 +410,42 @@ Narration:"""
             print(f"[NARRATOR] Local (Ollama) error: {e}", flush=True)
             return None
 
-    def speak_local(self, text: str):
-        """Speak text using local Kokoro TTS."""
+    async def generate_audio_async(self, text: str) -> Optional[str]:
+        """Generate audio from text and return as base64-encoded MP3."""
         if not self.tts_available:
-            return
+            return None
         
         try:
-            import sounddevice as sd
-            generator = self.tts_pipeline(text, voice='af_bella', speed=1.1)
-            for _, _, audio in generator:
-                sd.play(audio, 24000)
-                sd.wait()
+            import edge_tts
+            import tempfile
+            import base64
+            import os
+            
+            # Create temporary file for MP3
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            # Generate speech using edge-tts (British male voice, documentary style)
+            # en-GB-RyanNeural is a British male voice suitable for narration
+            communicate = edge_tts.Communicate(text, "en-GB-RyanNeural")
+            await communicate.save(tmp_path)
+            
+            # Read and encode the file
+            with open(tmp_path, 'rb') as f:
+                audio_data = f.read()
+            
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+            
+            # Return base64-encoded audio
+            return base64.b64encode(audio_data).decode('utf-8')
+            
         except Exception as e:
-            print(f"[NARRATOR] TTS error: {e}", flush=True)
-    
-    def _speak_kokoro(self, text: str):
-        """Speak text using pyttsx3 TTS."""
-        if not self.tts_available:
-            return
-        try:
-            self.tts_engine.say(text)
-            self.tts_engine.runAndWait()
-        except Exception as e:
-            print(f"[NARRATOR] TTS error: {e}", flush=True)
+            print(f"[NARRATOR] Audio generation error: {e}", flush=True)
+            return None
 
     def _add_to_history(self, narration: str, state: Dict[str, Any]):
         """Add narration to history, maintaining max size."""

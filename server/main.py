@@ -37,8 +37,8 @@ def main():
     parser.add_argument(
         "--fps",
         type=float,
-        default=0.25,
-        help="Maximum screenshot frame rate (default: 0.25)",
+        default=0.1,
+        help="Maximum screenshot frame rate (default: 0.1)",
     )
     args = parser.parse_args()
 
