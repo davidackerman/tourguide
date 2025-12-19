@@ -13,27 +13,57 @@ class Narrator:
     """Generates contextual narration based on viewer state changes."""
 
     def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None):
-        # Auto-detect provider based on available API keys
+        # Auto-detect provider based on available API keys or USE_LOCAL flag
         self.provider = provider or os.environ.get("AI_PROVIDER", "auto")
+        self.use_local = os.environ.get("USE_LOCAL", "false").lower() == "true"
 
         # Check for API keys
         anthropic_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         google_key = os.environ.get("GOOGLE_API_KEY")
 
         if self.provider == "auto":
-            if google_key:
+            if self.use_local:
+                self.provider = "local"
+            elif google_key:
                 self.provider = "gemini"
             elif anthropic_key:
                 self.provider = "claude"
             else:
                 print(
-                    "[NARRATOR] WARNING: No API key found (GOOGLE_API_KEY or ANTHROPIC_API_KEY). Narration disabled."
+                    "[NARRATOR] WARNING: No API key found (GOOGLE_API_KEY or ANTHROPIC_API_KEY). Set USE_LOCAL=true for local mode."
                 )
                 self.enabled = False
                 return
 
         # Initialize the appropriate client
-        if self.provider == "gemini":
+        if self.provider == "local":
+            try:
+                import ollama
+                # Test Ollama connection
+                ollama.list()
+                self.client = ollama
+                self.enabled = True
+                print("[NARRATOR] Using Local Mode (Ollama llama3.2-vision)")
+                # Initialize Kokoro TTS if available
+                try:
+                    from kokoro import KPipeline
+                    import sounddevice as sd
+                    self.tts_pipeline = KPipeline(lang_code='a')  # American English
+                    self.tts_available = True
+                    print("[NARRATOR] Kokoro TTS enabled")
+                except ImportError:
+                    print("[NARRATOR] WARNING: Kokoro TTS not available (pip install kokoro soundfile sounddevice)")
+                    self.tts_available = False
+            except ImportError:
+                print("[NARRATOR] ERROR: ollama not installed. Run: pip install ollama")
+                self.enabled = False
+                return
+            except Exception as e:
+                print(f"[NARRATOR] ERROR: Failed to connect to Ollama. Is it running? {e}")
+                print("[NARRATOR] Install from ollama.com and run: ollama pull llama3.2-vision")
+                self.enabled = False
+                return
+        elif self.provider == "gemini":
             if not google_key:
                 print("[NARRATOR] ERROR: GOOGLE_API_KEY not found")
                 self.enabled = False
@@ -42,9 +72,9 @@ class Narrator:
                 import google.generativeai as genai
 
                 genai.configure(api_key=google_key)
-                self.client = genai.GenerativeModel("gemini-2.5-flash")
+                self.client = genai.GenerativeModel("gemini-1.5-flash-8b")
                 self.enabled = True
-                print("[NARRATOR] Using Gemini 2.5 Flash")
+                print("[NARRATOR] Using Gemini 1.5 Flash 8B")
             except ImportError:
                 print(
                     "[NARRATOR] ERROR: google-generativeai not installed. Run: pip install google-generativeai"
@@ -78,6 +108,7 @@ class Narrator:
         self.narration_history: List[Dict[str, Any]] = []
         self.max_history = 10
         self.last_state: Optional[Dict[str, Any]] = None
+        self.generating_narration = False  # Track if generation is in progress
 
         # Thresholds for triggering narration
         self.min_narration_interval = 3.0  # seconds between narrations
@@ -90,6 +121,10 @@ class Narrator:
     def should_narrate(self, current_state: Dict[str, Any]) -> bool:
         """Determine if we should generate narration for this state."""
         if not self.enabled:
+            return False
+
+        # Don't start new narration if one is already being generated
+        if self.generating_narration:
             return False
 
         current_time = time.time()
@@ -143,6 +178,9 @@ class Narrator:
         if not self.enabled:
             return None
 
+        # Set flag to prevent concurrent generation
+        self.generating_narration = True
+        
         try:
             # Build context from state
             context = self._build_context(state)
@@ -155,6 +193,13 @@ class Narrator:
                 narration = self._call_gemini(prompt, screenshot_b64)
             elif self.provider == "claude":
                 narration = self._call_claude(prompt, screenshot_b64)
+            elif self.provider == "local":
+                narration = self._call_local(prompt, screenshot_b64)
+                # Optionally speak using local TTS
+                if narration and self.tts_available:
+                    import threading
+                    # Speak in background to not block
+                    threading.Thread(target=self.speak_local, args=(narration,), daemon=True).start()
             else:
                 return None
 
@@ -169,6 +214,9 @@ class Narrator:
         except Exception as e:
             print(f"[NARRATOR] Error generating narration: {e}", flush=True)
             return None
+        finally:
+            # Always clear the flag when done
+            self.generating_narration = False
 
     def _build_context(self, state: Dict[str, Any]) -> str:
         """Build a human-readable context description from state."""
@@ -210,41 +258,76 @@ class Narrator:
             if self.narration_history
             else "No previous narrations."
         )
+        
+        # Get visible layers information
+        visible_layers = [
+            l["name"] for l in state.get("layers", []) if l.get("visible", True)
+        ]
+        layers_info = ", ".join(visible_layers) if visible_layers else "None"
 
-        base_context = f"""You are viewing electron microscopy (EM) data and segmentations in a Neuroglancer viewer.
+        base_context = f"""You are an AI narrator for a scientific tour of electron microscopy (EM) data. You will receive a stream of Neuroglancer viewer snapshots showing navigation through 3D EM datasets of cells and tissues.
+
+**Your Role:**
+- Provide real-time narration as the viewer explores the dataset in Neuroglancer
+- Each image is a snapshot from the Neuroglancer 3D viewer showing the current view
+- Images may show raw EM data (grayscale) and/or colored segmentations of cellular structures
+- Narrate what you observe in each frame to create an engaging scientific tour
+- Be concise, accurate, and scientifically informative
+
+**About Neuroglancer:**
+- Interactive web-based viewer for volumetric data
+- Displays EM imagery and segmentation layers that can be toggled on/off
+- Supports 3D navigation: panning, zooming, rotating through the dataset
+- Each snapshot shows the current cross-section and visible layers
 
 **Dataset Information:**
-- Type: High-resolution 3D EM imaging of neural tissue
-- Data: Grayscale EM showing cell membranes, organelles, and subcellular structures
-- Segmentations: Colored overlays identifying specific cells, neurons, or structures
+- Type: High-resolution 3D EM imaging of cells and tissues
+- Raw data: Grayscale EM showing cell membranes, organelles, and subcellular structures
+- Segmentations: Colored overlays identifying specific organelles, cells, or structures
 - Coordinate system: Position in nanometers (nm)
 - Resolution: ~4-8 nm/pixel in XY, varies in Z
 
 **Current Viewer State:**
 {context}
 
+**Visible Layers:** {layers_info}
+
 **Recent narrations (avoid repeating):**
 {recent_history}
 """
 
         if screenshot_b64:
-            prompt = (
-                base_context
-                + """\n**Task:**
-Look at the image showing the current view. Generate a single, concise sentence (max 25 words) that:
-1. Describes what you actually SEE in the image (cellular structures, membranes, organelles, etc.)
-2. Relates the zoom level to the scale of structures visible
-3. Is engaging and informative, like a scientific tour guide
-4. Only mentions specific structures you can clearly identify in the image
-5. Avoids speculation - be cautious and scientific
+            prompt = """\n**Context:** You are viewing electron microscopy (EM) data of cells and tissue cultures displayed as 2D orthogonal cross-sections in Neuroglancer. The image shows 4 panels representing different viewing planes through 3D volumetric data.
 
-Focus on observable features:
-- At high zoom (scale <5): Synapses, mitochondria, vesicles, membrane details
-- At medium zoom (5-50): Individual cells, nuclei, cellular boundaries
-- At low zoom (>50): Tissue organization, cell populations
+**What you're looking at:**
+- EM data: Grayscale imagery showing cellular ultrastructure (membranes, organelles, subcellular details)
+- Colored regions: These are segmented organelles overlaid on the grayscale EM data
+- Each color represents a different segmented organelle or cellular structure
+
+**CRITICAL: Describe ONLY what you literally see in the image - do not invent details.**
+
+**What the data looks like when loaded:**
+- Textured grayscale EM imagery with visible cellular structures
+- Colored overlays (if present) marking segmented organelles
+- Visible detail, patterns, and variation in brightness
+
+**What indicates data is NOT loaded:**
+- Flat uniform gray/black panels with no texture
+- Only coordinate axes and scale bar visible
+- No cellular structures or patterns
+
+**Task:**
+Generate ONE concise sentence (max 20 words) that:
+1. Confirms if EM data is visible or still loading
+2. If visible, describes the cellular structures you observe in the grayscale EM
+3. Mentions colored segmented organelles if present
+
+Examples:
+- "Data is still loading."
+- "Grayscale EM cross-sections show cellular membranes with colored organelle segmentations."
+- "EM data displays textured cellular ultrastructure with various colored segmented regions."
 
 Narration:"""
-            )
         else:
             prompt = (
                 base_context
@@ -277,6 +360,12 @@ Narration:"""
 
                 image_data = base64.b64decode(screenshot_b64)
                 image = PIL.Image.open(io.BytesIO(image_data))
+                
+                # Debug: Save image to verify what's being sent
+                debug_path = "/tmp/narrator_debug_image.jpg"
+                image.save(debug_path, 'JPEG')
+                print(f"[NARRATOR DEBUG] Saved image to {debug_path} - Size: {image.size}, Mode: {image.mode}", flush=True)
+                
                 response = self.client.generate_content([prompt, image])
             else:
                 # Text only
@@ -326,6 +415,83 @@ Narration:"""
         except Exception as e:
             print(f"[NARRATOR] Claude error: {e}", flush=True)
             return None
+
+    def _call_local(
+        self, prompt: str, screenshot_b64: Optional[str] = None
+    ) -> Optional[str]:
+        """Call local Ollama with gemma3:12b."""
+        try:
+            if screenshot_b64:
+                # Save image temporarily for Ollama
+                import tempfile
+                import io
+                import PIL.Image
+                
+                image_data = base64.b64decode(screenshot_b64)
+                image = PIL.Image.open(io.BytesIO(image_data))
+                
+                # Debug: Save and log image details
+                debug_path = "/tmp/narrator_debug_ollama.jpg"
+                image.save(debug_path, 'JPEG')
+                print(f"[NARRATOR DEBUG] Ollama image - Size: {image.size}, Mode: {image.mode}, Saved to: {debug_path}", flush=True)
+                
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                    image.save(tmp.name, 'JPEG')
+                    tmp_path = tmp.name
+                
+                try:
+                    # Call Ollama with vision
+                    response = self.client.chat(
+                        model='gemma3:12b',
+                        messages=[{
+                            'role': 'user',
+                            'content': prompt,
+                            'images': [tmp_path]
+                        }]
+                    )
+                    return response['message']['content'].strip()
+                finally:
+                    # Clean up temp file
+                    import os
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+            else:
+                # Text only
+                response = self.client.chat(
+                    model='gemma3:12b',
+                    messages=[{'role': 'user', 'content': prompt}]
+                )
+                return response['message']['content'].strip()
+        except Exception as e:
+            print(f"[NARRATOR] Local (Ollama) error: {e}", flush=True)
+            return None
+
+    def speak_local(self, text: str):
+        """Speak text using local Kokoro TTS."""
+        if not self.tts_available:
+            return
+        
+        try:
+            import sounddevice as sd
+            generator = self.tts_pipeline(text, voice='af_bella', speed=1.1)
+            for _, _, audio in generator:
+                sd.play(audio, 24000)
+                sd.wait()
+        except Exception as e:
+            print(f"[NARRATOR] TTS error: {e}", flush=True)
+    
+    def _speak_kokoro(self, text: str):
+        """Speak text using pyttsx3 TTS."""
+        if not self.tts_available:
+            return
+        try:
+            self.tts_engine.say(text)
+            self.tts_engine.runAndWait()
+        except Exception as e:
+            print(f"[NARRATOR] TTS error: {e}", flush=True)
 
     def _add_to_history(self, narration: str, state: Dict[str, Any]):
         """Add narration to history, maintaining max size."""

@@ -386,6 +386,31 @@ class NGLiveStream {
 
         // Update the narration display
         this.updateNarrationDisplay();
+        
+        // Speak the narration using Web Speech API
+        this.speakNarration(data.text);
+    }
+    
+    speakNarration(text) {
+        // Check if Web Speech API is available
+        if (!('speechSynthesis' in window)) {
+            console.warn('Web Speech API not supported in this browser');
+            return;
+        }
+        
+        // Cancel any ongoing speech
+        window.speechSynthesis.cancel();
+        
+        // Create speech utterance
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 0.9;  // Slightly slower for clarity
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        
+        // Speak it
+        window.speechSynthesis.speak(utterance);
+        
+        console.log('Speaking:', text);
     }
 
     updateNarrationDisplay() {

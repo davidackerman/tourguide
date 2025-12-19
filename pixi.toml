@@ -19,10 +19,11 @@ python-dotenv = "*"
 [pypi-dependencies]
 neuroglancer = "*"
 anthropic = "*"
+ollama = "*"
 
 [tasks]
-start = "python server/main.py"
-dev = "python server/main.py --fps 3"
+start = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py" }
+dev = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py --fps 3" }
 
 [feature.narrator.pypi-dependencies]
 # Stage 4: Add your AI/vision model SDK here

@@ -1,13 +1,15 @@
 # Neuroglancer Live Stream
 
-A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, with optional AI narration.
+A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, with AI narration powered by Gemini, Claude, or local Ollama.
 
 ## Features
 
-- **Live Screenshot Streaming**: Debounced 1-3 fps JPEG streaming
+- **Live Screenshot Streaming**: Debounced 0.1-5 fps JPEG streaming
 - **State Tracking**: Position, zoom, orientation, layer visibility, and segment selection
 - **WebSocket Updates**: Real-time updates to browser panel
-- **Responsive UI**: Clean dark theme with status indicators
+- **AI Narration**: Context-aware descriptions using cloud (Gemini/Claude) or local (Ollama) AI
+- **Local TTS**: Optional voice narration with Kokoro (local mode only)
+- **Responsive UI**: Clean dark theme with status indicators and narration history
 
 ## Quick Start
 
@@ -126,30 +128,62 @@ tourguide/
 - [ ] **Stage 5**: Voice/TTS
 - [ ] **Stage 6**: Quality upgrades (ROI crop, UI controls, recording)
 
-## Using AI Narration (Stage 4)
+## Using AI Narration
 
-The AI narrator is now implemented and ready to use! To enable it:
+### Option 1: Cloud AI (Gemini - Recommended)
 
-1. **Get an Anthropic API key** from https://console.anthropic.com/
+1. **Get a free API key** from https://aistudio.google.com/app/apikey
 
-2. **Create a `.env` file** in the project root:
+2. **Create a `.env` file**:
    ```bash
    cp .env.example .env
    ```
 
 3. **Add your API key** to `.env`:
    ```bash
-   ANTHROPIC_API_KEY=sk-ant-api03-...
+   GOOGLE_API_KEY=your_api_key_here
    ```
 
-4. **Restart the server**:
+4. **Start the server**:
    ```bash
    pixi run start
    ```
 
-5. **Navigate in Neuroglancer** - the AI will narrate as you explore!
+### Option 2: Local AI (Ollama + Kokoro TTS - No API Key!)
 
-See [STAGE4_COMPLETE.md](STAGE4_COMPLETE.md) for detailed documentation.
+For completely local, private, and free AI narration with voice:
+
+1. **Install Ollama** from [ollama.com](https://ollama.com)
+
+2. **Download the vision model**:
+   ```bash
+   ollama pull llama3.2-vision
+   ```
+
+3. **Install TTS** (optional):
+   ```bash
+   pixi run pip install kokoro soundfile sounddevice
+   ```
+
+4. **Enable local mode** in `.env`:
+   ```bash
+   USE_LOCAL=true
+   ```
+
+5. **Start the server**:
+   ```bash
+   pixi run start
+   ```
+
+See [LOCAL_SETUP.md](LOCAL_SETUP.md) for detailed local setup instructions.
+
+### Option 3: Cloud AI (Claude/Anthropic)
+
+Use `ANTHROPIC_API_KEY` in `.env` instead of `GOOGLE_API_KEY`.
+
+---
+
+Navigate in Neuroglancer and watch the AI narrate your exploration in real-time!
 
 ## Requirements
 
