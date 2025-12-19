@@ -17,7 +17,12 @@ from narrator import Narrator
 class NG_StateTracker:
     """Manages Neuroglancer viewer, state tracking, and screenshot capture."""
 
-    def __init__(self, bind_address='127.0.0.1', port=9999, narrator_callback: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        bind_address="127.0.0.1",
+        port=9999,
+        narrator_callback: Optional[Callable[[str], None]] = None,
+    ):
         self.bind_address = bind_address
         self.port = port
 
@@ -55,37 +60,37 @@ class NG_StateTracker:
         """Add HeLa cell EM data with organelle segmentations."""
         with self.viewer.txn() as s:
             # HeLa-2 cell EM data
-            s.layers['fibsem-uint8'] = neuroglancer.ImageLayer(
-                source='zarr://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.zarr/recon-1/em/fibsem-uint8/'
+            s.layers["fibsem-uint8"] = neuroglancer.ImageLayer(
+                source="zarr://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.zarr/recon-1/em/fibsem-uint8/"
             )
-            
+
             # Organelle segmentations
-            s.layers['endo_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/endo_seg'
+            s.layers["endo_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/endo_seg"
             )
-            s.layers['er_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/er_seg'
+            s.layers["er_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/er_seg"
             )
-            s.layers['golgi_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/golgi_seg'
+            s.layers["golgi_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/golgi_seg"
             )
-            s.layers['mito_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/mito_seg'
+            s.layers["mito_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/mito_seg"
             )
-            s.layers['nucleus_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/nucleus_seg'
+            s.layers["nucleus_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/nucleus_seg"
             )
-            s.layers['pm_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/pm_seg'
+            s.layers["pm_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/pm_seg"
             )
-            s.layers['vesicle_seg'] = neuroglancer.SegmentationLayer(
-                source='n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/vesicle_seg'
+            s.layers["vesicle_seg"] = neuroglancer.SegmentationLayer(
+                source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/vesicle_seg"
             )
-            
+
             # Set initial view position and zoom
             # HeLa-2 dataset has 4nm voxel resolution
             s.position = [24000.5, 3199.5, 16684.5]
-            
+
             # Set zoom level for ~5 micron scale bar
             s.cross_section_scale = 5
             s.projection_scale = 5
@@ -121,37 +126,37 @@ class NG_StateTracker:
         summary = {}
 
         # Position
-        if 'position' in state:
-            summary['position'] = state['position']
+        if "position" in state:
+            summary["position"] = state["position"]
 
         # Cross-section scale/zoom
-        if 'crossSectionScale' in state:
-            summary['scale'] = state['crossSectionScale']
+        if "crossSectionScale" in state:
+            summary["scale"] = state["crossSectionScale"]
 
         # Orientation
-        if 'crossSectionOrientation' in state:
-            summary['orientation'] = state['crossSectionOrientation']
+        if "crossSectionOrientation" in state:
+            summary["orientation"] = state["crossSectionOrientation"]
 
         # Visible layers
         layers_info = []
-        if 'layers' in state:
-            for layer in state['layers']:
+        if "layers" in state:
+            for layer in state["layers"]:
                 layer_info = {
-                    'name': layer.get('name', 'unnamed'),
-                    'type': layer.get('type', 'unknown'),
-                    'visible': layer.get('visible', True)
+                    "name": layer.get("name", "unnamed"),
+                    "type": layer.get("type", "unknown"),
+                    "visible": layer.get("visible", True),
                 }
                 layers_info.append(layer_info)
-        summary['layers'] = layers_info
+        summary["layers"] = layers_info
 
         # Selected segments
         selected_segments = []
-        if 'layers' in state:
-            for layer in state['layers']:
-                if 'segments' in layer:
-                    selected_segments.extend(layer['segments'])
+        if "layers" in state:
+            for layer in state["layers"]:
+                if "segments" in layer:
+                    selected_segments.extend(layer["segments"])
         if selected_segments:
-            summary['selected_segments'] = selected_segments
+            summary["selected_segments"] = selected_segments
 
         return summary
 
@@ -161,27 +166,29 @@ class NG_StateTracker:
             return True
 
         # Check position change
-        if 'position' in prev and 'position' in curr:
-            prev_pos = prev['position']
-            curr_pos = curr['position']
+        if "position" in prev and "position" in curr:
+            prev_pos = prev["position"]
+            curr_pos = curr["position"]
             if len(prev_pos) >= 3 and len(curr_pos) >= 3:
-                distance = sum((a - b) ** 2 for a, b in zip(prev_pos[:3], curr_pos[:3])) ** 0.5
+                distance = (
+                    sum((a - b) ** 2 for a, b in zip(prev_pos[:3], curr_pos[:3])) ** 0.5
+                )
                 if distance > self.position_threshold:
                     return True
 
         # Check scale change
-        if 'scale' in prev and 'scale' in curr:
-            scale_ratio = abs(curr['scale'] - prev['scale']) / (prev['scale'] + 1e-10)
+        if "scale" in prev and "scale" in curr:
+            scale_ratio = abs(curr["scale"] - prev["scale"]) / (prev["scale"] + 1e-10)
             if scale_ratio > self.scale_threshold:
                 return True
 
         # Check selection change
-        if prev.get('selected_segments') != curr.get('selected_segments'):
+        if prev.get("selected_segments") != curr.get("selected_segments"):
             return True
 
         # Check layer visibility change
-        prev_layers = {l['name']: l['visible'] for l in prev.get('layers', [])}
-        curr_layers = {l['name']: l['visible'] for l in curr.get('layers', [])}
+        prev_layers = {l["name"]: l["visible"] for l in prev.get("layers", [])}
+        curr_layers = {l["name"]: l["visible"] for l in curr.get("layers", [])}
         if prev_layers != curr_layers:
             return True
 
@@ -191,18 +198,18 @@ class NG_StateTracker:
         """Print a compact state summary."""
         parts = []
 
-        if 'position' in summary:
-            pos = summary['position']
+        if "position" in summary:
+            pos = summary["position"]
             parts.append(f"pos=[{pos[0]:.0f}, {pos[1]:.0f}, {pos[2]:.0f}]")
 
-        if 'scale' in summary:
+        if "scale" in summary:
             parts.append(f"scale={summary['scale']:.2f}")
 
-        if 'selected_segments' in summary:
-            segs = summary['selected_segments']
+        if "selected_segments" in summary:
+            segs = summary["selected_segments"]
             parts.append(f"selected={segs}")
 
-        visible_layers = [l['name'] for l in summary.get('layers', []) if l['visible']]
+        visible_layers = [l["name"] for l in summary.get("layers", []) if l["visible"]]
         if visible_layers:
             parts.append(f"layers={visible_layers}")
 
@@ -219,9 +226,7 @@ class NG_StateTracker:
         self.screenshot_dirty = True
 
         self.screenshot_thread = threading.Thread(
-            target=self._screenshot_loop,
-            args=(max_fps,),
-            daemon=True
+            target=self._screenshot_loop, args=(max_fps,), daemon=True
         )
         self.screenshot_thread.start()
         print(f"Screenshot loop started at max {max_fps} fps")
@@ -252,40 +257,62 @@ class NG_StateTracker:
             try:
                 print(f"[DEBUG] Attempting screenshot capture...", flush=True)
                 print(f"[DEBUG] Viewer object: {self.viewer}", flush=True)
-                print(f"[DEBUG] Viewer has screenshot method: {hasattr(self.viewer, 'screenshot')}", flush=True)
+                print(
+                    f"[DEBUG] Viewer has screenshot method: {hasattr(self.viewer, 'screenshot')}",
+                    flush=True,
+                )
 
                 # Try screenshot with timeout using threading
-                screenshot_result = {'reply': None, 'error': None}
-                
+                screenshot_result = {"reply": None, "error": None}
+
                 def get_screenshot():
                     try:
-                        print(f"[DEBUG] Inside screenshot thread, calling viewer.screenshot()...", flush=True)
+                        print(
+                            f"[DEBUG] Inside screenshot thread, calling viewer.screenshot()...",
+                            flush=True,
+                        )
                         # Use browser's natural window size (no resize)
                         result = self.viewer.screenshot()
-                        print(f"[DEBUG] viewer.screenshot() returned: {result}", flush=True)
-                        screenshot_result['reply'] = result
+                        print(
+                            f"[DEBUG] viewer.screenshot() returned: {result}",
+                            flush=True,
+                        )
+                        screenshot_result["reply"] = result
                     except Exception as e:
-                        print(f"[DEBUG] Exception in screenshot thread: {e}", flush=True)
-                        screenshot_result['error'] = str(e)
-                
+                        print(
+                            f"[DEBUG] Exception in screenshot thread: {e}", flush=True
+                        )
+                        screenshot_result["error"] = str(e)
+
                 screenshot_thread = threading.Thread(target=get_screenshot, daemon=True)
                 screenshot_thread.start()
-                print(f"[DEBUG] Screenshot thread started, waiting up to 30 seconds...", flush=True)
-                screenshot_thread.join(timeout=30.0)  # 30 second timeout (EM data takes time to render)
-                
+                print(
+                    f"[DEBUG] Screenshot thread started, waiting up to 30 seconds...",
+                    flush=True,
+                )
+                screenshot_thread.join(
+                    timeout=30.0
+                )  # 30 second timeout (EM data takes time to render)
+
                 if screenshot_thread.is_alive():
-                    print(f"[WARN] Screenshot call timed out (still blocking), will retry", flush=True)
+                    print(
+                        f"[WARN] Screenshot call timed out (still blocking), will retry",
+                        flush=True,
+                    )
                     self.screenshot_dirty = False
                     time.sleep(1.0)
                     continue
-                    
-                if screenshot_result['error']:
-                    print(f"[ERROR] Screenshot failed: {screenshot_result['error']}", flush=True)
+
+                if screenshot_result["error"]:
+                    print(
+                        f"[ERROR] Screenshot failed: {screenshot_result['error']}",
+                        flush=True,
+                    )
                     self.screenshot_dirty = False
                     time.sleep(1.0)
                     continue
-                    
-                if not screenshot_result['reply']:
+
+                if not screenshot_result["reply"]:
                     print(f"[WARN] Screenshot returned no data", flush=True)
                     self.screenshot_dirty = False
                     time.sleep(1.0)
@@ -294,21 +321,24 @@ class NG_StateTracker:
                 print(f"[DEBUG] Screenshot method returned!", flush=True)
 
                 # Extract PNG bytes from the reply object (using .image attribute)
-                png_bytes = screenshot_result['reply'].screenshot.image
-                print(f"[DEBUG] Screenshot captured: {len(png_bytes)} bytes PNG", flush=True)
+                png_bytes = screenshot_result["reply"].screenshot.image
+                print(
+                    f"[DEBUG] Screenshot captured: {len(png_bytes)} bytes PNG",
+                    flush=True,
+                )
 
                 # Convert PNG to JPEG to reduce bandwidth
                 png_image = Image.open(io.BytesIO(png_bytes))
                 jpeg_buffer = io.BytesIO()
-                png_image.convert('RGB').save(jpeg_buffer, format='JPEG', quality=85)
+                png_image.convert("RGB").save(jpeg_buffer, format="JPEG", quality=85)
                 jpeg_bytes = jpeg_buffer.getvalue()
 
                 # Store frame
                 self.latest_frame = {
-                    'jpeg_bytes': jpeg_bytes,
-                    'jpeg_b64': base64.b64encode(jpeg_bytes).decode('utf-8'),
-                    'timestamp': current_time,
-                    'state': self.current_state_summary
+                    "jpeg_bytes": jpeg_bytes,
+                    "jpeg_b64": base64.b64encode(jpeg_bytes).decode("utf-8"),
+                    "timestamp": current_time,
+                    "state": self.current_state_summary,
                 }
                 self.latest_frame_ts = current_time
 
@@ -321,6 +351,7 @@ class NG_StateTracker:
             except Exception as e:
                 print(f"[ERROR] Failed to capture screenshot: {e}", flush=True)
                 import traceback
+
                 traceback.print_exc()
                 self.screenshot_dirty = False
                 time.sleep(0.5)

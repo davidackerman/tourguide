@@ -17,17 +17,29 @@ load_dotenv()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Neuroglancer Live Stream Server')
-    parser.add_argument('--ng-host', default='0.0.0.0',
-                        help='Neuroglancer bind address (default: 0.0.0.0)')
-    parser.add_argument('--ng-port', type=int, default=9999,
-                        help='Neuroglancer port (default: 9999)')
-    parser.add_argument('--web-host', default='0.0.0.0',
-                        help='Web server bind address (default: 0.0.0.0)')
-    parser.add_argument('--web-port', type=int, default=8090,
-                        help='Web server port (default: 8090)')
-    parser.add_argument('--fps', type=float, default=0.1,
-                        help='Maximum screenshot frame rate (default: 0.1)')
+    parser = argparse.ArgumentParser(description="Neuroglancer Live Stream Server")
+    parser.add_argument(
+        "--ng-host",
+        default="0.0.0.0",
+        help="Neuroglancer bind address (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--ng-port", type=int, default=9999, help="Neuroglancer port (default: 9999)"
+    )
+    parser.add_argument(
+        "--web-host",
+        default="0.0.0.0",
+        help="Web server bind address (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--web-port", type=int, default=8090, help="Web server port (default: 8090)"
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=0.1,
+        help="Maximum screenshot frame rate (default: 0.1)",
+    )
     args = parser.parse_args()
 
     print("=" * 60, flush=True)
@@ -35,7 +47,10 @@ def main():
     print("=" * 60, flush=True)
 
     # Initialize Neuroglancer tracker
-    print(f"\n[1/3] Starting Neuroglancer viewer on {args.ng_host}:{args.ng_port}...", flush=True)
+    print(
+        f"\n[1/3] Starting Neuroglancer viewer on {args.ng_host}:{args.ng_port}...",
+        flush=True,
+    )
     tracker = NG_StateTracker(bind_address=args.ng_host, port=args.ng_port)
     print(f"      Neuroglancer URL: {tracker.get_url()}", flush=True)
 
@@ -48,7 +63,9 @@ def main():
     hostname = socket.gethostname()
 
     # Create and run FastAPI app
-    print(f"\n[3/3] Starting web server on {args.web_host}:{args.web_port}...", flush=True)
+    print(
+        f"\n[3/3] Starting web server on {args.web_host}:{args.web_port}...", flush=True
+    )
     app = create_app(tracker)
     print(f"      Web panel: http://{hostname}:{args.web_port}/", flush=True)
 

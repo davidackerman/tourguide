@@ -38,7 +38,7 @@ def create_app(tracker) -> FastAPI:
         message = {
             "type": "narration",
             "text": narration_text,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
         disconnected = set()
         for connection in active_connections:
@@ -95,25 +95,28 @@ def create_app(tracker) -> FastAPI:
         # Return PROXIED URL through same origin (port 8090)
         ng_url = ng_tracker.get_url()
         # Extract the path portion (everything after the host)
-        if '/v/' in ng_url:
-            path = ng_url.split('/v/', 1)[1]
+        if "/v/" in ng_url:
+            path = ng_url.split("/v/", 1)[1]
             proxied_url = f"/ng-proxy/v/{path}"
         else:
             proxied_url = "/ng-proxy/"
         return {"url": proxied_url}
 
-    @app.api_route("/ng-proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
+    @app.api_route(
+        "/ng-proxy/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
+    )
     async def neuroglancer_proxy(path: str, request: Request):
         """Proxy all requests to Neuroglancer server to avoid cross-origin issues."""
         # Get the Neuroglancer base URL (http://host:port)
         ng_url = ng_tracker.get_url()
         # Extract just protocol + host + port
-        if '://' in ng_url:
-            parts = ng_url.split('://')
+        if "://" in ng_url:
+            parts = ng_url.split("://")
             protocol = parts[0]
             rest = parts[1]
-            if '/' in rest:
-                host_port = rest.split('/', 1)[0]
+            if "/" in rest:
+                host_port = rest.split("/", 1)[0]
             else:
                 host_port = rest
             base_url = f"{protocol}://{host_port}"
@@ -130,26 +133,26 @@ def create_app(tracker) -> FastAPI:
             proxy_url += f"?{query_string}"
 
         # Special handling for Server-Sent Events (SSE) /events endpoint
-        if path.startswith('events/'):
+        if path.startswith("events/"):
             # For SSE, we need to stream the response
             async def event_stream():
                 async with httpx.AsyncClient(timeout=None) as client:
                     async with client.stream(
                         method=request.method,
                         url=proxy_url,
-                        headers={k: v for k, v in request.headers.items()
-                                if k.lower() not in ['host', 'connection']}
+                        headers={
+                            k: v
+                            for k, v in request.headers.items()
+                            if k.lower() not in ["host", "connection"]
+                        },
                     ) as response:
                         async for chunk in response.aiter_bytes():
                             yield chunk
-            
+
             return StreamingResponse(
                 event_stream(),
                 media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no"
-                }
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
         # For other requests, use normal proxying
@@ -159,23 +162,30 @@ def create_app(tracker) -> FastAPI:
                 response = await client.request(
                     method=request.method,
                     url=proxy_url,
-                    headers={k: v for k, v in request.headers.items()
-                            if k.lower() not in ['host', 'connection']},
-                    content=await request.body() if request.method in ['POST', 'PUT', 'PATCH'] else None,
-                    timeout=30.0
+                    headers={
+                        k: v
+                        for k, v in request.headers.items()
+                        if k.lower() not in ["host", "connection"]
+                    },
+                    content=(
+                        await request.body()
+                        if request.method in ["POST", "PUT", "PATCH"]
+                        else None
+                    ),
+                    timeout=30.0,
                 )
 
                 # Inject screenshot handler script into HTML responses
                 content = response.content
-                content_type = response.headers.get('content-type', '')
+                content_type = response.headers.get("content-type", "")
                 headers = dict(response.headers)
 
-                if 'text/html' in content_type:
+                if "text/html" in content_type:
                     try:
-                        html = content.decode('utf-8')
-                        
+                        html = content.decode("utf-8")
+
                         # Inject WebGL monkey-patch FIRST (before any other scripts)
-                        webgl_patch = '''<script>
+                        webgl_patch = """<script>
 (function() {
     console.log('[WEBGL-PATCH] Monkey-patching getContext to force preserveDrawingBuffer');
     const originalGetContext = HTMLCanvasElement.prototype.getContext;
@@ -188,29 +198,36 @@ def create_app(tracker) -> FastAPI:
         return originalGetContext.call(this, type, attributes);
     };
 })();
-</script>'''
-                        
+</script>"""
+
                         # Inject at the very beginning of <head> or <html>
-                        if '<head>' in html:
-                            html = html.replace('<head>', f'<head>{webgl_patch}')
-                        elif '<html>' in html:
-                            html = html.replace('<html>', f'<html>{webgl_patch}')
+                        if "<head>" in html:
+                            html = html.replace("<head>", f"<head>{webgl_patch}")
+                        elif "<html>" in html:
+                            html = html.replace("<html>", f"<html>{webgl_patch}")
                         else:
                             html = webgl_patch + html
-                        
+
                         # Also inject the screenshot handler
-                        script_content = open(Path(__file__).parent.parent / 'web' / 'ng-screenshot-handler.js', 'r').read()
-                        script_tag = f'<script>{script_content}</script>'
-                        if '</head>' in html:
-                            html = html.replace('</head>', f'{script_tag}</head>')
-                        elif '</body>' in html:
-                            html = html.replace('</body>', f'{script_tag}</body>')
+                        script_content = open(
+                            Path(__file__).parent.parent
+                            / "web"
+                            / "ng-screenshot-handler.js",
+                            "r",
+                        ).read()
+                        script_tag = f"<script>{script_content}</script>"
+                        if "</head>" in html:
+                            html = html.replace("</head>", f"{script_tag}</head>")
+                        elif "</body>" in html:
+                            html = html.replace("</body>", f"{script_tag}</body>")
                         else:
                             html += script_tag
-                        content = html.encode('utf-8')
+                        content = html.encode("utf-8")
                         # Update Content-Length header
-                        headers['content-length'] = str(len(content))
-                        print(f"[PROXY] Injected WebGL patch and screenshot handler into HTML")
+                        headers["content-length"] = str(len(content))
+                        print(
+                            f"[PROXY] Injected WebGL patch and screenshot handler into HTML"
+                        )
                     except Exception as e:
                         print(f"[PROXY] Failed to inject script: {e}")
 
@@ -219,7 +236,7 @@ def create_app(tracker) -> FastAPI:
                     content=content,
                     status_code=response.status_code,
                     headers=headers,
-                    media_type=response.headers.get('content-type')
+                    media_type=response.headers.get("content-type"),
                 )
         except Exception as e:
             print(f"[PROXY ERROR] Failed to proxy {proxy_url}: {e}")
@@ -230,8 +247,8 @@ def create_app(tracker) -> FastAPI:
         """Receive screenshot from browser client."""
         try:
             data = await request.json()
-            jpeg_b64 = data.get('jpeg_b64')
-            timestamp = data.get('timestamp', time.time())
+            jpeg_b64 = data.get("jpeg_b64")
+            timestamp = data.get("timestamp", time.time())
 
             if jpeg_b64:
                 # Capture current viewer state
@@ -240,19 +257,23 @@ def create_app(tracker) -> FastAPI:
                         state_json = s.to_json()
                     summary = ng_tracker.summarize_state(state_json)
                     ng_tracker.current_state_summary = summary
-                    print(f"[STATE] Updated: pos={summary.get('position', 'N/A')}", flush=True)
+                    print(
+                        f"[STATE] Updated: pos={summary.get('position', 'N/A')}",
+                        flush=True,
+                    )
                 except Exception as e:
                     print(f"[STATE] Error getting state: {e}", flush=True)
-                
+
                 # Store the frame from client
                 import base64
+
                 jpeg_bytes = base64.b64decode(jpeg_b64)
 
                 ng_tracker.latest_frame = {
-                    'jpeg_bytes': jpeg_bytes,
-                    'jpeg_b64': jpeg_b64,
-                    'timestamp': timestamp,
-                    'state': ng_tracker.current_state_summary
+                    "jpeg_bytes": jpeg_bytes,
+                    "jpeg_b64": jpeg_b64,
+                    "timestamp": timestamp,
+                    "state": ng_tracker.current_state_summary,
                 }
                 ng_tracker.latest_frame_ts = timestamp
                 print(f"[SCREENSHOT] Received from client: {len(jpeg_bytes)} bytes")
@@ -272,15 +293,16 @@ def create_app(tracker) -> FastAPI:
             # Save to file for inspection
             import base64
             from pathlib import Path
+
             debug_path = Path("/tmp/ng_screenshot_debug.jpg")
             with open(debug_path, "wb") as f:
-                f.write(base64.b64decode(latest_frame['jpeg_b64']))
+                f.write(base64.b64decode(latest_frame["jpeg_b64"]))
             return {
                 "status": "ok",
-                "size": len(latest_frame['jpeg_bytes']),
-                "timestamp": latest_frame['timestamp'],
+                "size": len(latest_frame["jpeg_bytes"]),
+                "timestamp": latest_frame["timestamp"],
                 "saved_to": str(debug_path),
-                "preview_url": f"data:image/jpeg;base64,{latest_frame['jpeg_b64'][:100]}..."
+                "preview_url": f"data:image/jpeg;base64,{latest_frame['jpeg_b64'][:100]}...",
             }
         return {"status": "no_frames"}
 
@@ -299,12 +321,12 @@ def create_app(tracker) -> FastAPI:
             if latest_frame:
                 message = {
                     "type": "frame",
-                    "ts": latest_frame['timestamp'],
-                    "jpeg_b64": latest_frame['jpeg_b64'],
-                    "state": latest_frame['state']
+                    "ts": latest_frame["timestamp"],
+                    "jpeg_b64": latest_frame["jpeg_b64"],
+                    "state": latest_frame["state"],
                 }
                 await websocket.send_json(message)
-                last_sent_timestamp = latest_frame['timestamp']
+                last_sent_timestamp = latest_frame["timestamp"]
                 print(f"[WS] Sent initial frame")
 
             # Keep connection alive and send updates
@@ -316,43 +338,52 @@ def create_app(tracker) -> FastAPI:
                 try:
                     with ng_tracker.viewer.txn() as s:
                         state_json = s.to_json()
-                    ng_tracker.current_state_summary = ng_tracker.summarize_state(state_json)
+                    ng_tracker.current_state_summary = ng_tracker.summarize_state(
+                        state_json
+                    )
                 except Exception as e:
                     pass  # Silently skip state update errors
 
                 latest_frame = ng_tracker.get_latest_frame()
                 if latest_frame:
                     # Update state in the frame
-                    latest_frame['state'] = ng_tracker.current_state_summary
-                    
+                    latest_frame["state"] = ng_tracker.current_state_summary
+
                     # Check if we should generate narration
-                    if ng_tracker.narrator.should_narrate(ng_tracker.current_state_summary):
+                    if ng_tracker.narrator.should_narrate(
+                        ng_tracker.current_state_summary
+                    ):
                         print(f"[NARRATOR] Generating narration...", flush=True)
                         narration = ng_tracker.narrator.generate_narration(
                             ng_tracker.current_state_summary,
-                            screenshot_b64=latest_frame['jpeg_b64']
+                            screenshot_b64=latest_frame["jpeg_b64"],
                         )
                         if narration:
                             # Send narration message
                             narration_msg = {
                                 "type": "narration",
                                 "text": narration,
-                                "timestamp": time.time()
+                                "timestamp": time.time(),
                             }
                             await websocket.send_json(narration_msg)
                             print(f"[NARRATOR] Sent: {narration}", flush=True)
-                    
+
                     # Only send if this is a new frame
-                    if last_sent_timestamp is None or latest_frame['timestamp'] > last_sent_timestamp:
+                    if (
+                        last_sent_timestamp is None
+                        or latest_frame["timestamp"] > last_sent_timestamp
+                    ):
                         message = {
                             "type": "frame",
-                            "ts": latest_frame['timestamp'],
-                            "jpeg_b64": latest_frame['jpeg_b64'],
-                            "state": latest_frame['state']
+                            "ts": latest_frame["timestamp"],
+                            "jpeg_b64": latest_frame["jpeg_b64"],
+                            "state": latest_frame["state"],
                         }
                         await websocket.send_json(message)
-                        last_sent_timestamp = latest_frame['timestamp']
-                        print(f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f})")
+                        last_sent_timestamp = latest_frame["timestamp"]
+                        print(
+                            f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f})"
+                        )
 
         except WebSocketDisconnect:
             print(f"[WS] Client disconnected")
@@ -364,17 +395,19 @@ def create_app(tracker) -> FastAPI:
 
     # Mount static files for JS/CSS with no-cache headers
     web_dir = Path(__file__).parent.parent / "web"
-    
+
     # Custom StaticFiles class to add cache-control headers
     class NoCacheStaticFiles(StaticFiles):
         async def get_response(self, path, scope):
             response = await super().get_response(path, scope)
             if isinstance(response, Response):
-                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Cache-Control"] = (
+                    "no-cache, no-store, must-revalidate"
+                )
                 response.headers["Pragma"] = "no-cache"
                 response.headers["Expires"] = "0"
             return response
-    
+
     app.mount("/static", NoCacheStaticFiles(directory=str(web_dir)), name="static")
 
     return app
