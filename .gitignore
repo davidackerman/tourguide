@@ -46,6 +46,9 @@ test_*.wav
 # Voice recording files
 voice_recording/
 
+# Movie recordings
+recordings/
+
 # Ignore directory
 ignore/
 
