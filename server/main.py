@@ -18,6 +18,12 @@ import uvicorn
 # Load environment variables from .env file
 load_dotenv()
 
+# Set OLLAMA_MODELS path if specified in .env
+ollama_models_path = os.getenv("OLLAMA_MODELS")
+if ollama_models_path:
+    os.environ["OLLAMA_MODELS"] = ollama_models_path
+    print(f"[OLLAMA] Using custom models path: {ollama_models_path}", flush=True)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Neuroglancer Live Stream Server")
