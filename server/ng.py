@@ -22,16 +22,21 @@ class NG_StateTracker:
         bind_address="127.0.0.1",
         port=9999,
         narrator_callback: Optional[Callable[[str], None]] = None,
+        use_hela=False,
     ):
         self.bind_address = bind_address
         self.port = port
+        self.use_hela = use_hela
 
         # Viewer setup
         neuroglancer.set_server_bind_address(bind_address, bind_port=port)
         self.viewer = neuroglancer.Viewer()
 
-        # Add sample EM data
-        self._add_sample_data()
+        # Add sample EM data (C. elegans by default, HeLa if flag set)
+        if use_hela:
+            self._add_hela_data()
+        else:
+            self._add_celegans_data()
 
         # State tracking
         self.last_state_summary = None
@@ -56,7 +61,50 @@ class NG_StateTracker:
         # Register state change callback (for config changes only)
         self.viewer.config_state.add_changed_callback(self._on_state_change)
 
-    def _add_sample_data(self):
+    def _add_celegans_data(self):
+        """Add C. elegans embryo EM data with organelle segmentations (default)."""
+        with self.viewer.txn() as s:
+            # C. elegans comma stage embryo EM data (via local cellmap-vm1 server)
+            # Note: /nrs/cellmap/data/... maps to https://cellmap-vm1.int.janelia.org/nrs/data/...
+            base_url = "precomputed://https://cellmap-vm1.int.janelia.org/nrs/data/jrc_c-elegans-comma-1/jrc_c-elegans-comma-1.zarr/recon-1"
+
+            s.layers["fibsem-uint8"] = neuroglancer.ImageLayer(
+                source=f"{base_url}/em/fibsem-uint8/"
+            )
+
+            # Organelle segmentations
+            seg_base = f"{base_url}/labels/inference/segmentations"
+
+            s.layers["cell"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/cell/"
+            )
+            s.layers["ld"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/ld/"
+            )
+            s.layers["lyso"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/lyso/"
+            )
+            s.layers["mito_filled"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/mito_filled/"
+            )
+            s.layers["nuc"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/nuc/"
+            )
+            s.layers["perox"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/perox/"
+            )
+            s.layers["yolk"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/yolk/"
+            )
+
+            # Set initial view position (center of C. elegans dataset)
+            # You may need to adjust these coordinates based on the actual dataset dimensions
+            s.position = [5000, 5000, 5000]
+
+            # Set 3D view orientation
+            s.projection_orientation = [0, 0, 0, 1]
+
+    def _add_hela_data(self):
         """Add HeLa cell EM data with organelle segmentations."""
         with self.viewer.txn() as s:
             # HeLa-2 cell EM data
@@ -91,7 +139,7 @@ class NG_StateTracker:
             # HeLa-2 dataset has 4nm voxel resolution
             s.position = [24000.512 / 2, 3199.5 / 2, 16684.5 / 2]
 
-            # Also set the projection orientation to 3D view
+            # Set 3D view orientation
             s.projection_orientation = [0, 0, 0, 1]
 
     def _on_state_change(self):
