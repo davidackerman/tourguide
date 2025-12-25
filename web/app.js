@@ -26,7 +26,7 @@ class NGLiveStream {
         this.recordedFrameCount = 0;
 
         // Query mode state
-        this.currentMode = 'explore';
+        this.currentMode = 'query';  // Default to query mode
         this.chatHistory = [];
 
         // DOM elements
