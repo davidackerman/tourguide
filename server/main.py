@@ -54,6 +54,11 @@ def main():
         action="store_true",
         help="Enable debug mode (uses example narration instead of AI)",
     )
+    parser.add_argument(
+        "--hela",
+        action="store_true",
+        help="Use HeLa dataset instead of C. elegans (default: C. elegans)",
+    )
     args = parser.parse_args()
 
     # Set debug environment variable if flag is provided
@@ -66,11 +71,13 @@ def main():
     print("=" * 60, flush=True)
 
     # Initialize Neuroglancer tracker
+    dataset_name = "HeLa-2" if args.hela else "C. elegans comma stage"
     print(
         f"\n[1/4] Starting Neuroglancer viewer on {args.ng_host}:{args.ng_port}...",
         flush=True,
     )
-    tracker = NG_StateTracker(bind_address=args.ng_host, port=args.ng_port)
+    print(f"      Dataset: {dataset_name}", flush=True)
+    tracker = NG_StateTracker(bind_address=args.ng_host, port=args.ng_port, use_hela=args.hela)
     print(f"      Neuroglancer URL: {tracker.get_url()}", flush=True)
 
     # Initialize organelle database (NEW)
