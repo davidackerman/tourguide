@@ -87,13 +87,12 @@ class NG_StateTracker:
                 source="n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/vesicle_seg"
             )
 
-            # Set initial view position and zoom
+            # Set initial view position
             # HeLa-2 dataset has 4nm voxel resolution
-            s.position = [24000.5, 3199.5, 16684.5]
+            s.position = [24000.512 / 2, 3199.5 / 2, 16684.5 / 2]
 
-            # Set zoom level for ~5 micron scale bar
-            s.cross_section_scale = 5
-            s.projection_scale = 5
+            # Also set the projection orientation to 3D view
+            s.projection_orientation = [0, 0, 0, 1]
 
     def _on_state_change(self):
         """Called whenever viewer state changes."""
