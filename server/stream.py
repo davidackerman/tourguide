@@ -44,7 +44,9 @@ def create_app(tracker, query_agent=None) -> FastAPI:
     recording_manager = RecordingManager()
 
     # Mode state (explore vs query)
-    current_mode = {"mode": "explore"}
+    # Default to query mode if query_agent is available, otherwise explore
+    default_mode = "query" if query_agent else "explore"
+    current_mode = {"mode": default_mode}
 
     async def broadcast_narration(narration_text: str):
         """Broadcast narration to all connected clients."""
