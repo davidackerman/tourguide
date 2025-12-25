@@ -25,6 +25,10 @@ class NGLiveStream {
         this.currentSessionId = null;
         this.recordedFrameCount = 0;
 
+        // Query mode state
+        this.currentMode = 'explore';
+        this.chatHistory = [];
+
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
         this.frameImg = document.getElementById('frame');
@@ -50,6 +54,15 @@ class NGLiveStream {
         this.compilationProgress = document.getElementById('compilation-progress');
         this.progressFill = document.getElementById('progress-fill');
         this.progressText = document.getElementById('progress-text');
+
+        // Query mode UI elements
+        this.modeExploreBtn = document.getElementById('mode-explore');
+        this.modeQueryBtn = document.getElementById('mode-query');
+        this.chatPanel = document.getElementById('chat-panel');
+        this.chatMessagesContainer = document.getElementById('chat-messages');
+        this.chatInput = document.getElementById('chat-input');
+        this.chatSend = document.getElementById('chat-send');
+        this.sidePanels = document.querySelector('.side-panels');
 
         // Enable audio on ANY user interaction
         const enableAudioOnInteraction = () => {
@@ -92,8 +105,13 @@ class NGLiveStream {
         // Setup recording controls
         this.setupRecordingControls();
 
+        // Setup query mode controls
+        this.setupModeToggle();
+        this.setupChatHandlers();
+
         this.loadNeuroglancerURL();
         this.connect();
+        this.syncMode();
         // Re-enable client-side screenshot capture (no cross-origin data now)
         this.setupPageScreenshotCapture();
     }
@@ -301,6 +319,10 @@ class NGLiveStream {
             this.handleFrame(data);
         } else if (data.type === 'narration') {
             this.handleNarration(data);
+        } else if (data.type === 'mode_change') {
+            this.currentMode = data.mode;
+            this.updateModeUI();
+            console.log(`[MODE] Received mode change: ${data.mode}`);
         }
     }
 
@@ -1039,6 +1061,165 @@ class NGLiveStream {
                 console.error('[RECORDING] Compilation status poll error:', e);
             }
         }, 2000);
+    }
+
+    // Query Mode Methods
+    async syncMode() {
+        try {
+            const response = await fetch('/api/mode');
+            const data = await response.json();
+            this.currentMode = data.mode;
+            this.updateModeUI();
+        } catch (e) {
+            console.error('[MODE] Failed to sync mode:', e);
+        }
+    }
+
+    setupModeToggle() {
+        if (!this.modeExploreBtn || !this.modeQueryBtn) return;
+
+        this.modeExploreBtn.addEventListener('click', () => {
+            this.switchMode('explore');
+        });
+
+        this.modeQueryBtn.addEventListener('click', () => {
+            this.switchMode('query');
+        });
+    }
+
+    async switchMode(mode) {
+        try {
+            const response = await fetch('/api/mode/set', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode })
+            });
+
+            const data = await response.json();
+            if (data.status === 'ok') {
+                this.currentMode = mode;
+                this.updateModeUI();
+                console.log(`[MODE] Switched to ${mode} mode`);
+            } else {
+                console.error('[MODE] Failed to switch mode:', data.message);
+            }
+        } catch (e) {
+            console.error('[MODE] Failed to switch mode:', e);
+        }
+    }
+
+    updateModeUI() {
+        if (this.currentMode === 'explore') {
+            // Show explore panels
+            if (this.sidePanels) this.sidePanels.style.display = 'flex';
+            if (this.chatPanel) this.chatPanel.style.display = 'none';
+
+            // Update button states
+            if (this.modeExploreBtn) this.modeExploreBtn.classList.add('active');
+            if (this.modeQueryBtn) this.modeQueryBtn.classList.remove('active');
+        } else if (this.currentMode === 'query') {
+            // Show chat panel
+            if (this.sidePanels) this.sidePanels.style.display = 'none';
+            if (this.chatPanel) this.chatPanel.style.display = 'block';
+
+            // Update button states
+            if (this.modeExploreBtn) this.modeExploreBtn.classList.remove('active');
+            if (this.modeQueryBtn) this.modeQueryBtn.classList.add('active');
+
+            // Focus on input
+            if (this.chatInput) this.chatInput.focus();
+        }
+    }
+
+    setupChatHandlers() {
+        if (!this.chatSend || !this.chatInput) return;
+
+        this.chatSend.addEventListener('click', () => {
+            this.sendQuery();
+        });
+
+        this.chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                this.sendQuery();
+            }
+        });
+    }
+
+    async sendQuery() {
+        const query = this.chatInput.value.trim();
+        if (!query) return;
+
+        // Add user message to chat
+        this.addChatMessage('user', query);
+        this.chatInput.value = '';
+
+        // Show loading indicator
+        const loadingId = this.addChatMessage('loading', 'Processing...');
+
+        try {
+            const response = await fetch('/api/query/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query })
+            });
+
+            const data = await response.json();
+
+            // Remove loading indicator
+            this.removeChatMessage(loadingId);
+
+            if (data.status === 'ok') {
+                const result = data.result;
+
+                // Add AI response to chat
+                this.addChatMessage('ai', result.answer || 'Query processed');
+
+                // Play audio if available
+                if (data.audio) {
+                    this.queueAudio(data.audio);
+                }
+
+                // Log navigation if applicable
+                if (result.type === 'navigation') {
+                    console.log('[QUERY] Navigated to:', result.navigation);
+                }
+            } else {
+                this.addChatMessage('error', data.message || 'Query failed');
+            }
+        } catch (e) {
+            this.removeChatMessage(loadingId);
+            this.addChatMessage('error', 'Failed to send query: ' + e.message);
+            console.error('[QUERY] Error:', e);
+        }
+    }
+
+    addChatMessage(type, text) {
+        if (!this.chatMessagesContainer) return;
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `chat-message chat-${type}`;
+        messageDiv.textContent = text;
+        messageDiv.dataset.id = Date.now();
+
+        // Remove placeholder if exists
+        const placeholder = this.chatMessagesContainer.querySelector('.chat-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.chatMessagesContainer.appendChild(messageDiv);
+        this.chatMessagesContainer.scrollTop = this.chatMessagesContainer.scrollHeight;
+
+        return messageDiv.dataset.id;
+    }
+
+    removeChatMessage(id) {
+        if (!this.chatMessagesContainer) return;
+
+        const message = this.chatMessagesContainer.querySelector(`[data-id="${id}"]`);
+        if (message) {
+            message.remove();
+        }
     }
 }
 
