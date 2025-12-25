@@ -19,7 +19,11 @@ class NGLiveStream {
         this.screenshotFps = 0.5;  // Default 0.5 fps (1 screenshot every 2 seconds)
         this.lastScreenshotTime = 0;
         this.iframeReady = false;
-        this.iframeReady = false;
+
+        // Recording state
+        this.isRecording = false;
+        this.currentSessionId = null;
+        this.recordedFrameCount = 0;
 
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
@@ -34,6 +38,18 @@ class NGLiveStream {
         this.narrationContainer = document.getElementById('narration-container');
         this.screenshotFpsInput = document.getElementById('screenshot-fps');
         this.enableAudioBtn = document.getElementById('enable-audio-btn');
+
+        // Recording UI elements
+        this.transitionTypeSelect = document.getElementById('transition-type');
+        this.startRecordingBtn = document.getElementById('start-recording');
+        this.stopRecordingBtn = document.getElementById('stop-recording');
+        this.createMovieBtn = document.getElementById('create-movie');
+        this.recordingStatusText = document.getElementById('recording-status-text');
+        this.recordingFrameCount = document.getElementById('recording-frame-count');
+        this.recFrameCountSpan = document.getElementById('rec-frame-count');
+        this.compilationProgress = document.getElementById('compilation-progress');
+        this.progressFill = document.getElementById('progress-fill');
+        this.progressText = document.getElementById('progress-text');
 
         // Enable audio on ANY user interaction
         const enableAudioOnInteraction = () => {
@@ -72,6 +88,9 @@ class NGLiveStream {
                 }
             });
         }
+
+        // Setup recording controls
+        this.setupRecordingControls();
 
         this.loadNeuroglancerURL();
         this.connect();
@@ -836,6 +855,190 @@ class NGLiveStream {
         }, '*');
 
         this.lastScreenshotTime = now;
+    }
+
+    // Recording methods
+    setupRecordingControls() {
+        if (!this.startRecordingBtn || !this.stopRecordingBtn) {
+            console.warn('[RECORDING] Recording controls not found');
+            return;
+        }
+
+        // Start recording
+        this.startRecordingBtn.addEventListener('click', async () => {
+            await this.startRecording();
+        });
+
+        // Stop recording
+        this.stopRecordingBtn.addEventListener('click', async () => {
+            await this.stopRecording();
+        });
+
+        // Create movie
+        if (this.createMovieBtn) {
+            this.createMovieBtn.addEventListener('click', async () => {
+                await this.createMovie();
+            });
+        }
+
+        console.log('[RECORDING] Controls initialized');
+    }
+
+    async startRecording() {
+        try {
+            const response = await fetch('/api/recording/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fps: this.screenshotFps,
+                    transition_type: this.transitionTypeSelect.value,
+                    transition_duration: 0.5
+                })
+            });
+
+            const data = await response.json();
+            if (data.status === 'ok') {
+                this.isRecording = true;
+                this.currentSessionId = data.session_id;
+                this.recordedFrameCount = 0;
+
+                // Update UI
+                this.startRecordingBtn.disabled = true;
+                this.stopRecordingBtn.disabled = false;
+                this.recordingStatusText.textContent = 'Recording...';
+                this.recordingStatusText.style.color = '#dc3545';
+                this.recordingFrameCount.style.display = 'inline';
+                this.transitionTypeSelect.disabled = true;
+                this.createMovieBtn.style.display = 'none';
+
+                // Start polling recording status
+                this.startRecordingStatusPolling();
+
+                console.log('[RECORDING] Started:', data.session_id);
+            } else {
+                alert('Failed to start recording: ' + data.message);
+            }
+        } catch (e) {
+            console.error('[RECORDING] Start error:', e);
+            alert('Failed to start recording');
+        }
+    }
+
+    async stopRecording() {
+        try {
+            const response = await fetch('/api/recording/stop', {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+            if (data.status === 'ok') {
+                this.isRecording = false;
+
+                // Stop polling
+                this.stopRecordingStatusPolling();
+
+                // Update UI
+                this.startRecordingBtn.disabled = false;
+                this.stopRecordingBtn.disabled = true;
+                this.recordingStatusText.textContent = `Stopped (${data.frame_count} frames)`;
+                this.recordingStatusText.style.color = '#28a745';
+                this.createMovieBtn.style.display = 'inline-block';
+                this.transitionTypeSelect.disabled = false;
+
+                console.log('[RECORDING] Stopped:', data.frame_count, 'frames');
+            } else {
+                alert('Failed to stop recording: ' + data.message);
+            }
+        } catch (e) {
+            console.error('[RECORDING] Stop error:', e);
+            alert('Failed to stop recording');
+        }
+    }
+
+    async createMovie() {
+        try {
+            this.createMovieBtn.disabled = true;
+            this.compilationProgress.style.display = 'block';
+
+            // Get current transition type from dropdown
+            const transitionType = this.transitionTypeSelect.value;
+
+            const response = await fetch('/api/recording/compile', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    transition_type: transitionType
+                })
+            });
+
+            const data = await response.json();
+            if (data.status === 'ok') {
+                console.log('[RECORDING] Compilation started:', data.session_id, 'with', transitionType);
+
+                // Start polling compilation status
+                this.startCompilationStatusPolling(data.session_id);
+            } else {
+                alert('Failed to compile movie: ' + data.message);
+                this.compilationProgress.style.display = 'none';
+                this.createMovieBtn.disabled = false;
+            }
+        } catch (e) {
+            console.error('[RECORDING] Compile error:', e);
+            alert('Failed to compile movie');
+            this.compilationProgress.style.display = 'none';
+            this.createMovieBtn.disabled = false;
+        }
+    }
+
+    startRecordingStatusPolling() {
+        this.recordingStatusInterval = setInterval(async () => {
+            try {
+                const response = await fetch('/api/recording/status');
+                const data = await response.json();
+                if (data.is_recording) {
+                    this.recFrameCountSpan.textContent = data.frame_count;
+                }
+            } catch (e) {
+                console.error('[RECORDING] Status poll error:', e);
+            }
+        }, 1000);
+    }
+
+    stopRecordingStatusPolling() {
+        if (this.recordingStatusInterval) {
+            clearInterval(this.recordingStatusInterval);
+            this.recordingStatusInterval = null;
+        }
+    }
+
+    startCompilationStatusPolling(sessionId) {
+        this.compilationStatusInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/recording/compile/status/${sessionId}`);
+                const data = await response.json();
+
+                if (data.status === 'completed') {
+                    // Success!
+                    clearInterval(this.compilationStatusInterval);
+                    this.compilationProgress.style.display = 'none';
+                    this.recordingStatusText.textContent = 'Movie ready!';
+                    this.recordingStatusText.style.color = '#007bff';
+                    this.createMovieBtn.style.display = 'none';
+
+                    alert('Movie compilation completed! Check the recordings directory.');
+                } else if (data.status === 'error') {
+                    clearInterval(this.compilationStatusInterval);
+                    this.compilationProgress.style.display = 'none';
+                    this.createMovieBtn.disabled = false;
+                    alert('Movie compilation failed');
+                }
+                // Spinner is already visible while polling, no need to update anything
+            } catch (e) {
+                console.error('[RECORDING] Compilation status poll error:', e);
+            }
+        }, 2000);
     }
 }
 
