@@ -1,6 +1,6 @@
 # Neuroglancer Live Stream
 
-A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, with AI narration powered by Gemini, Claude, or local Ollama.
+A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, with AI narration and movie recording capabilities powered by Gemini, Claude, or local Ollama.
 
 ## Features
 
@@ -8,7 +8,9 @@ A sidecar service that streams live screenshots and viewer state from Neuroglanc
 - **State Tracking**: Position, zoom, orientation, layer visibility, and segment selection
 - **WebSocket Updates**: Real-time updates to browser panel
 - **AI Narration**: Context-aware descriptions using cloud (Gemini/Claude) or local (Ollama) AI
-- **Local TTS**: Optional voice narration with Kokoro (local mode only)
+- **Voice Synthesis**: Browser-based TTS or edge-tts with multiple voices
+- **Movie Recording**: Record navigation sessions with synchronized narration
+- **Multiple Transition Modes**: Direct cuts, crossfade, or smooth state interpolation
 - **Responsive UI**: Clean dark theme with status indicators and narration history
 
 ## Quick Start
@@ -47,9 +49,27 @@ python server/main.py
 The web panel now includes:
 - **Embedded Neuroglancer viewer** (left) with sample EM data pre-loaded
 - **Live screenshots** (right top) updating as you navigate
+- **AI narration panel** (right middle) with real-time descriptions
 - **State tracking** (right bottom) showing position, zoom, layers, selections
+- **Recording controls** (bottom) to capture and compile narrated tours
 
 Navigate in the embedded viewer and watch the live stream update automatically!
+
+### Recording Tours
+
+1. **Start Recording**: Click "Start Recording" to begin capturing frames
+2. **Navigate**: Explore the dataset - narration triggers automatically on significant view changes
+3. **Stop Recording**: Click "Stop Recording" when done
+4. **Create Movie**: Choose transition style and click "Create Movie"
+   - **Direct Cuts**: Instant transitions with 2-second silent pauses
+   - **Crossfade**: Smooth dissolve transitions between views
+   - **State Interpolation**: Neuroglancer renders smooth camera movements
+
+Movies are saved to `recordings/<session_id>/output/movie.mp4` with:
+- 960x540 resolution
+- Frame duration matches audio narration length
+- 2-second silent transitions between narrations
+- Synchronized audio track
 
 See [QUICKSTART.md](QUICKSTART.md) for detailed usage guide.
 
@@ -76,16 +96,26 @@ See [QUICKSTART.md](QUICKSTART.md) for detailed usage guide.
 ### Stage 4: AI Narrator ✅
 
 - Triggers narration on meaningful state changes
-- Uses Claude 3.5 Sonnet to describe current view based on state
+- Uses Gemini, Claude, or local Ollama to describe current view
 - Context-aware prompts for EM/neuroanatomy
 - Real-time WebSocket broadcasting to all clients
 - Configurable thresholds and intervals
 
-### Stage 5: Voice (TODO)
+### Stage 5: Voice & TTS ✅
 
-- Text-to-speech for narration
-- Queue management to avoid overlap
-- Rate limiting during fast navigation
+- Browser-based TTS or edge-tts with multiple voices
+- Automatic audio playback in browser
+- Audio synchronized with narration display
+- Saved to recordings for movie compilation
+
+### Stage 6: Movie Recording ✅
+
+- Record navigation sessions with frame capture
+- Three transition modes: cuts, crossfade, interpolation
+- Frame duration matches narration audio length
+- 2-second silent transitions between narrations
+- FFmpeg-based video compilation with audio sync
+- Neuroglancer video_tool integration for smooth camera movements
 
 ## Project Structure
 
@@ -95,13 +125,15 @@ tourguide/
 │   ├── main.py          # Entry point
 │   ├── ng.py            # Neuroglancer viewer + state tracking
 │   ├── stream.py        # FastAPI WebSocket server
-│   ├── narrator.py      # (Stage 4) AI narration
-│   ├── tts.py          # (Stage 5) Text-to-speech
+│   ├── narrator.py      # AI narration engine
+│   ├── recording.py     # Movie recording and compilation
 │   └── requirements.txt # Legacy pip requirements
 ├── web/
-│   ├── index.html      # Web UI
-│   ├── app.js          # WebSocket client
-│   └── style.css       # Styling
+│   ├── index.html      # Web UI with recording controls
+│   ├── app.js          # WebSocket client + recording logic
+│   ├── style.css       # Styling with spinner animations
+│   └── ng-screenshot-handler.js  # Neuroglancer screenshot capture
+├── recordings/         # Recorded sessions (auto-created)
 ├── pixi.toml           # Pixi environment config
 └── README.md
 ```
@@ -125,8 +157,9 @@ tourguide/
 - [x] **Stage 2**: Screenshot loop
 - [x] **Stage 3**: WebSocket streaming
 - [x] **Stage 4**: AI narrator
-- [ ] **Stage 5**: Voice/TTS
-- [ ] **Stage 6**: Quality upgrades (ROI crop, UI controls, recording)
+- [x] **Stage 5**: Voice/TTS
+- [x] **Stage 6**: Movie recording and compilation
+- [ ] **Stage 7**: Quality upgrades (ROI crop, advanced UI controls)
 
 ## Using AI Narration
 
@@ -188,10 +221,11 @@ Navigate in Neuroglancer and watch the AI narrate your exploration in real-time!
 ## Requirements
 
 - Python 3.10+
-- FastAPI
-- Uvicorn
+- FastAPI & Uvicorn
 - Pillow
 - Neuroglancer
+- FFmpeg (for movie compilation)
+- edge-tts (for voice synthesis, optional)
 
 ## License
 
