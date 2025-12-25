@@ -11,6 +11,7 @@ import base64
 from PIL import Image
 from typing import Optional, Dict, Any, Callable
 import json
+import zarr
 from narrator import Narrator
 
 
@@ -63,6 +64,20 @@ class NG_StateTracker:
 
     def _add_celegans_data(self):
         """Add C. elegans embryo EM data with organelle segmentations (default)."""
+        # Load zarr to get dataset dimensions and calculate center
+        zarr_path = "/nrs/cellmap/data/jrc_c-elegans-comma-1/jrc_c-elegans-comma-1.zarr/recon-1/em/fibsem-uint8"
+        try:
+            store = zarr.DirectoryStore(zarr_path)
+            z = zarr.open(store, mode='r')
+            # Calculate center position from dataset dimensions
+            center_position = [dim // 2 for dim in z.shape]
+            print(f"[NG] C. elegans dataset shape: {z.shape}", flush=True)
+            print(f"[NG] Setting initial position to center: {center_position}", flush=True)
+        except Exception as e:
+            print(f"[NG] Could not read zarr metadata: {e}", flush=True)
+            print(f"[NG] Using default center position", flush=True)
+            center_position = [5000, 5000, 5000]
+
         with self.viewer.txn() as s:
             # C. elegans comma stage embryo EM data (via local cellmap-vm1 server)
             # Note: /nrs/cellmap/data/... maps to https://cellmap-vm1.int.janelia.org/nrs/data/...
@@ -97,9 +112,8 @@ class NG_StateTracker:
                 source=f"{seg_base}/yolk/"
             )
 
-            # Set initial view position (center of C. elegans dataset)
-            # You may need to adjust these coordinates based on the actual dataset dimensions
-            s.position = [5000, 5000, 5000]
+            # Set initial view position to center of dataset
+            s.position = center_position
 
             # Set 3D view orientation
             s.projection_orientation = [0, 0, 0, 1]
