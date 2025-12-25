@@ -21,12 +21,15 @@ from recording import RecordingManager, MovieCompiler
 ng_tracker = None
 
 
-def create_app(tracker) -> FastAPI:
+def create_app(tracker, query_agent=None) -> FastAPI:
     """Create FastAPI app with WebSocket streaming."""
     global ng_tracker
     ng_tracker = tracker
 
     app = FastAPI(title="Neuroglancer Live Stream")
+
+    # Store query agent reference
+    app.state.query_agent = query_agent
 
     # Track active WebSocket connections
     active_connections: Set[WebSocket] = set()
@@ -39,6 +42,9 @@ def create_app(tracker) -> FastAPI:
 
     # Recording manager for movie creation
     recording_manager = RecordingManager()
+
+    # Mode state (explore vs query)
+    current_mode = {"mode": "explore"}
 
     async def broadcast_narration(narration_text: str):
         """Broadcast narration to all connected clients."""
@@ -475,6 +481,104 @@ def create_app(tracker) -> FastAPI:
             "status": "error",
             "message": "Session not found"
         }
+
+    # Query Mode API endpoints
+    @app.get("/api/mode")
+    async def get_mode():
+        """Get current mode (explore or query)."""
+        return {"mode": current_mode["mode"]}
+
+    @app.post("/api/mode/set")
+    async def set_mode(request: Request):
+        """Switch between explore and query modes."""
+        try:
+            data = await request.json()
+            mode = data.get("mode", "explore")
+
+            if mode not in ["explore", "query"]:
+                return {"status": "error", "message": "Invalid mode. Must be 'explore' or 'query'."}
+
+            current_mode["mode"] = mode
+            print(f"[MODE] Switched to {mode} mode", flush=True)
+
+            # Broadcast mode change to all connected clients
+            message = {
+                "type": "mode_change",
+                "mode": mode,
+                "timestamp": time.time()
+            }
+            disconnected = set()
+            for connection in active_connections:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    disconnected.add(connection)
+            active_connections.difference_update(disconnected)
+
+            return {"status": "ok", "mode": mode}
+
+        except Exception as e:
+            print(f"[MODE] Error setting mode: {e}", flush=True)
+            return {"status": "error", "message": str(e)}
+
+    @app.post("/api/query/ask")
+    async def process_query(request: Request):
+        """Process natural language query using AI agent."""
+        if not app.state.query_agent:
+            return {
+                "status": "error",
+                "message": "Query mode not available. No database configured (check ORGANELLE_CSV_PATHS in .env)."
+            }
+
+        try:
+            data = await request.json()
+            user_query = data.get("query", "").strip()
+
+            if not user_query:
+                return {"status": "error", "message": "Empty query"}
+
+            print(f"[QUERY] Processing: {user_query}", flush=True)
+
+            # Process query with QueryAgent
+            result = app.state.query_agent.process_query(user_query)
+
+            # If navigation query, update Neuroglancer state
+            if result.get("type") == "navigation" and result.get("navigation"):
+                nav = result["navigation"]
+                try:
+                    with ng_tracker.viewer.txn() as s:
+                        s.position = nav["position"]
+                        if "scale" in nav:
+                            s.crossSectionScale = nav["scale"]
+                    print(f"[QUERY] Navigated to position {nav['position']} with scale {nav.get('scale')}", flush=True)
+                except Exception as e:
+                    print(f"[QUERY] Navigation failed: {e}", flush=True)
+                    result["navigation_error"] = str(e)
+
+            # Generate audio for response (reuse TTS pipeline)
+            audio_data = None
+            if result.get("answer"):
+                try:
+                    audio_data = await ng_tracker.narrator.generate_audio_async(result["answer"])
+                    print(f"[QUERY] Generated audio: {len(audio_data) if audio_data else 0} bytes", flush=True)
+                except Exception as e:
+                    print(f"[QUERY] Audio generation failed: {e}", flush=True)
+
+            return {
+                "status": "ok",
+                "result": result,
+                "audio": audio_data,
+                "timestamp": time.time()
+            }
+
+        except Exception as e:
+            print(f"[QUERY] Error processing query: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": f"Query processing failed: {str(e)}"
+            }
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):

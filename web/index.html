@@ -10,9 +10,15 @@
     <div class="container">
         <header>
             <h1>Neuroglancer Live Stream</h1>
-            <div class="status" id="status">
-                <span class="status-indicator"></span>
-                <span id="status-text">Connecting...</span>
+            <div class="header-controls">
+                <div class="mode-toggle">
+                    <button id="mode-explore" class="mode-btn active">🔭 Explore</button>
+                    <button id="mode-query" class="mode-btn">💬 Query</button>
+                </div>
+                <div class="status" id="status">
+                    <span class="status-indicator"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
             </div>
         </header>
 
@@ -47,6 +53,26 @@
                     <div class="state-info" id="state-info">
                         <p class="placeholder">Waiting for state updates...</p>
                     </div>
+                </div>
+            </div>
+
+            <!-- Chat Panel (for Query Mode) -->
+            <div class="chat-panel" id="chat-panel" style="display: none;">
+                <h2>Ask Questions About Organelles</h2>
+                <div class="chat-messages" id="chat-messages">
+                    <div class="chat-placeholder">
+                        <p>Ask questions about the organelle database:</p>
+                        <ul>
+                            <li>"What is the size of the biggest mito?"</li>
+                            <li>"Take me to the location of the biggest nucleus"</li>
+                            <li>"How many mitochondria are there?"</li>
+                            <li>"What is the average volume of ER?"</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="chat-input-container">
+                    <input type="text" id="chat-input" placeholder="Ask a question..." />
+                    <button id="chat-send">Send</button>
                 </div>
             </div>
         </main>
