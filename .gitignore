@@ -38,10 +38,16 @@ pixi.lock
 .coverage
 htmlcov/
 test_chatterbox.py
+test_coqui.py
 test_output.wav
+test_output_coqui.wav
+test_*.wav
 
 # Voice recording files
 voice_recording/
+
+# Ignore directory
+ignore/
 
 # Claude artifacts
 .claude/

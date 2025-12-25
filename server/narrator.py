@@ -13,15 +13,25 @@ class Narrator:
     """Generates contextual narration based on viewer state changes."""
 
     def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None):
+        # Check for debug mode
+        self.debug_mode = os.environ.get("DEBUG_MODE", "false").lower() == "true"
+
         # Auto-detect provider based on available API keys or USE_LOCAL flag
         self.provider = provider or os.environ.get("AI_PROVIDER", "auto")
         self.use_local = os.environ.get("USE_LOCAL", "false").lower() == "true"
 
-        # Check for API keys
-        anthropic_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        google_key = os.environ.get("GOOGLE_API_KEY")
+        # In debug mode, skip API initialization
+        if self.debug_mode:
+            self.enabled = True
+            self.provider = "debug"
+            print("[NARRATOR] Debug mode enabled - using example narrations")
+            # Initialize TTS engines (continue to TTS init below)
+        else:
+            # Check for API keys
+            anthropic_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            google_key = os.environ.get("GOOGLE_API_KEY")
 
-        if self.provider == "auto":
+        if not self.debug_mode and self.provider == "auto":
             if self.use_local:
                 self.provider = "local"
             elif google_key:
@@ -35,8 +45,11 @@ class Narrator:
                 self.enabled = False
                 return
 
-        # Initialize the appropriate client
-        if self.provider == "local":
+        # Initialize the appropriate client (skip in debug mode)
+        if self.debug_mode:
+            # Skip client initialization in debug mode
+            pass
+        elif self.provider == "local":
             try:
                 import ollama
 
@@ -109,11 +122,88 @@ class Narrator:
         # Initialize TTS engines
         self.tts_available = False
         self.tts_engine = None
+        self.use_coqui = os.getenv("USE_COQUI", "false").lower() == "true"
         self.use_chatterbox = os.getenv("USE_CHATTERBOX", "false").lower() == "true"
         self.voice_reference = os.getenv("VOICE_REFERENCE_PATH", None)
         self.voice_embedding = None  # Store cloned voice embedding
 
-        if self.use_chatterbox:
+        # Priority: Coqui > Chatterbox > edge-tts
+        if self.use_coqui:
+            try:
+                from TTS.api import TTS
+                import torch
+
+                self.tts_engine = "coqui"
+
+                # Initialize Coqui XTTS v2
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                print(
+                    f"[NARRATOR] Initializing Coqui XTTS v2 on {device}...", flush=True
+                )
+                self.coqui = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+
+                # If a voice reference is provided, ensure it's a WAV file
+                if self.voice_reference:
+                    # Convert to WAV if not already WAV (Coqui expects WAV/PCM readable by soundfile/torchaudio)
+                    if not self.voice_reference.lower().endswith(".wav"):
+                        try:
+                            import subprocess
+                            import tempfile
+
+                            wav_temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                            wav_path = wav_temp.name
+                            wav_temp.close()
+
+                            # Use ffmpeg to convert to 16-bit PCM WAV
+                            subprocess.run(
+                                [
+                                    "ffmpeg",
+                                    "-y",
+                                    "-i",
+                                    self.voice_reference,
+                                    "-acodec",
+                                    "pcm_s16le",
+                                    wav_path,
+                                ],
+                                check=True,
+                                capture_output=True,
+                            )
+
+                            # Replace voice_reference with converted WAV path
+                            self.voice_reference = wav_path
+                            # Remember converted path for potential cleanup
+                            self._voice_reference_converted = wav_path
+                            print(f"[NARRATOR] Converted voice reference to WAV: {wav_path}", flush=True)
+                        except Exception as conv_err:
+                            print(
+                                f"[NARRATOR] Warning: Could not convert audio format: {conv_err}",
+                                flush=True,
+                            )
+                            print(f"[NARRATOR] Will try original file...", flush=True)
+
+                    print(
+                        f"[NARRATOR] Voice cloning enabled with: {self.voice_reference}",
+                        flush=True,
+                    )
+                    print(
+                        f"[NARRATOR] TTS engine initialized (Coqui XTTS with voice cloning)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[NARRATOR] TTS engine initialized (Coqui XTTS - default voice)",
+                        flush=True,
+                    )
+
+                self.tts_available = True
+            except Exception as e:
+                print(
+                    f"[NARRATOR] Coqui TTS not available: {e}, trying Chatterbox...",
+                    flush=True,
+                )
+                self.use_coqui = False
+
+        if not self.use_coqui and self.use_chatterbox:
             try:
                 from chatterbox import ChatterboxTTS
                 import torch
@@ -191,7 +281,7 @@ class Narrator:
                 )
                 self.use_chatterbox = False
 
-        if not self.use_chatterbox:
+        if not self.use_coqui and not self.use_chatterbox:
             try:
                 import edge_tts
 
@@ -297,26 +387,25 @@ class Narrator:
         self.generating_narration = True
 
         try:
-            # TEMPORARY TEST: Skip AI generation, use test message
-            import random
-            number = random.randint(1, 100)
-            narration = f"This is a test to make sure audio is being generated properly. If it is working, this next number will be the next in a sequence: {number}."
-            
-            # # Build context from state
-            # context = self._build_context(state)
+            # In debug mode, return example narration
+            if self.debug_mode:
+                narration = self._get_debug_narration(state)
+            else:
+                # Build context from state
+                context = self._build_context(state)
 
-            # # Build prompt for AI
-            # prompt = self._build_prompt(context, state, screenshot_b64)
+                # Build prompt for AI
+                prompt = self._build_prompt(context, state, screenshot_b64)
 
-            # # Call the appropriate API
-            # if self.provider == "gemini":
-            #     narration = self._call_gemini(prompt, screenshot_b64)
-            # elif self.provider == "claude":
-            #     narration = self._call_claude(prompt, screenshot_b64)
-            # elif self.provider == "local":
-            #     narration = self._call_local(prompt, screenshot_b64)
-            # else:
-            #     return None
+                # Call the appropriate API
+                if self.provider == "gemini":
+                    narration = self._call_gemini(prompt, screenshot_b64)
+                elif self.provider == "claude":
+                    narration = self._call_claude(prompt, screenshot_b64)
+                elif self.provider == "local":
+                    narration = self._call_local(prompt, screenshot_b64)
+                else:
+                    return None
 
             # Update state
             self.last_narration_time = time.time()
@@ -333,6 +422,20 @@ class Narrator:
         finally:
             # Always clear the flag when done
             self.generating_narration = False
+
+    def _get_debug_narration(self, state: Dict[str, Any]) -> str:
+        """Return example narration for debug mode."""
+        # Cycle through a few different example narrations
+        examples = [
+            "We're exploring a mitochondrial network with intricate cristae folds, surrounded by the dense granular texture of the cytoplasm. The organelles appear as elongated ellipsoids, their internal membranes creating parallel ridges that maximize surface area for energy production.",
+            "This region shows the endoplasmic reticulum forming an interconnected tubular network throughout the cell. The rough ER appears studded with ribosomes, while smooth ER regions branch off in sinuous curves, likely involved in lipid synthesis.",
+            "A large spherical nucleus dominates the center of this view, its double membrane clearly delineated. Dark patches of heterochromatin cluster along the nuclear envelope, while lighter euchromatin regions suggest areas of active transcription.",
+            "Multiple vesicles of varying sizes populate this area, appearing as small circular or ellipsoid structures. Some appear to be budding from larger membrane compartments, part of the cell's active transport machinery.",
+        ]
+
+        # Use the number of narrations to cycle through examples
+        index = len(self.narration_history) % len(examples)
+        return examples[index]
 
     def _build_context(self, state: Dict[str, Any]) -> str:
         """Build a human-readable context description from state."""
@@ -554,7 +657,51 @@ Guidelines:
             import base64
             import os
 
-            if self.tts_engine == "chatterbox":
+            if self.tts_engine == "coqui":
+                print(
+                    f"[NARRATOR] Generating audio with Coqui XTTS for: {text[:50]}...",
+                    flush=True,
+                )
+                
+                # Generate audio with Coqui XTTS
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp_path = tmp.name
+
+                # Generate with voice cloning if reference audio provided
+                if self.voice_reference:
+                    self.coqui.tts_to_file(
+                        text=text,
+                        file_path=tmp_path,
+                        speaker_wav=self.voice_reference,
+                        language="en"
+                    )
+                else:
+                    self.coqui.tts_to_file(
+                        text=text,
+                        file_path=tmp_path,
+                        language="en"
+                    )
+                
+                print(f"[NARRATOR] Coqui wrote WAV to: {tmp_path}", flush=True)
+
+                # Read and encode
+                with open(tmp_path, "rb") as f:
+                    audio_data = f.read()
+
+                print(
+                    f"[NARRATOR] Audio file size: {len(audio_data)} bytes", flush=True
+                )
+                encoded_audio = base64.b64encode(audio_data).decode("utf-8")
+
+                # Clean up
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+
+                return encoded_audio
+
+            elif self.tts_engine == "chatterbox":
                 print(
                     f"[NARRATOR] Generating audio with Chatterbox for: {text[:50]}...",
                     flush=True,

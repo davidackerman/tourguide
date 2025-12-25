@@ -7,6 +7,7 @@ import asyncio
 import argparse
 import sys
 import socket
+import os
 from dotenv import load_dotenv
 from ng import NG_StateTracker
 from stream import create_app
@@ -40,7 +41,17 @@ def main():
         default=0.1,
         help="Maximum screenshot frame rate (default: 0.1)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode (uses example narration instead of AI)",
+    )
     args = parser.parse_args()
+
+    # Set debug environment variable if flag is provided
+    if args.debug:
+        os.environ["DEBUG_MODE"] = "true"
+        print("[DEBUG] Debug mode enabled - using example narrations", flush=True)
 
     print("=" * 60, flush=True)
     print("Neuroglancer Live Stream Server", flush=True)

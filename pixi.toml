@@ -22,17 +22,12 @@ neuroglancer = "*"
 anthropic = "*"
 ollama = "*"
 edge-tts = "*"
+TTS = "*"
+transformers = ">=4.33.0,<4.45.0"
+torch = ">=2.0.0,<2.6.0"
 
 [tasks]
 install-chatterbox = { cmd = "pip install 'numpy>=1.24.0,<1.26.0' && pip install chatterbox-tts" }
 start = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py" }
 dev = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py --fps 3" }
-
-[feature.narrator.pypi-dependencies]
-# Stage 4: Add your AI/vision model SDK here
-# anthropic = "*"
-# openai = "*"
-
-[feature.tts.pypi-dependencies]
-# Stage 5: Add TTS library here
-# pyttsx3 = "*"
+debug = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py --debug" }
