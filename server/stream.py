@@ -3,7 +3,7 @@ FastAPI server with WebSocket streaming.
 Stage 3: WebSocket endpoint that streams frames + state to browser.
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse
 import asyncio
@@ -12,6 +12,10 @@ import time
 from pathlib import Path
 from typing import Set
 import httpx
+import base64
+from datetime import datetime
+
+from recording import RecordingManager, MovieCompiler
 
 # Will be set by main.py
 ng_tracker = None
@@ -32,6 +36,9 @@ def create_app(tracker) -> FastAPI:
 
     # Queue for narration updates (Stage 4)
     narration_queue = asyncio.Queue()
+
+    # Recording manager for movie creation
+    recording_manager = RecordingManager()
 
     async def broadcast_narration(narration_text: str):
         """Broadcast narration to all connected clients."""
@@ -252,6 +259,7 @@ def create_app(tracker) -> FastAPI:
 
             if jpeg_b64:
                 # Capture current viewer state
+                state_json = {}
                 try:
                     with ng_tracker.viewer.txn() as s:
                         state_json = s.to_json()
@@ -265,8 +273,6 @@ def create_app(tracker) -> FastAPI:
                     print(f"[STATE] Error getting state: {e}", flush=True)
 
                 # Store the frame from client
-                import base64
-
                 jpeg_bytes = base64.b64decode(jpeg_b64)
 
                 ng_tracker.latest_frame = {
@@ -277,6 +283,15 @@ def create_app(tracker) -> FastAPI:
                 }
                 ng_tracker.latest_frame_ts = timestamp
                 print(f"[SCREENSHOT] Received from client: {len(jpeg_bytes)} bytes")
+
+                # Add to recording if active
+                if recording_manager.is_recording:
+                    print(f"[RECORDING] Adding frame to session (status: {recording_manager.current_session.status if recording_manager.current_session else 'no session'})", flush=True)
+                    recording_manager.add_frame(
+                        jpeg_bytes=jpeg_bytes,
+                        state_json=state_json,
+                        timestamp=timestamp
+                    )
 
                 return {"status": "ok"}
             else:
@@ -291,9 +306,6 @@ def create_app(tracker) -> FastAPI:
         latest_frame = ng_tracker.get_latest_frame()
         if latest_frame:
             # Save to file for inspection
-            import base64
-            from pathlib import Path
-
             debug_path = Path("/tmp/ng_screenshot_debug.jpg")
             with open(debug_path, "wb") as f:
                 f.write(base64.b64decode(latest_frame["jpeg_b64"]))
@@ -305,6 +317,164 @@ def create_app(tracker) -> FastAPI:
                 "preview_url": f"data:image/jpeg;base64,{latest_frame['jpeg_b64'][:100]}...",
             }
         return {"status": "no_frames"}
+
+    # Recording API endpoints
+    @app.post("/api/recording/start")
+    async def start_recording(request: Request):
+        """Start a new recording session."""
+        try:
+            data = await request.json()
+            fps = data.get("fps", 0.5)
+            transition_type = data.get("transition_type", "cut")
+            transition_duration = data.get("transition_duration", 0.5)
+
+            session = recording_manager.start_recording(
+                fps=fps,
+                transition_type=transition_type,
+                transition_duration=transition_duration
+            )
+
+            return {
+                "status": "ok",
+                "session_id": session.session_id,
+                "message": "Recording started"
+            }
+        except Exception as e:
+            print(f"[RECORDING] Start error: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    @app.post("/api/recording/stop")
+    async def stop_recording():
+        """Stop the current recording session."""
+        try:
+            recording_manager.stop_recording()
+            frame_count = len(recording_manager.current_session.frames) if recording_manager.current_session else 0
+            return {
+                "status": "ok",
+                "message": "Recording stopped",
+                "frame_count": frame_count
+            }
+        except Exception as e:
+            print(f"[RECORDING] Stop error: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    @app.get("/api/recording/status")
+    async def get_recording_status():
+        """Get current recording status."""
+        if recording_manager.current_session:
+            duration = 0
+            if recording_manager.current_session.recording_started_at:
+                if recording_manager.is_recording:
+                    duration = (datetime.now() - recording_manager.current_session.recording_started_at).total_seconds()
+                elif recording_manager.current_session.recording_stopped_at:
+                    duration = (recording_manager.current_session.recording_stopped_at - recording_manager.current_session.recording_started_at).total_seconds()
+
+            return {
+                "is_recording": recording_manager.is_recording,
+                "session_id": recording_manager.current_session.session_id,
+                "status": recording_manager.current_session.status,
+                "frame_count": len(recording_manager.current_session.frames),
+                "duration": duration
+            }
+        return {
+            "is_recording": False,
+            "session_id": None,
+            "status": "idle",
+            "frame_count": 0,
+            "duration": 0
+        }
+
+    async def compile_movie_task(session):
+        """Background task for movie compilation."""
+        try:
+            print(f"[COMPILE] Starting compilation for session {session.session_id}", flush=True)
+
+            # Run compilation in thread pool to avoid blocking
+            compiler = MovieCompiler(session)
+
+            # Run in executor to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            output_file = await loop.run_in_executor(None, compiler.compile)
+
+            print(f"[COMPILE] Completed: {output_file}", flush=True)
+
+        except Exception as e:
+            print(f"[COMPILE] Error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+    @app.post("/api/recording/compile")
+    async def compile_movie(request: Request, background_tasks: BackgroundTasks):
+        """Compile the recorded frames into a movie."""
+        try:
+            if recording_manager.is_recording:
+                return {
+                    "status": "error",
+                    "message": "Cannot compile while recording is in progress"
+                }
+
+            if not recording_manager.current_session:
+                return {
+                    "status": "error",
+                    "message": "No recording session available"
+                }
+
+            # Get transition type from request body
+            body = await request.json()
+            transition_type = body.get("transition_type", "cut")
+
+            # Update session transition type
+            recording_manager.current_session.transition_type = transition_type
+            recording_manager.current_session.save_metadata()
+
+            print(f"[COMPILE] Using transition type: {transition_type}", flush=True)
+
+            # Start compilation in background
+            background_tasks.add_task(
+                compile_movie_task,
+                recording_manager.current_session
+            )
+
+            return {
+                "status": "ok",
+                "message": "Movie compilation started",
+                "session_id": recording_manager.current_session.session_id
+            }
+        except Exception as e:
+            print(f"[RECORDING] Compile error: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    @app.get("/api/recording/compile/status/{session_id}")
+    async def get_compile_status(session_id: str):
+        """Get compilation status for a session."""
+        # Check if current session matches
+        if recording_manager.current_session and recording_manager.current_session.session_id == session_id:
+            # Set progress based on status
+            progress = 0.0
+            if recording_manager.current_session.status == "compiling":
+                # Show indeterminate progress (50%) while compiling
+                progress = 0.5
+            elif recording_manager.current_session.status == "completed":
+                progress = 1.0
+
+            return {
+                "session_id": session_id,
+                "status": recording_manager.current_session.status,
+                "progress": progress
+            }
+        return {
+            "status": "error",
+            "message": "Session not found"
+        }
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
@@ -365,6 +535,27 @@ def create_app(tracker) -> FastAPI:
                             audio_data = await ng_tracker.narrator.generate_audio_async(
                                 narration
                             )
+
+                            # Save audio to recording if active
+                            if recording_manager.is_recording and audio_data:
+                                # Decode base64 audio to bytes
+                                audio_bytes = base64.b64decode(audio_data)
+
+                                # Determine audio format based on TTS engine
+                                audio_format = "mp3"  # default for edge-tts
+                                if hasattr(ng_tracker.narrator, 'tts_engine'):
+                                    if ng_tracker.narrator.tts_engine in ["coqui", "chatterbox"]:
+                                        audio_format = "wav"
+
+                                # Update the most recent frame with narration
+                                if recording_manager.current_session and recording_manager.current_session.frames:
+                                    frame_number = len(recording_manager.current_session.frames)
+                                    recording_manager.update_frame_narration(
+                                        frame_number=frame_number,
+                                        narration_text=narration,
+                                        audio_bytes=audio_bytes,
+                                        audio_format=audio_format
+                                    )
 
                             # Send narration message
                             narration_msg = {

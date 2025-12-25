@@ -18,13 +18,17 @@ python-dotenv = "*"
 ffmpeg = "*"
 
 [pypi-dependencies]
-neuroglancer = "*"
+neuroglancer ="==2.40.1"
 anthropic = "*"
 ollama = "*"
 edge-tts = "*"
+selenium = "*"
+webdriver-manager = "*"
 TTS = "*"
 transformers = ">=4.33.0,<4.45.0"
 torch = ">=2.0.0,<2.6.0"
+trio = "*"
+trio-websocket = "*"
 
 [tasks]
 install-chatterbox = { cmd = "pip install 'numpy>=1.24.0,<1.26.0' && pip install chatterbox-tts" }
