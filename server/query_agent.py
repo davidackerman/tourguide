@@ -30,16 +30,25 @@ class QueryAgent:
         'CREATE', 'TRUNCATE', 'REPLACE', 'GRANT', 'REVOKE'
     ]
 
-    def __init__(self, db: OrganelleDatabase, model: str = "nemotron"):
+    def __init__(self, db: OrganelleDatabase, model: str = "nemotron", ng_tracker=None):
         """
         Initialize query agent.
 
         Args:
             db: OrganelleDatabase instance
             model: Ollama model name (default: nemotron)
+            ng_tracker: Optional NG_StateTracker instance for layer discovery
         """
         self.db = db
         self.model = model
+        self.ng_tracker = ng_tracker
+
+        # Discover available layers at init
+        self.available_layers = {}
+        if ng_tracker:
+            self.available_layers = ng_tracker.get_available_layers()
+            print(f"[QUERY_AGENT] Discovered layers: {list(self.available_layers.keys())}", flush=True)
+
         print(f"[QUERY_AGENT] Initialized with model: {model}", flush=True)
 
     def process_query(self, user_query: str) -> Dict[str, Any]:
@@ -187,11 +196,29 @@ Intent:"""
             SQL query string or None if generation failed
         """
         schema_desc = self.db.get_schema_description()
+        available_types = self.db.get_available_organelle_types()
+
+        # Build fuzzy matching note with available types
+        fuzzy_matching_note = f"""
+IMPORTANT: The user may use informal names for organelles.
+Available organelle types in database: {', '.join(available_types)}
+
+Examples of fuzzy name matching:
+- "mitos" or "mito" → use 'mitochondria'
+- "nuclei" or "nuc" → use 'nucleus'
+- "ER" → use 'endoplasmic_reticulum'
+- "lyso" → use 'lysosome'
+- "perox" → use 'peroxisome'
+
+Match the user's query to the closest available organelle type from the list above.
+"""
 
         prompt = f"""You are an expert at converting natural language to SQLite queries.
 
 Database Schema:
 {schema_desc}
+
+{fuzzy_matching_note}
 
 User Query: {user_query}
 
@@ -202,6 +229,7 @@ IMPORTANT RULES:
 4. No explanations, no markdown formatting, just the SQL
 5. Query must be safe (no DROP, INSERT, UPDATE, DELETE)
 6. Use proper SQLite syntax
+7. Match user's organelle names to the available types listed above
 
 Example Queries:
 - "What is the size of the biggest mito?"
@@ -460,7 +488,55 @@ SQL Query:"""
 
     def _get_layer_name(self, organelle_type: str) -> str:
         """
-        Map organelle type to Neuroglancer layer name.
+        Map organelle type to Neuroglancer layer name using AI.
+
+        Falls back to hardcoded mappings if AI fails or no layers discovered.
+
+        Args:
+            organelle_type: Organelle type from database
+
+        Returns:
+            Layer name for Neuroglancer
+        """
+        if not self.available_layers:
+            # No Neuroglancer available, use fallback
+            return self._get_layer_name_fallback(organelle_type)
+
+        prompt = f"""Match the organelle type to the correct Neuroglancer layer.
+
+Organelle type: {organelle_type}
+
+Available layers: {list(self.available_layers.keys())}
+
+Which layer should be used to display this organelle type?
+Be flexible with matching - for example:
+- "mitochondria" → "mito_filled" or "mito_seg"
+- "nucleus" → "nuc" or "nucleus_seg"
+- "endoplasmic_reticulum" → "er_seg" or "er"
+- "yolk_filled" → "yolk"
+
+Respond with ONLY the layer name, nothing else.
+
+Layer name:"""
+
+        try:
+            response = ollama.chat(model=self.model, messages=[{"role": "user", "content": prompt}])
+            layer_name = response["message"]["content"].strip()
+
+            if layer_name in self.available_layers:
+                print(f"[QUERY_AGENT] AI mapped '{organelle_type}' → '{layer_name}'", flush=True)
+                return layer_name
+            else:
+                print(f"[QUERY_AGENT] AI suggested invalid layer '{layer_name}', using fallback", flush=True)
+                return self._get_layer_name_fallback(organelle_type)
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error in AI layer mapping: {e}, using fallback", flush=True)
+            return self._get_layer_name_fallback(organelle_type)
+
+    def _get_layer_name_fallback(self, organelle_type: str) -> str:
+        """
+        Hardcoded fallback mapping for layer names.
 
         Args:
             organelle_type: Organelle type from database
