@@ -52,6 +52,11 @@ class QueryAgent:
         Returns:
             Dictionary with query results and metadata
         """
+        import time
+
+        timing = {}
+        start_total = time.time()
+
         if not user_query.strip():
             return {
                 "type": "error",
@@ -62,8 +67,10 @@ class QueryAgent:
             # Classify query type
             query_type = self._classify_query_type(user_query)
 
-            # Generate SQL
+            # Generate SQL with timing
+            start_sql = time.time()
             sql = self._generate_sql(user_query)
+            timing['sql_generation'] = time.time() - start_sql
 
             if not sql:
                 return {
@@ -78,8 +85,10 @@ class QueryAgent:
                     "answer": "Generated query contains unsafe operations. Please try rephrasing."
                 }
 
-            # Execute query
+            # Execute query with timing
+            start_exec = time.time()
             results = self.db.execute_query(sql)
+            timing['query_execution'] = time.time() - start_exec
 
             # Handle empty results
             if not results:
@@ -92,10 +101,30 @@ class QueryAgent:
                 }
 
             # Format response based on query type
+            start_format = time.time()
+
+            # Smart fallback: if query type is visualization but we have position data
+            # and only 1 result, it's likely a navigation query
+            if query_type == "visualization" and len(results) == 1:
+                first_result = results[0]
+                has_position = all(k in first_result for k in ['position_x', 'position_y', 'position_z'])
+                if has_position and all(first_result[k] is not None for k in ['position_x', 'position_y', 'position_z']):
+                    print("[QUERY_AGENT] Auto-correcting to navigation (has position data, single result)", flush=True)
+                    query_type = "navigation"
+
             if query_type == "navigation":
-                return self._handle_navigation_query(user_query, sql, results)
+                result = self._handle_navigation_query(user_query, sql, results)
+            elif query_type == "visualization":
+                result = self._handle_visualization_query(user_query, sql, results)
             else:
-                return self._handle_informational_query(user_query, sql, results)
+                result = self._handle_informational_query(user_query, sql, results)
+            timing['answer_formatting'] = time.time() - start_format
+
+            # Add timing info to result
+            timing['total'] = time.time() - start_total
+            result['timing'] = timing
+
+            return result
 
         except Exception as e:
             print(f"[QUERY_AGENT] Error processing query: {e}", flush=True)
@@ -106,21 +135,46 @@ class QueryAgent:
 
     def _classify_query_type(self, query: str) -> str:
         """
-        Classify query as navigational or informational.
+        Classify query intent using AI.
 
         Args:
             query: User query string
 
         Returns:
-            'navigation' or 'informational'
+            Query intent: 'navigation', 'visualization', or 'informational'
         """
-        query_lower = query.lower()
+        prompt = f"""Classify the intent of this user query about organelle data.
 
-        for keyword in self.NAVIGATION_KEYWORDS:
-            if keyword in query_lower:
-                return "navigation"
+User Query: {query}
 
-        return "informational"
+Intent Types:
+1. navigation - User wants to go to/view a specific location (e.g., "take me to the biggest mito", "navigate to nucleus 5")
+2. visualization - User wants to show/hide/filter specific objects in the viewer (e.g., "show only the 3 largest mitos", "display nuclei with volume > 1000", "highlight the smallest ER")
+3. informational - User wants statistical information without changing the view (e.g., "how many mitos are there?", "what is the average volume?")
+
+Respond with ONLY one word: navigation, visualization, or informational
+
+Intent:"""
+
+        try:
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            intent = response["message"]["content"].strip().lower()
+
+            # Validate response
+            if intent in ['navigation', 'visualization', 'informational']:
+                print(f"[QUERY_AGENT] Classified intent: {intent}", flush=True)
+                return intent
+            else:
+                print(f"[QUERY_AGENT] Invalid intent '{intent}', defaulting to informational", flush=True)
+                return "informational"
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error classifying query: {e}", flush=True)
+            return "informational"
 
     def _generate_sql(self, user_query: str) -> Optional[str]:
         """
@@ -141,9 +195,13 @@ Database Schema:
 
 User Query: {user_query}
 
-Generate ONLY a valid SQLite SELECT query. No explanations, no markdown formatting, just the SQL.
-Query must be safe (no DROP, INSERT, UPDATE, DELETE).
-Use proper SQLite syntax.
+IMPORTANT RULES:
+1. Generate ONLY a valid, complete SQLite SELECT query
+2. The query MUST include FROM organelles
+3. The query MUST end with a semicolon
+4. No explanations, no markdown formatting, just the SQL
+5. Query must be safe (no DROP, INSERT, UPDATE, DELETE)
+6. Use proper SQLite syntax
 
 Example Queries:
 - "What is the size of the biggest mito?"
@@ -157,6 +215,18 @@ Example Queries:
 
 - "What is the average volume of ER?"
   → SELECT AVG(volume) as average_volume FROM organelles WHERE organelle_type='endoplasmic_reticulum';
+
+- "Describe the top 3 largest nuclei"
+  → SELECT object_id, volume, surface_area, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 3;
+
+- "Show only the 3 largest mitos"
+  → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 3;
+
+IMPORTANT:
+- Always include object_id and organelle_type in SELECT for queries that filter or list specific organelles
+- For navigation queries (take me to, go to, etc.), MUST include position_x, position_y, position_z
+
+Remember: Your response must be ONLY the SQL query, nothing else.
 
 SQL Query:"""
 
@@ -226,6 +296,16 @@ SQL Query:"""
         # Must be a SELECT query
         if not sql_upper.strip().startswith('SELECT'):
             print(f"[QUERY_AGENT] Query must start with SELECT", flush=True)
+            return False
+
+        # Must have FROM clause
+        if 'FROM' not in sql_upper:
+            print(f"[QUERY_AGENT] Query must include FROM clause", flush=True)
+            return False
+
+        # Should reference the organelles table
+        if 'ORGANELLES' not in sql_upper:
+            print(f"[QUERY_AGENT] Query must reference 'organelles' table", flush=True)
             return False
 
         # Block SQL comments (potential injection)
@@ -321,6 +401,122 @@ SQL Query:"""
             "navigation": navigation
         }
 
+    def _handle_visualization_query(
+        self,
+        user_query: str,
+        sql: str,
+        results: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Handle visualization query (show/hide specific segments).
+
+        Args:
+            user_query: Original user query
+            sql: Generated SQL
+            results: Query results
+
+        Returns:
+            Response dictionary with visualization commands
+        """
+        # Extract segment IDs and organelle type from results
+        segment_ids = []
+        organelle_type = None
+
+        for result in results:
+            obj_id = result.get('object_id')
+            if obj_id:
+                segment_ids.append(str(obj_id))
+            if not organelle_type and result.get('organelle_type'):
+                organelle_type = result.get('organelle_type')
+
+        if not segment_ids:
+            return {
+                "type": "error",
+                "answer": "No objects found to visualize.",
+                "sql": sql,
+                "results": results
+            }
+
+        # Map organelle type to layer name
+        layer_name = self._get_layer_name(organelle_type)
+
+        # Create visualization command
+        visualization = {
+            "layer_name": layer_name,
+            "segment_ids": segment_ids,
+            "action": "show_only"  # show_only, add, remove
+        }
+
+        # Format answer using AI
+        answer = self._format_visualization_answer(user_query, results, organelle_type, segment_ids)
+
+        return {
+            "type": "visualization",
+            "sql": sql,
+            "results": results,
+            "answer": answer,
+            "visualization": visualization
+        }
+
+    def _get_layer_name(self, organelle_type: str) -> str:
+        """
+        Map organelle type to Neuroglancer layer name.
+
+        Args:
+            organelle_type: Organelle type from database
+
+        Returns:
+            Layer name for Neuroglancer
+        """
+        # Mapping from database organelle types to layer names
+        # For C. elegans dataset:
+        layer_mapping = {
+            'mitochondria': 'mito_filled',
+            'nucleus': 'nuc',
+            'lysosome': 'lyso',
+            'peroxisome': 'perox',
+            'cell': 'cell',
+            'yolk_filled': 'yolk',
+            'lipid_droplet': 'ld',
+            # For HeLa dataset:
+            'endoplasmic_reticulum': 'er_seg',
+            'golgi_apparatus': 'golgi_seg',
+            'vesicle': 'vesicle_seg',
+            'endosome': 'endo_seg',
+        }
+
+        return layer_mapping.get(organelle_type, organelle_type)
+
+    def _format_visualization_answer(
+        self,
+        user_query: str,
+        results: List[Dict[str, Any]],
+        organelle_type: str,
+        segment_ids: List[str]
+    ) -> str:
+        """
+        Format a natural language answer for visualization query.
+
+        Args:
+            user_query: Original user query
+            results: Query results
+            organelle_type: Type of organelle (can be None)
+            segment_ids: List of segment IDs to show
+
+        Returns:
+            Natural language answer
+        """
+        count = len(segment_ids)
+        type_name = organelle_type.replace('_', ' ') if organelle_type else "organelle"
+
+        # Simple format for now - could use LLM for more natural responses
+        if count == 1:
+            vol = results[0].get('volume')
+            vol_str = f" with volume {vol:.2e}" if vol else ""
+            return f"Showing {type_name} {segment_ids[0]}{vol_str}"
+        else:
+            return f"Showing {count} {type_name} objects"
+
     def _calculate_zoom_for_volume(self, volume: float) -> int:
         """
         Calculate appropriate zoom level (crossSectionScale) for object volume.
@@ -351,7 +547,7 @@ SQL Query:"""
         user_query: str
     ) -> str:
         """
-        Format query results into natural language answer.
+        Format query results into natural language answer using LLM.
 
         Args:
             results: Query results
@@ -363,58 +559,81 @@ SQL Query:"""
         if not results:
             return "No results found."
 
-        # If single value (COUNT, AVG, etc.)
+        # If single aggregate value (COUNT, AVG, etc.) - use simple formatting
         if len(results) == 1 and len(results[0]) == 1:
             key = list(results[0].keys())[0]
             value = results[0][key]
 
-            if key == 'count':
-                return f"There are {value} matching organelles."
+            if key == 'count' or 'count' in key.lower():
+                return f"There are {int(value)} matching organelles."
             elif 'average' in key.lower() or 'avg' in key.lower():
                 return f"The average is {value:.2f}"
+            elif 'sum' in key.lower() or 'total' in key.lower():
+                return f"The total is {value:.2f}"
+            elif 'min' in key.lower():
+                return f"The minimum is {value:.2f}"
+            elif 'max' in key.lower():
+                return f"The maximum is {value:.2f}"
             else:
                 return f"The {key} is {value}"
 
-        # If asking about "biggest" or "largest"
-        if 'biggest' in user_query.lower() or 'largest' in user_query.lower():
-            result = results[0]
-            object_id = result.get('object_id', 'unknown')
-            volume = result.get('volume')
-            organelle_type = result.get('organelle_type', 'organelle')
+        # For complex results, use LLM to format answer
+        return self._format_answer_with_llm(results, user_query)
 
-            if volume is not None:
-                return f"The biggest {organelle_type} is {object_id} with volume {volume:.1f}"
+    def _format_answer_with_llm(
+        self,
+        results: List[Dict[str, Any]],
+        user_query: str
+    ) -> str:
+        """
+        Use LLM (nemotron-3-nano) to format results into a natural language answer.
+
+        Args:
+            results: Query results
+            user_query: Original query
+
+        Returns:
+            Formatted natural language answer
+        """
+        # Limit results shown to LLM to avoid token limits
+        max_results = 10
+        results_to_show = results[:max_results]
+
+        # Format results as JSON for the LLM
+        import json
+        results_json = json.dumps(results_to_show, indent=2)
+
+        prompt = f"""You are answering a user's question about organelle data from microscopy analysis.
+
+User Question: {user_query}
+
+Query Results:
+{results_json}
+
+Instructions:
+1. Answer the user's question directly and naturally
+2. If there are multiple results, describe ALL of them clearly
+3. Format large numbers in scientific notation (e.g., 3.05e11) for readability
+4. Be concise but informative - include key details like volume and surface area
+5. Keep your answer to 2-3 sentences maximum
+6. Use natural language, not just listing data
+
+Answer:"""
+
+        try:
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            answer = response["message"]["content"].strip()
+            print(f"[QUERY_AGENT] LLM formatted answer: {answer}", flush=True)
+            return answer
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error formatting answer with LLM: {e}", flush=True)
+            # Fallback to simple formatting
+            if len(results) == 1:
+                return f"Found 1 result: {results[0].get('object_id', 'unknown')}"
             else:
-                return f"The biggest {organelle_type} is {object_id}"
-
-        # If asking about "smallest"
-        if 'smallest' in user_query.lower():
-            result = results[0]
-            object_id = result.get('object_id', 'unknown')
-            volume = result.get('volume')
-            organelle_type = result.get('organelle_type', 'organelle')
-
-            if volume is not None:
-                return f"The smallest {organelle_type} is {object_id} with volume {volume:.1f}"
-            else:
-                return f"The smallest {organelle_type} is {object_id}"
-
-        # If multiple results, summarize
-        if len(results) > 5:
-            return f"Found {len(results)} results."
-
-        # Otherwise, format first few results
-        formatted_results = []
-        for result in results[:3]:
-            object_id = result.get('object_id', 'unknown')
-            volume = result.get('volume')
-            if volume is not None:
-                formatted_results.append(f"{object_id} (volume: {volume:.1f})")
-            else:
-                formatted_results.append(object_id)
-
-        answer = "Results: " + ", ".join(formatted_results)
-        if len(results) > 3:
-            answer += f" and {len(results) - 3} more"
-
-        return answer
+                return f"Found {len(results)} results."

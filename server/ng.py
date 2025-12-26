@@ -67,8 +67,8 @@ class NG_StateTracker:
         # Load zarr to get dataset dimensions and calculate center
         zarr_path = "/nrs/cellmap/data/jrc_c-elegans-comma-1/jrc_c-elegans-comma-1.zarr/recon-1/em/fibsem-uint8"
         try:
-            store = zarr.DirectoryStore(zarr_path)
-            z = zarr.open(store, mode='r')
+            # zarr 3.x API: open directly with path
+            z = zarr.open(zarr_path, mode='r')
             # Calculate center position from dataset dimensions
             center_position = [dim // 2 for dim in z.shape]
             print(f"[NG] C. elegans dataset shape: {z.shape}", flush=True)

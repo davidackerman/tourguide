@@ -142,6 +142,7 @@ class OrganelleDatabase:
             print(f"[DB] Loaded {len(df)} rows from {csv_path}", flush=True)
 
             # Map common column names to our schema
+            # This mapping handles various naming conventions from different datasets
             column_mapping = {
                 # Object ID variations
                 'object_id': 'object_id',
@@ -149,32 +150,48 @@ class OrganelleDatabase:
                 'obj_id': 'object_id',
                 'segment_id': 'object_id',
 
-                # Volume variations
+                # Volume variations (cubic nanometers)
                 'volume': 'volume',
                 'vol': 'volume',
                 'size': 'volume',
+                'volume_(nm^3)': 'volume',
+                'volume (nm^3)': 'volume',
 
-                # Surface area variations
+                # Surface area variations (square nanometers)
                 'surface_area': 'surface_area',
                 'area': 'surface_area',
                 'surf_area': 'surface_area',
+                'surface_area_(nm^2)': 'surface_area',
+                'surface area (nm^2)': 'surface_area',
 
-                # Position variations
+                # Position variations - Center of Mass (COM) coordinates
                 'center_x': 'position_x',
                 'x': 'position_x',
                 'pos_x': 'position_x',
                 'centroid_x': 'position_x',
+                'com_x': 'position_x',
+                'com_x_(nm)': 'position_x',
+                'com x (nm)': 'position_x',
 
                 'center_y': 'position_y',
                 'y': 'position_y',
                 'pos_y': 'position_y',
                 'centroid_y': 'position_y',
+                'com_y': 'position_y',
+                'com_y_(nm)': 'position_y',
+                'com y (nm)': 'position_y',
 
                 'center_z': 'position_z',
                 'z': 'position_z',
                 'pos_z': 'position_z',
                 'centroid_z': 'position_z',
+                'com_z': 'position_z',
+                'com_z_(nm)': 'position_z',
+                'com z (nm)': 'position_z',
             }
+
+            # Log original columns for debugging
+            print(f"[DB] Original columns: {list(df.columns)}", flush=True)
 
             # Rename columns (case-insensitive)
             df.columns = df.columns.str.lower()
@@ -238,6 +255,17 @@ class OrganelleDatabase:
 
     def _import_all_csvs(self):
         """Import all CSV files specified in csv_paths."""
+        # Check if data already exists to prevent duplicate imports
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM organelles")
+        existing_count = cursor.fetchone()[0]
+        conn.close()
+
+        if existing_count > 0:
+            print(f"[DB] Database already contains {existing_count} records, skipping import", flush=True)
+            return
+
         total_imported = 0
 
         for csv_path in self.csv_paths:
@@ -343,3 +371,118 @@ Available organelle types: {}
             return results[0]['count'] if results else 0
         except:
             return 0
+
+    @staticmethod
+    def interpret_csv_columns(csv_path: str) -> Dict[str, str]:
+        """
+        Analyze a CSV file and interpret what each column means.
+
+        Args:
+            csv_path: Path to CSV file
+
+        Returns:
+            Dictionary mapping column names to their interpretations
+        """
+        import pandas as pd
+
+        # Read just the header and first row
+        df = pd.read_csv(csv_path, nrows=1)
+
+        interpretations = {}
+
+        for col in df.columns:
+            col_lower = col.lower()
+
+            # Object ID
+            if any(x in col_lower for x in ['object', 'id', 'segment']):
+                interpretations[col] = "Unique identifier for each object/organelle"
+
+            # Volume
+            elif 'volume' in col_lower or 'vol' in col_lower:
+                if 'nm^3' in col or 'nm³' in col:
+                    interpretations[col] = "Volume in cubic nanometers (nm³)"
+                else:
+                    interpretations[col] = "Volume/size measurement"
+
+            # Surface Area
+            elif 'surface' in col_lower or 'area' in col_lower:
+                if 'nm^2' in col or 'nm²' in col:
+                    interpretations[col] = "Surface area in square nanometers (nm²)"
+                else:
+                    interpretations[col] = "Surface area measurement"
+
+            # Center of Mass (COM)
+            elif 'com x' in col_lower or 'com_x' in col_lower:
+                interpretations[col] = "Center of mass X coordinate (nanometers)"
+            elif 'com y' in col_lower or 'com_y' in col_lower:
+                interpretations[col] = "Center of mass Y coordinate (nanometers)"
+            elif 'com z' in col_lower or 'com_z' in col_lower:
+                interpretations[col] = "Center of mass Z coordinate (nanometers)"
+
+            # Bounding box MIN coordinates
+            elif 'min x' in col_lower or 'min_x' in col_lower:
+                interpretations[col] = "Minimum X coordinate of bounding box (nanometers)"
+            elif 'min y' in col_lower or 'min_y' in col_lower:
+                interpretations[col] = "Minimum Y coordinate of bounding box (nanometers)"
+            elif 'min z' in col_lower or 'min_z' in col_lower:
+                interpretations[col] = "Minimum Z coordinate of bounding box (nanometers)"
+
+            # Bounding box MAX coordinates
+            elif 'max x' in col_lower or 'max_x' in col_lower:
+                interpretations[col] = "Maximum X coordinate of bounding box (nanometers)"
+            elif 'max y' in col_lower or 'max_y' in col_lower:
+                interpretations[col] = "Maximum Y coordinate of bounding box (nanometers)"
+            elif 'max z' in col_lower or 'max_z' in col_lower:
+                interpretations[col] = "Maximum Z coordinate of bounding box (nanometers)"
+
+            # Generic position/coordinates
+            elif any(x in col_lower for x in ['center', 'centroid', 'position', 'pos']):
+                if 'x' in col_lower:
+                    interpretations[col] = "X coordinate/position"
+                elif 'y' in col_lower:
+                    interpretations[col] = "Y coordinate/position"
+                elif 'z' in col_lower:
+                    interpretations[col] = "Z coordinate/position"
+                else:
+                    interpretations[col] = "Position/coordinate data"
+
+            # Morphology features
+            elif 'lsp' in col_lower:
+                interpretations[col] = "Longest shortest path - morphological measure of extent (nanometers)"
+            elif 'radius' in col_lower:
+                if 'mean' in col_lower or 'avg' in col_lower:
+                    interpretations[col] = "Average radius measurement (nanometers)"
+                elif 'std' in col_lower or 'stdev' in col_lower:
+                    interpretations[col] = "Standard deviation of radius measurements (nanometers)"
+                else:
+                    interpretations[col] = "Radius measurement (nanometers)"
+            elif 'branch' in col_lower:
+                interpretations[col] = "Number of branches in skeleton/structure"
+            elif 'length' in col_lower:
+                interpretations[col] = "Length measurement"
+            elif 'width' in col_lower or 'diameter' in col_lower:
+                interpretations[col] = "Width/diameter measurement"
+            elif 'sphericity' in col_lower or 'roundness' in col_lower:
+                interpretations[col] = "Shape descriptor (0-1, how sphere-like)"
+            elif 'aspect' in col_lower:
+                interpretations[col] = "Aspect ratio measurement"
+
+            # Metadata
+            elif 'dataset' in col_lower:
+                interpretations[col] = "Dataset name/identifier"
+            elif 'created' in col_lower or 'timestamp' in col_lower:
+                interpretations[col] = "Timestamp/creation date"
+
+            # Unknown
+            else:
+                # Try to infer from sample value
+                sample_val = df[col].iloc[0]
+                if pd.notna(sample_val):
+                    if isinstance(sample_val, (int, float)):
+                        interpretations[col] = f"Numeric measurement (sample: {sample_val})"
+                    else:
+                        interpretations[col] = f"Data field (sample: {sample_val})"
+                else:
+                    interpretations[col] = "Unknown data field"
+
+        return interpretations
