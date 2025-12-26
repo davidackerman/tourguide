@@ -30,7 +30,7 @@ class QueryAgent:
         'CREATE', 'TRUNCATE', 'REPLACE', 'GRANT', 'REVOKE'
     ]
 
-    def __init__(self, db: OrganelleDatabase, model: str = "nemotron", ng_tracker=None):
+    def __init__(self, db: OrganelleDatabase, model: str = "nemotron", ng_tracker=None, verbose: bool = False):
         """
         Initialize query agent.
 
@@ -38,10 +38,12 @@ class QueryAgent:
             db: OrganelleDatabase instance
             model: Ollama model name (default: nemotron)
             ng_tracker: Optional NG_StateTracker instance for layer discovery
+            verbose: Enable verbose logging of AI interactions
         """
         self.db = db
         self.model = model
         self.ng_tracker = ng_tracker
+        self.verbose = verbose
 
         # Discover available layers at init
         self.available_layers = {}
@@ -166,12 +168,25 @@ Respond with ONLY one word: navigation, visualization, or informational
 Intent:"""
 
         try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] INTENT CLASSIFICATION", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
             response = ollama.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}]
             )
 
             intent = response["message"]["content"].strip().lower()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(intent, flush=True)
+                print("="*80 + "\n", flush=True)
 
             # Validate response
             if intent in ['navigation', 'visualization', 'informational']:
@@ -263,15 +278,33 @@ Remember: Your response must be ONLY the SQL query, nothing else.
 SQL Query:"""
 
         try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] SQL GENERATION", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
             response = ollama.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}]
             )
 
-            sql = response["message"]["content"].strip()
+            sql_raw = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RAW RESPONSE:", flush=True)
+                print(sql_raw, flush=True)
+                print("-"*80, flush=True)
 
             # Clean up response (remove markdown, extra text)
-            sql = self._clean_sql(sql)
+            sql = self._clean_sql(sql_raw)
+
+            if self.verbose:
+                print("CLEANED SQL:", flush=True)
+                print(sql, flush=True)
+                print("="*80 + "\n", flush=True)
 
             print(f"[QUERY_AGENT] Generated SQL: {sql}", flush=True)
             return sql
@@ -524,8 +557,21 @@ Respond with ONLY the layer name, nothing else.
 Layer name:"""
 
         try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] LAYER MAPPING", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
             response = ollama.chat(model=self.model, messages=[{"role": "user", "content": prompt}])
             layer_name = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(layer_name, flush=True)
+                print("="*80 + "\n", flush=True)
 
             if layer_name in self.available_layers:
                 print(f"[QUERY_AGENT] AI mapped '{organelle_type}' → '{layer_name}'", flush=True)
