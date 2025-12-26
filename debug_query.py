@@ -192,6 +192,11 @@ def main():
     db_path = os.getenv("ORGANELLE_DB_PATH", "organelles.db")
     model = os.getenv("QUERY_AI_MODEL", "nemotron")
 
+    # Check for --verbose flag
+    verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    if verbose:
+        sys.argv = [arg for arg in sys.argv if arg not in ["--verbose", "-v"]]
+
     print("Initializing database...")
     print(f"  Database path: {db_path}")
     print(f"  CSV files: {len(csv_paths)}")
@@ -208,7 +213,9 @@ def main():
     print()
 
     print(f"Initializing query agent with model: {model}")
-    agent = QueryAgent(db, model=model)
+    if verbose:
+        print(f"  Verbose mode: ENABLED")
+    agent = QueryAgent(db, model=model, verbose=verbose)
     print()
 
     # Check if query provided as command line argument
