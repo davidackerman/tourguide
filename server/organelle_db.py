@@ -332,7 +332,17 @@ JSON mapping:"""
             rows_inserted = 0
             for _, row in df.iterrows():
                 # Extract known columns
-                object_id = row.get('object_id', f"{organelle_type}_{rows_inserted}")
+                object_id_raw = row.get('object_id', f"{organelle_type}_{rows_inserted}")
+
+                # Convert object_id to int if it's numeric (remove .0 from pandas floats)
+                if pd.notna(object_id_raw):
+                    try:
+                        object_id = str(int(float(object_id_raw)))
+                    except (ValueError, TypeError):
+                        object_id = str(object_id_raw)
+                else:
+                    object_id = f"{organelle_type}_{rows_inserted}"
+
                 volume = row.get('volume', None)
                 surface_area = row.get('surface_area', None)
                 position_x = row.get('position_x', None)
@@ -357,7 +367,7 @@ JSON mapping:"""
                      position_x, position_y, position_z, metadata)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    str(object_id),
+                    object_id,  # Already converted to string (int format)
                     organelle_type,
                     float(volume) if pd.notna(volume) else None,
                     float(surface_area) if pd.notna(surface_area) else None,
