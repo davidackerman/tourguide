@@ -233,26 +233,30 @@ IMPORTANT RULES:
 
 Example Queries:
 - "What is the size of the biggest mito?"
-  → SELECT object_id, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 1;
+  → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 1;
 
 - "How many nuclei are there?"
   → SELECT COUNT(*) as count FROM organelles WHERE organelle_type='nucleus';
 
 - "Take me to the biggest nucleus"
-  → SELECT object_id, volume, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 1;
+  → SELECT object_id, organelle_type, volume, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 1;
 
 - "What is the average volume of ER?"
   → SELECT AVG(volume) as average_volume FROM organelles WHERE organelle_type='endoplasmic_reticulum';
 
 - "Describe the top 3 largest nuclei"
-  → SELECT object_id, volume, surface_area, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 3;
+  → SELECT object_id, organelle_type, volume, surface_area, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 3;
 
 - "Show only the 3 largest mitos"
   → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 3;
 
+- "Display the longest mito"
+  → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 1;
+
 IMPORTANT:
-- Always include object_id and organelle_type in SELECT for queries that filter or list specific organelles
-- For navigation queries (take me to, go to, etc.), MUST include position_x, position_y, position_z
+- ALWAYS include BOTH object_id AND organelle_type in SELECT for any query that returns specific organelles
+- For navigation queries (take me to, go to, etc.), MUST also include position_x, position_y, position_z
+- For visualization queries (show, display, highlight), object_id and organelle_type are REQUIRED
 
 Remember: Your response must be ONLY the SQL query, nothing else.
 
