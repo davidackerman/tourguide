@@ -11,21 +11,24 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import pandas as pd
 from datetime import datetime
+import ollama
 
 
 class OrganelleDatabase:
     """SQLite database for organelle data with CSV import capabilities."""
 
-    def __init__(self, db_path: str, csv_paths: List[str]):
+    def __init__(self, db_path: str, csv_paths: List[str], ai_model: Optional[str] = None):
         """
         Initialize database and auto-import CSV files.
 
         Args:
             db_path: Path to SQLite database file
             csv_paths: List of CSV file paths to import
+            ai_model: Optional AI model for intelligent column/type inference
         """
         self.db_path = db_path
         self.csv_paths = [p for p in csv_paths if p.strip()]
+        self.ai_model = ai_model  # For AI-driven column mapping and type inference
 
         # Ensure database directory exists
         db_dir = os.path.dirname(db_path)
@@ -92,7 +95,60 @@ class OrganelleDatabase:
 
     def _infer_organelle_type(self, csv_path: str) -> str:
         """
-        Infer organelle type from CSV filename.
+        Infer organelle type from CSV filename using AI or fallback.
+
+        Args:
+            csv_path: Path to CSV file
+
+        Returns:
+            Organelle type (e.g., 'mitochondria', 'nucleus')
+        """
+        # Try AI-based inference if model is available
+        if self.ai_model:
+            try:
+                return self._infer_organelle_type_ai(csv_path)
+            except Exception as e:
+                print(f"[DB] AI inference failed: {e}, using fallback", flush=True)
+
+        # Fallback to pattern matching
+        return self._infer_organelle_type_fallback(csv_path)
+
+    def _infer_organelle_type_ai(self, csv_path: str) -> str:
+        """
+        Use AI to infer organelle type from CSV filename and structure.
+
+        Args:
+            csv_path: Path to CSV file
+
+        Returns:
+            Organelle type inferred by AI
+        """
+        filename = Path(csv_path).stem
+        df = pd.read_csv(csv_path, nrows=3)
+        columns = list(df.columns)
+
+        prompt = f"""Determine the organelle type from this CSV file.
+
+Filename: {filename}
+Columns: {columns}
+
+Common organelle types: mitochondria, nucleus, endoplasmic_reticulum,
+golgi_apparatus, lysosome, peroxisome, vesicle, cell, yolk, lipid_droplet
+
+Provide ONLY the organelle type name (lowercase, underscore_separated).
+If uncertain, normalize the filename (e.g., "mito_filled" → "mitochondria").
+
+Organelle type:"""
+
+        response = ollama.chat(model=self.ai_model, messages=[{"role": "user", "content": prompt}])
+        organelle_type = response["message"]["content"].strip().lower()
+
+        print(f"[DB] AI inferred organelle type '{organelle_type}' from {filename}", flush=True)
+        return organelle_type
+
+    def _infer_organelle_type_fallback(self, csv_path: str) -> str:
+        """
+        Fallback: Infer organelle type from CSV filename using pattern matching.
 
         Args:
             csv_path: Path to CSV file
@@ -111,6 +167,9 @@ class OrganelleDatabase:
             'ves': 'vesicle',
             'lyso': 'lysosome',
             'perox': 'peroxisome',
+            'ld': 'lipid_droplet',
+            'cell': 'cell',
+            'yolk': 'yolk',
         }
 
         # Check if filename starts with any known abbreviation
@@ -120,6 +179,112 @@ class OrganelleDatabase:
 
         # Otherwise use the filename as-is
         return filename
+
+    def _analyze_columns_ai(self, csv_path: str) -> Dict[str, str]:
+        """
+        Use AI to map CSV columns to database schema fields.
+
+        Args:
+            csv_path: Path to CSV file
+
+        Returns:
+            Dict mapping CSV column names to database field names
+        """
+        df = pd.read_csv(csv_path, nrows=3)
+        columns = list(df.columns)
+        sample_data = df.head(2).to_dict('records')
+
+        prompt = f"""Analyze this CSV and map columns to our database schema.
+
+CSV Columns: {columns}
+Sample Data (first 2 rows): {sample_data}
+
+Database schema fields:
+- object_id: Unique identifier for each organelle (required)
+- volume: Volume measurement (prefer nm^3 units)
+- surface_area: Surface area measurement (prefer nm^2 units)
+- position_x, position_y, position_z: Center coordinates (prefer COM/centroid in nm)
+
+For each CSV column that matches a database field, provide the mapping.
+Return ONLY as JSON: {{"CSV Column Name": "database_field"}}
+
+Examples:
+- "Object ID" → "object_id"
+- "Volume (nm^3)" → "volume"
+- "COM X (nm)" → "position_x"
+
+Columns that don't match (like MIN X, MAX X, lsp, etc.) should be OMITTED.
+
+JSON mapping:"""
+
+        try:
+            response = ollama.chat(model=self.ai_model, messages=[{"role": "user", "content": prompt}])
+            mapping_str = response["message"]["content"].strip()
+
+            # Remove markdown code blocks if present
+            if '```' in mapping_str:
+                mapping_str = mapping_str.split('```')[1]
+                if mapping_str.startswith('json'):
+                    mapping_str = mapping_str[4:]
+                mapping_str = mapping_str.strip()
+
+            mapping = json.loads(mapping_str)
+            print(f"[DB] AI column mapping for {Path(csv_path).name}: {mapping}", flush=True)
+            return mapping
+
+        except Exception as e:
+            print(f"[DB] AI column mapping failed: {e}, using fallback", flush=True)
+            return self._get_column_mapping_fallback()
+
+    def _get_column_mapping_fallback(self) -> Dict[str, str]:
+        """Fallback hardcoded column mapping."""
+        return {
+            # Object ID variations
+            'object id': 'object_id',
+            'object_id': 'object_id',
+            'id': 'object_id',
+            'obj_id': 'object_id',
+            'segment_id': 'object_id',
+
+            # Volume variations
+            'volume': 'volume',
+            'vol': 'volume',
+            'size': 'volume',
+            'volume_(nm^3)': 'volume',
+            'volume (nm^3)': 'volume',
+
+            # Surface area variations
+            'surface_area': 'surface_area',
+            'area': 'surface_area',
+            'surf_area': 'surface_area',
+            'surface_area_(nm^2)': 'surface_area',
+            'surface area (nm^2)': 'surface_area',
+
+            # Position variations
+            'center_x': 'position_x',
+            'x': 'position_x',
+            'pos_x': 'position_x',
+            'centroid_x': 'position_x',
+            'com_x': 'position_x',
+            'com_x_(nm)': 'position_x',
+            'com x (nm)': 'position_x',
+
+            'center_y': 'position_y',
+            'y': 'position_y',
+            'pos_y': 'position_y',
+            'centroid_y': 'position_y',
+            'com_y': 'position_y',
+            'com_y_(nm)': 'position_y',
+            'com y (nm)': 'position_y',
+
+            'center_z': 'position_z',
+            'z': 'position_z',
+            'pos_z': 'position_z',
+            'centroid_z': 'position_z',
+            'com_z': 'position_z',
+            'com_z_(nm)': 'position_z',
+            'com z (nm)': 'position_z',
+        }
 
     def _import_csv(self, csv_path: str, organelle_type: str) -> int:
         """
@@ -141,54 +306,15 @@ class OrganelleDatabase:
             df = pd.read_csv(csv_path)
             print(f"[DB] Loaded {len(df)} rows from {csv_path}", flush=True)
 
-            # Map common column names to our schema
-            # This mapping handles various naming conventions from different datasets
-            column_mapping = {
-                # Object ID variations
-                'object_id': 'object_id',
-                'id': 'object_id',
-                'obj_id': 'object_id',
-                'segment_id': 'object_id',
-
-                # Volume variations (cubic nanometers)
-                'volume': 'volume',
-                'vol': 'volume',
-                'size': 'volume',
-                'volume_(nm^3)': 'volume',
-                'volume (nm^3)': 'volume',
-
-                # Surface area variations (square nanometers)
-                'surface_area': 'surface_area',
-                'area': 'surface_area',
-                'surf_area': 'surface_area',
-                'surface_area_(nm^2)': 'surface_area',
-                'surface area (nm^2)': 'surface_area',
-
-                # Position variations - Center of Mass (COM) coordinates
-                'center_x': 'position_x',
-                'x': 'position_x',
-                'pos_x': 'position_x',
-                'centroid_x': 'position_x',
-                'com_x': 'position_x',
-                'com_x_(nm)': 'position_x',
-                'com x (nm)': 'position_x',
-
-                'center_y': 'position_y',
-                'y': 'position_y',
-                'pos_y': 'position_y',
-                'centroid_y': 'position_y',
-                'com_y': 'position_y',
-                'com_y_(nm)': 'position_y',
-                'com y (nm)': 'position_y',
-
-                'center_z': 'position_z',
-                'z': 'position_z',
-                'pos_z': 'position_z',
-                'centroid_z': 'position_z',
-                'com_z': 'position_z',
-                'com_z_(nm)': 'position_z',
-                'com z (nm)': 'position_z',
-            }
+            # Get column mapping (AI-based if model available, otherwise fallback)
+            if self.ai_model:
+                try:
+                    column_mapping = self._analyze_columns_ai(csv_path)
+                except Exception as e:
+                    print(f"[DB] AI column mapping failed: {e}, using fallback", flush=True)
+                    column_mapping = self._get_column_mapping_fallback()
+            else:
+                column_mapping = self._get_column_mapping_fallback()
 
             # Log original columns for debugging
             print(f"[DB] Original columns: {list(df.columns)}", flush=True)

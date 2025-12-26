@@ -89,7 +89,10 @@ def main():
     if csv_paths:
         try:
             db_path = os.getenv("ORGANELLE_DB_PATH", "./organelle_data/organelles.db")
-            db = OrganelleDatabase(db_path=db_path, csv_paths=csv_paths)
+            query_model = os.getenv("QUERY_AI_MODEL", "qwen2.5-coder:1.5b")
+
+            # Initialize database with AI model for intelligent column/type inference
+            db = OrganelleDatabase(db_path=db_path, csv_paths=csv_paths, ai_model=query_model)
 
             row_count = db.get_row_count()
             organelle_types = db.get_available_organelle_types()
@@ -98,8 +101,8 @@ def main():
             print(f"      Total organelles: {row_count}", flush=True)
             print(f"      Organelle types: {', '.join(organelle_types)}", flush=True)
 
-            query_model = os.getenv("QUERY_AI_MODEL", "nemotron")
-            query_agent = QueryAgent(db=db, model=query_model)
+            # Initialize query agent with ng_tracker for layer discovery
+            query_agent = QueryAgent(db=db, model=query_model, ng_tracker=tracker)
             print(f"      Query mode: ENABLED (model: {query_model})", flush=True)
         except Exception as e:
             print(f"      Failed to initialize database: {e}", flush=True)
