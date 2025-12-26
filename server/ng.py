@@ -437,13 +437,17 @@ class NG_StateTracker:
         try:
             with self.viewer.txn() as s:
                 layers = {}
-                for name, layer in s.layers.items():
+                # Neuroglancer layers is an OrderedDict-like object
+                for layer in s.layers:
+                    layer_name = layer.name
                     layer_type = type(layer).__name__
-                    layers[name] = layer_type
+                    layers[layer_name] = layer_type
                 print(f"[NG] Discovered {len(layers)} layers: {list(layers.keys())}")
                 return layers
         except Exception as e:
             print(f"[NG] Error discovering layers: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
 
 
