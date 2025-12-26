@@ -427,6 +427,25 @@ class NG_StateTracker:
         """Get the Neuroglancer viewer URL."""
         return str(self.viewer)
 
+    def get_available_layers(self) -> Dict[str, str]:
+        """
+        Discover available segmentation layers from Neuroglancer.
+
+        Returns:
+            Dict mapping layer_name → layer_type (e.g., 'mito_filled' → 'SegmentationLayer')
+        """
+        try:
+            with self.viewer.txn() as s:
+                layers = {}
+                for name, layer in s.layers.items():
+                    layer_type = type(layer).__name__
+                    layers[name] = layer_type
+                print(f"[NG] Discovered {len(layers)} layers: {list(layers.keys())}")
+                return layers
+        except Exception as e:
+            print(f"[NG] Error discovering layers: {e}")
+            return {}
+
 
 # Module-level instance for easy access
 _tracker_instance = None
