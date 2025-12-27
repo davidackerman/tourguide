@@ -589,18 +589,25 @@ def create_app(tracker, query_agent=None) -> FastAPI:
 
                             layer = s.layers[layer_name]
 
+                            # Convert segment IDs to integers (Neuroglancer expects uint64)
+                            try:
+                                segment_ids_int = [int(sid) for sid in segment_ids]
+                            except (ValueError, TypeError) as e:
+                                print(f"[QUERY] Warning: Could not convert segment IDs to integers: {e}", flush=True)
+                                segment_ids_int = segment_ids
+
                             # Update segment visibility based on action
                             if action == "show_only":
                                 # Clear existing segments and show only these
-                                layer.segments = set(segment_ids)
+                                layer.segments = set(segment_ids_int)
                             elif action == "add":
                                 # Add to existing visible segments
                                 current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
-                                layer.segments = current_segments | set(segment_ids)
+                                layer.segments = current_segments | set(segment_ids_int)
                             elif action == "remove":
                                 # Remove from visible segments
                                 current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
-                                layer.segments = current_segments - set(segment_ids)
+                                layer.segments = current_segments - set(segment_ids_int)
 
                             print(f"[QUERY] Updated layer '{layer_name}' with {len(segment_ids)} segments (action: {action})", flush=True)
 
