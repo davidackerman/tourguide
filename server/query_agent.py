@@ -1350,14 +1350,26 @@ Return ONLY this JSON (no explanation):
 
         for result in results:
             obj_id = result.get('object_id')
+            org_type = result.get('organelle_type')
+
+            if not organelle_type and org_type:
+                organelle_type = org_type
+
             if obj_id is not None:
                 # Convert to int first to handle floats like 2.0 -> "2" instead of "2.0"
                 try:
-                    segment_ids.append(str(int(float(obj_id))))
+                    obj_id_str = str(int(float(obj_id)))
                 except (ValueError, TypeError):
-                    segment_ids.append(str(obj_id))
-            if not organelle_type and result.get('organelle_type'):
-                organelle_type = result.get('organelle_type')
+                    obj_id_str = str(obj_id)
+
+                # Format segment ID as "organelle_type_id" (e.g., "mitochondria_372")
+                # This matches the Neuroglancer segment naming convention
+                if org_type:
+                    segment_id = f"{org_type}_{obj_id_str}"
+                else:
+                    segment_id = obj_id_str
+
+                segment_ids.append(segment_id)
 
         if not segment_ids:
             return {
