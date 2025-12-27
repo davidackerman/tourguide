@@ -552,13 +552,55 @@ button:disabled {
     flex-direction: column;
 }
 
-.chat-messages {
+/* Chat Tabs */
+.chat-tabs {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 15px;
+    border-bottom: 2px solid #444;
+}
+
+.chat-tab-btn {
+    padding: 10px 20px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #888;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.2s;
+    margin-bottom: -2px;
+}
+
+.chat-tab-btn:hover {
+    color: #e0e0e0;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.chat-tab-btn.active {
+    color: #4a9eff;
+    border-bottom-color: #4a9eff;
+}
+
+.chat-tab-content {
+    display: none;
+    flex: 1;
+    overflow: hidden;
+}
+
+.chat-tab-content.active {
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-messages,
+.verbose-messages {
     flex: 1;
     overflow-y: auto;
     padding: 15px;
     background: #1a1a1a;
     border-radius: 4px;
-    margin-bottom: 15px;
 }
 
 .chat-placeholder {
@@ -602,8 +644,189 @@ button:disabled {
 
 .chat-loading {
     background: #666;
-    color: #ddd;
+}
+
+/* Verbose Log Styles */
+.verbose-entry {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #2a2a2a;
+    border-radius: 6px;
+    border-left: 3px solid #4a9eff;
+}
+
+.verbose-query {
+    font-weight: 600;
+    color: #4a9eff;
+    margin-bottom: 10px;
+    font-size: 15px;
+}
+
+.verbose-section {
+    margin: 10px 0;
+    padding: 10px;
+    background: #1a1a1a;
+    border-radius: 4px;
+}
+
+.verbose-section-title {
+    font-weight: 600;
+    color: #ffa726;
+    margin-bottom: 8px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.verbose-sql {
+    font-family: 'Courier New', monospace;
+    color: #66bb6a;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+}
+
+.verbose-ai-prompt {
+    font-family: 'Courier New', monospace;
+    color: #ce93d8;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.verbose-ai-response {
+    font-family: 'Courier New', monospace;
+    color: #81c784;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.verbose-result {
+    font-family: 'Courier New', monospace;
+    color: #64b5f6;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+}
+
+.verbose-timing {
+    color: #888;
+    font-size: 11px;
+    margin-top: 8px;
     font-style: italic;
+}
+
+/* AI Interaction Styles */
+.ai-interaction {
+    margin: 15px 0;
+    padding: 15px;
+    background: #252525;
+    border-left: 3px solid #9c27b0;
+    border-radius: 4px;
+}
+
+.ai-interaction-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    color: #ce93d8;
+    font-size: 14px;
+}
+
+.ai-model-badge {
+    background: #9c27b0;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.ai-interaction-label {
+    font-weight: 600;
+    color: #aaa;
+    margin-bottom: 5px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.ai-interaction-prompt {
+    margin-bottom: 12px;
+}
+
+.ai-interaction-prompt pre {
+    font-family: 'Courier New', monospace;
+    color: #ce93d8;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+    margin: 0;
+}
+
+.ai-interaction-response {
+    margin-bottom: 12px;
+}
+
+.ai-interaction-response pre {
+    font-family: 'Courier New', monospace;
+    color: #81c784;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+    margin: 0;
+}
+
+.ai-interaction-cleaned {
+    margin-bottom: 12px;
+}
+
+.ai-interaction-cleaned pre {
+    font-family: 'Courier New', monospace;
+    color: #66bb6a;
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    margin: 0;
+}
+
+.ai-interaction-retry {
+    color: #ff9800;
+    font-size: 12px;
+    margin-top: 8px;
+    padding: 8px;
+    background: #2d2200;
+    border-radius: 3px;
 }
 
 .chat-input-container {
@@ -644,4 +867,81 @@ button:disabled {
 
 #chat-send:active {
     background: #2a7edf;
+}
+
+/* AI Interactions Styling */
+.ai-interaction {
+    background: #1e1e1e;
+    border-left: 3px solid #4a9eff;
+    padding: 12px;
+    margin: 10px 0;
+    border-radius: 4px;
+}
+
+.ai-interaction-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    color: #4a9eff;
+    font-size: 14px;
+}
+
+.ai-model-badge {
+    background: #333;
+    color: #ffa726;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.ai-interaction-label {
+    color: #888;
+    font-size: 11px;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+    font-weight: 600;
+}
+
+.ai-interaction-prompt pre,
+.ai-interaction-response pre,
+.ai-interaction-cleaned pre {
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 10px;
+    overflow-x: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 5px 0 10px 0;
+}
+
+.ai-interaction-prompt pre {
+    color: #ffb74d;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.ai-interaction-response pre {
+    color: #81c784;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.ai-interaction-cleaned pre {
+    color: #64b5f6;
+    max-height: 150px;
+    overflow-y: auto;
+}
+
+.ai-interaction-retry {
+    background: #3d2a00;
+    border-left: 3px solid #ffa726;
+    padding: 8px;
+    margin-top: 8px;
+    border-radius: 3px;
+    color: #ffb74d;
+    font-size: 12px;
 }

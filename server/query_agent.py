@@ -39,7 +39,7 @@ class QueryAgent:
         Args:
             db: OrganelleDatabase instance
             model: Ollama model name (default: nemotron-3-nano)
-            ng_tracker: Optional NG_StateTracker instance for layer discovery
+            ng_tracker: Optional NG_StateTracker instance for layer discovery and state access
             verbose: Enable verbose logging of AI interactions
         """
         # Ensure Ollama is running before initializing
@@ -111,12 +111,13 @@ class QueryAgent:
                 "answer": f"Error processing query: {str(e)}"
             }
 
-    def _classify_query_type(self, query: str) -> str:
+    def _classify_query_type(self, query: str, ai_interactions: List[Dict[str, Any]] = None) -> str:
         """
         Classify query intent using AI.
 
         Args:
             query: User query string
+            ai_interactions: Optional list to track AI interactions
 
         Returns:
             Query intent: 'navigation', 'visualization', or 'informational'
@@ -155,6 +156,15 @@ Intent:"""
                 print(intent, flush=True)
                 print("="*80 + "\n", flush=True)
 
+            # Track AI interaction
+            if ai_interactions is not None:
+                ai_interactions.append({
+                    'type': 'intent_classification',
+                    'prompt': prompt,
+                    'response': intent,
+                    'model': self.model
+                })
+
             # Validate response
             if intent in ['navigation', 'visualization', 'informational']:
                 print(f"[QUERY_AGENT] Classified intent: {intent}", flush=True)
@@ -167,7 +177,7 @@ Intent:"""
             print(f"[QUERY_AGENT] Error classifying query: {e}", flush=True)
             return "informational"
 
-    def _generate_sql(self, user_query: str, previous_error: Optional[str] = None) -> Optional[str]:
+    def _generate_sql(self, user_query: str, previous_error: Optional[str] = None, ai_interactions: List[Dict[str, Any]] = None) -> Optional[str]:
         """
         Generate SQL query from natural language using Ollama.
 
@@ -329,6 +339,18 @@ IMPORTANT:
 - For navigation queries (take me to, go to, etc.), MUST also include position_x, position_y, position_z
 - For visualization queries (show, display, highlight), object_id and organelle_type are REQUIRED
 
+UNITS AND COORDINATE SYSTEM:
+- Volume is stored in nm³ (cubic nanometers) in the 'volume' COLUMN (not metadata!)
+- Surface area is stored in nm² (square nanometers) in the 'surface_area' COLUMN (not metadata!)
+- Position coordinates (position_x, position_y, position_z) are in nm (nanometers) as COLUMNS
+- Metadata fields like 'lsp (nm)', 'radius mean (nm)' require json_extract(metadata, '$.field')
+- Position coordinates are in (x, y, z) order matching the CSV files and Neuroglancer viewer
+
+CRITICAL - Column vs Metadata:
+- volume, surface_area, position_x/y/z, object_id, organelle_type are DIRECT COLUMNS - use them directly!
+- Other fields like 'lsp (nm)', 'radius mean (nm)', 'num branches' are in metadata JSON - use json_extract()
+- DO NOT extract volume or surface_area from metadata - they are direct columns!
+
 Remember: Your response must be ONLY the SQL query, nothing else.
 
 SQL Query:"""
@@ -361,6 +383,18 @@ SQL Query:"""
                 print("CLEANED SQL:", flush=True)
                 print(sql, flush=True)
                 print("="*80 + "\n", flush=True)
+
+            # Track AI interaction
+            if ai_interactions is not None:
+                ai_interactions.append({
+                    'type': 'sql_generation',
+                    'prompt': prompt,
+                    'response': sql_raw,
+                    'cleaned_sql': sql,
+                    'model': self.model,
+                    'retry': previous_error is not None,
+                    'previous_error': previous_error
+                })
 
             print(f"[QUERY_AGENT] Generated SQL: {sql}", flush=True)
             return sql
@@ -464,7 +498,7 @@ SQL Query:"""
             print(f"[QUERY_AGENT] SQL syntax validation failed: {error_msg}", flush=True)
             return (False, error_msg)
 
-    def _generate_sql_with_retry(self, user_query: str, max_retries: int = 2) -> Optional[str]:
+    def _generate_sql_with_retry(self, user_query: str, max_retries: int = 2, ai_interactions: List[Dict[str, Any]] = None) -> Optional[str]:
         """
         Generate SQL with retry mechanism.
 
@@ -479,7 +513,7 @@ SQL Query:"""
 
         for attempt in range(max_retries + 1):
             # Generate SQL with error feedback
-            sql = self._generate_sql(user_query, previous_error=last_error if attempt > 0 else None)
+            sql = self._generate_sql(user_query, previous_error=last_error if attempt > 0 else None, ai_interactions=ai_interactions)
 
             if not sql:
                 return None
@@ -529,13 +563,16 @@ SQL Query:"""
         import time
         timing = {}
 
+        # Track AI interactions for verbose logging
+        ai_interactions = []
+
         try:
             # Classify query type
-            query_type = self._classify_query_type(user_query)
+            query_type = self._classify_query_type(user_query, ai_interactions)
 
             # Generate SQL with retry mechanism and timing
             start_sql = time.time()
-            sql = self._generate_sql_with_retry(user_query, max_retries=2)
+            sql = self._generate_sql_with_retry(user_query, max_retries=2, ai_interactions=ai_interactions)
             timing['sql_generation'] = time.time() - start_sql
 
             if not sql:
@@ -561,15 +598,23 @@ SQL Query:"""
                 }
 
             # Handle based on query type
+            result = None
             if query_type == "informational":
-                return self._handle_informational_query(user_query, sql, results)
+                result = self._handle_informational_query(user_query, sql, results, ai_interactions)
             elif query_type == "navigation":
-                return self._handle_navigation_query(user_query, sql, results)
+                result = self._handle_navigation_query(user_query, sql, results, ai_interactions)
             elif query_type == "visualization":
-                return self._handle_visualization_query(user_query, sql, results)
+                result = self._handle_visualization_query(user_query, sql, results, ai_interactions)
             else:
                 # Default to informational
-                return self._handle_informational_query(user_query, sql, results)
+                result = self._handle_informational_query(user_query, sql, results, ai_interactions)
+
+            # Always add AI interactions to result for verbose logging in UI
+            if ai_interactions:
+                result['ai_interactions'] = ai_interactions
+                result['model'] = self.model
+
+            return result
 
         except Exception as e:
             print(f"[QUERY_AGENT] Error processing single query: {e}", flush=True)
@@ -970,7 +1015,8 @@ Your response:"""
         self,
         user_query: str,
         sql: str,
-        results: List[Dict[str, Any]]
+        results: List[Dict[str, Any]],
+        ai_interactions: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Handle informational query (no navigation).
@@ -979,12 +1025,13 @@ Your response:"""
             user_query: Original user query
             sql: Generated SQL
             results: Query results
+            ai_interactions: Optional list to track AI interactions
 
         Returns:
             Response dictionary
         """
         # Format answer
-        answer = self._format_answer(results, user_query)
+        answer = self._format_answer(results, user_query, ai_interactions)
 
         return {
             "type": "informational",
@@ -993,14 +1040,209 @@ Your response:"""
             "answer": answer
         }
 
+    def _get_ng_state(self) -> Dict[str, Any]:
+        """
+        Get current Neuroglancer state.
+
+        Returns:
+            Neuroglancer state as dictionary
+        """
+        if not self.ng_tracker:
+            return {}
+
+        try:
+            with self.ng_tracker.viewer.txn() as s:
+                return s.to_json()
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error getting NG state: {e}", flush=True)
+            return {}
+
+    def _extract_voxel_size_from_state(self, ng_state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract voxel size and axis order from Neuroglancer state dimensions.
+
+        Args:
+            ng_state: Neuroglancer state dictionary
+
+        Returns:
+            Dictionary with:
+                - 'axis_order': List of axis names in order (e.g., ['x', 'y', 'z'] or ['z', 'y', 'x'])
+                - 'voxel_sizes': Dictionary mapping axis name to voxel size in nm
+        """
+        # Default for C. elegans dataset (x, y, z order)
+        default_result = {
+            'axis_order': ['x', 'y', 'z'],
+            'voxel_sizes': {'x': 8.0, 'y': 8.0, 'z': 8.0}
+        }
+
+        if not ng_state or 'dimensions' not in ng_state:
+            print(f"[QUERY_AGENT] No dimensions in state, using default", flush=True)
+            return default_result
+
+        dimensions = ng_state['dimensions']
+
+        try:
+            # Neuroglancer dimensions can be ordered arbitrarily
+            # Extract axis order from the state (order matters!)
+            if isinstance(dimensions, dict):
+                axis_order = list(dimensions.keys())
+            else:
+                print(f"[QUERY_AGENT] Dimensions not a dict, using default", flush=True)
+                return default_result
+
+            voxel_sizes = {}
+            for axis in axis_order:
+                dim_info = dimensions[axis]
+                if isinstance(dim_info, list) and len(dim_info) >= 2:
+                    # Format: [scale, unit]
+                    scale = float(dim_info[0])
+                    unit = dim_info[1]
+
+                    # Convert to nanometers
+                    if unit == 'm':
+                        voxel_size_nm = scale * 1e9
+                    elif unit == 'nm':
+                        voxel_size_nm = scale
+                    else:
+                        print(f"[QUERY_AGENT] Unknown unit '{unit}' for axis {axis}, assuming meters", flush=True)
+                        voxel_size_nm = scale * 1e9
+
+                    voxel_sizes[axis] = voxel_size_nm
+                else:
+                    # Fallback to default
+                    voxel_sizes[axis] = 8.0
+
+            result = {
+                'axis_order': axis_order,
+                'voxel_sizes': voxel_sizes
+            }
+
+            print(f"[QUERY_AGENT] Extracted from state: axis_order={axis_order}, voxel_sizes={voxel_sizes}", flush=True)
+            return result
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error extracting voxel info: {e}, using default", flush=True)
+            import traceback
+            traceback.print_exc()
+            return default_result
+
+    def _generate_navigation_command_with_ai(
+        self,
+        result: Dict[str, Any],
+        ng_state: Dict[str, Any],
+        user_query: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Use AI to generate navigation command by converting coordinates and determining zoom.
+
+        Args:
+            result: SQL result with position_x/y/z in nanometers and volume
+            ng_state: Full Neuroglancer state (contains dimensions with voxel sizes)
+            user_query: Original user query
+
+        Returns:
+            Dictionary with 'position' (voxel coords), 'scale', and 'answer', or None if failed
+        """
+        import json
+
+        # Extract position from result (in nanometers)
+        position_x = result.get('position_x')
+        position_y = result.get('position_y')
+        position_z = result.get('position_z')
+
+        if position_x is None or position_y is None or position_z is None:
+            return None
+
+        # Extract relevant state info (dimensions with voxel sizes)
+        dimensions = ng_state.get('dimensions', {})
+
+        # Simplified prompt - be very direct and concrete
+        voxel_x = dimensions.get('x', [8e-9, 'm'])[0] * 1e9 if dimensions.get('x') else 8.0
+        voxel_y = dimensions.get('y', [8e-9, 'm'])[0] * 1e9 if dimensions.get('y') else 8.0
+        voxel_z = dimensions.get('z', [8e-9, 'm'])[0] * 1e9 if dimensions.get('z') else 8.0
+
+        prompt = f"""Convert coordinates and generate navigation command.
+
+Position in nanometers: ({position_x:.1f}, {position_y:.1f}, {position_z:.1f}) nm
+Voxel size: ({voxel_x:.1f}, {voxel_y:.1f}, {voxel_z:.1f}) nm/voxel
+Volume: {result.get('volume', 'N/A')} nm³
+Object: {result.get('organelle_type', 'organelle')} {result.get('object_id', 'unknown')}
+
+Calculate:
+1. Voxel coordinates = position_nm / voxel_size
+2. Scale based on volume: <1000→10, <10000→30, <100000→100, <500000→200, ≥500000→300
+
+Return ONLY this JSON (no explanation):
+{{"position": [x_voxel, y_voxel, z_voxel], "scale": <int>, "answer": "Taking you to [type] [id] at ([x], [y], [z]) nm with volume [vol] nm³"}}"""
+
+        try:
+            print(f"[QUERY_AGENT] Calling AI to generate navigation command (model={self.model})...", flush=True)
+
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] NAVIGATION COMMAND GENERATION", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
+            import time
+            start = time.time()
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                options={
+                    "num_predict": 500,  # Limit response length
+                    "temperature": 0.1,  # More deterministic
+                }
+            )
+
+            elapsed = time.time() - start
+            print(f"[QUERY_AGENT] AI navigation call completed in {elapsed:.2f}s", flush=True)
+
+            response_text = response["message"]["content"].strip()
+
+            print(f"[QUERY_AGENT] AI response text: '{response_text[:200]}'...", flush=True)
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(response_text, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            # Check if response is empty
+            if not response_text:
+                print(f"[QUERY_AGENT] AI returned empty response!", flush=True)
+                return None
+
+            # Clean and parse JSON
+            response_text = response_text.replace('```json', '').replace('```', '').strip()
+            nav_command = json.loads(response_text)
+
+            # Validate response structure
+            if 'position' not in nav_command or 'scale' not in nav_command:
+                print(f"[QUERY_AGENT] AI navigation response missing required fields", flush=True)
+                return None
+
+            print(f"[QUERY_AGENT] AI generated navigation: position={nav_command['position']}, scale={nav_command['scale']}", flush=True)
+            return nav_command
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error generating navigation with AI: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return None
+
     def _handle_navigation_query(
         self,
         user_query: str,
         sql: str,
-        results: List[Dict[str, Any]]
+        results: List[Dict[str, Any]],
+        ai_interactions: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Handle navigation query (update viewer position).
+        Uses AI to compute navigation commands based on NG state.
 
         Args:
             user_query: Original user query
@@ -1026,37 +1268,70 @@ Your response:"""
                 "results": results
             }
 
-        # Calculate zoom level
-        volume = result.get('volume', 0)
-        scale = self._calculate_zoom_for_volume(volume)
+        # Get Neuroglancer state to extract voxel size and axis order
+        ng_state = self._get_ng_state() if self.ng_tracker else {}
 
-        # Create navigation command
-        navigation = {
-            "position": [int(position_x), int(position_y), int(position_z)],
-            "object_id": result.get('object_id', 'unknown'),
-            "scale": scale
+        # Extract voxel size and axis order from state
+        voxel_info = self._extract_voxel_size_from_state(ng_state)
+        axis_order = voxel_info['axis_order']
+        voxel_sizes = voxel_info['voxel_sizes']
+
+        # Database stores positions as (position_x, position_y, position_z) = (x, y, z)
+        # We need to convert these to voxels in the order expected by Neuroglancer state
+        position_nm = {
+            'x': position_x,
+            'y': position_y,
+            'z': position_z
         }
 
-        # Format answer
-        object_id = result.get('object_id', 'unknown')
-        organelle_type = result.get('organelle_type', 'organelle')
-        volume_str = f" with volume {volume:.1f}" if volume else ""
+        # Convert to voxel coordinates in the order specified by the state
+        voxel_position = []
+        for axis in axis_order:
+            if axis in position_nm and axis in voxel_sizes:
+                voxel_coord = int(position_nm[axis] / voxel_sizes[axis])
+                voxel_position.append(voxel_coord)
+            else:
+                print(f"[QUERY_AGENT] Warning: axis '{axis}' not found in position or voxel_sizes", flush=True)
+                voxel_position.append(0)
 
-        answer = f"Taking you to {organelle_type} {object_id}{volume_str}"
+        # Create natural language answer with units
+        organelle_type = result.get('organelle_type', 'organelle').replace('_', ' ')
+        object_id = result.get('object_id', 'unknown')
+        volume = result.get('volume', 0)
+
+        if volume and volume > 0:
+            vol_str = f"{volume:.2e}" if volume >= 1e6 else f"{volume:.1f}"
+            answer = f"Taking you to {organelle_type} {object_id} at position ({position_x:.1f}, {position_y:.1f}, {position_z:.1f}) nm with volume {vol_str} nm³"
+        else:
+            answer = f"Taking you to {organelle_type} {object_id} at position ({position_x:.1f}, {position_y:.1f}, {position_z:.1f}) nm"
+
+        nav_command = {
+            "position": voxel_position,
+            "answer": answer
+        }
+
+        print(f"[QUERY_AGENT] Generated navigation: nm=(x:{position_x:.1f}, y:{position_y:.1f}, z:{position_z:.1f}) → voxel={voxel_position} (axis_order={axis_order})", flush=True)
+
+        # Add metadata
+        nav_command["object_id"] = result.get('object_id', 'unknown')
 
         return {
             "type": "navigation",
             "sql": sql,
             "results": results,
-            "answer": answer,
-            "navigation": navigation
+            "answer": nav_command.get("answer", "Navigating..."),
+            "navigation": {
+                "position": nav_command["position"],
+                "object_id": nav_command["object_id"]
+            }
         }
 
     def _handle_visualization_query(
         self,
         user_query: str,
         sql: str,
-        results: List[Dict[str, Any]]
+        results: List[Dict[str, Any]],
+        ai_interactions: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Handle visualization query (show/hide specific segments).
@@ -1075,8 +1350,12 @@ Your response:"""
 
         for result in results:
             obj_id = result.get('object_id')
-            if obj_id:
-                segment_ids.append(str(obj_id))
+            if obj_id is not None:
+                # Convert to int first to handle floats like 2.0 -> "2" instead of "2.0"
+                try:
+                    segment_ids.append(str(int(float(obj_id))))
+                except (ValueError, TypeError):
+                    segment_ids.append(str(obj_id))
             if not organelle_type and result.get('organelle_type'):
                 organelle_type = result.get('organelle_type')
 
@@ -1099,7 +1378,7 @@ Your response:"""
         }
 
         # Format answer using AI
-        answer = self._format_visualization_answer(user_query, results, organelle_type, segment_ids)
+        answer = self._format_visualization_answer(user_query, results, organelle_type, segment_ids, ai_interactions)
 
         return {
             "type": "visualization",
@@ -1204,10 +1483,11 @@ Layer name:"""
         user_query: str,
         results: List[Dict[str, Any]],
         organelle_type: str,
-        segment_ids: List[str]
+        segment_ids: List[str],
+        ai_interactions: List[Dict[str, Any]] = None
     ) -> str:
         """
-        Format a natural language answer for visualization query.
+        Format a natural language answer for visualization query using AI.
 
         Args:
             user_query: Original user query
@@ -1218,16 +1498,172 @@ Layer name:"""
         Returns:
             Natural language answer
         """
-        count = len(segment_ids)
-        type_name = organelle_type.replace('_', ' ') if organelle_type else "organelle"
+        import json
 
-        # Simple format for now - could use LLM for more natural responses
-        if count == 1:
-            vol = results[0].get('volume')
-            vol_str = f" with volume {vol:.2e}" if vol else ""
-            return f"Showing {type_name} {segment_ids[0]}{vol_str}"
-        else:
-            return f"Showing {count} {type_name} objects"
+        # Limit results to avoid token overflow
+        max_results = 5
+        results_to_show = results[:max_results]
+
+        prompt = f"""You are responding to a user's visualization query about organelle data.
+
+User Query: {user_query}
+
+Action: Showing {len(segment_ids)} {organelle_type.replace('_', ' ') if organelle_type else 'organelle'} object(s) in the viewer
+
+Query Results (showing up to {max_results} of {len(results)}):
+{json.dumps(results_to_show, indent=2)}
+
+Instructions:
+1. Create a natural language response describing what will be shown in the viewer
+2. Keep it to 1-2 sentences maximum
+3. ALWAYS include units where relevant:
+   - Volume: nm³
+   - Surface area: nm²
+   - Use scientific notation for large values (e.g., 3.05e11 nm³)
+4. For single objects, mention key details (ID, volume, etc.)
+5. For multiple objects, summarize (e.g., "3 largest mitochondria", "5 nuclei")
+6. Use natural language, not technical jargon
+
+Examples:
+- "Showing mitochondria 123 with volume 3.05e11 nm³"
+- "Displaying the 3 largest mitochondria (volumes: 5.2e11 nm³, 4.8e11 nm³, 4.3e11 nm³)"
+- "Showing 5 nuclei with volumes ranging from 1.2e12 to 2.5e12 nm³"
+
+Response:"""
+
+        try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] VISUALIZATION ANSWER", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            answer = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(answer, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            # Track AI interaction
+            if ai_interactions is not None:
+                ai_interactions.append({
+                    'type': 'visualization_answer',
+                    'prompt': prompt,
+                    'response': answer,
+                    'model': self.model
+                })
+
+            print(f"[QUERY_AGENT] AI formatted visualization answer", flush=True)
+            return answer
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error formatting visualization answer with AI: {e}, using fallback", flush=True)
+            # Fallback to simple format
+            count = len(segment_ids)
+            type_name = organelle_type.replace('_', ' ') if organelle_type else "organelle"
+            if count == 1:
+                vol = results[0].get('volume')
+                vol_str = f" with volume {vol:.2e} nm³" if vol else ""
+                return f"Showing {type_name} {segment_ids[0]}{vol_str}"
+            else:
+                return f"Showing {count} {type_name} objects"
+
+    def _get_voxel_size_from_state(self) -> tuple:
+        """
+        Extract voxel size from Neuroglancer state.
+
+        Returns:
+            Tuple of (voxel_size_x, voxel_size_y, voxel_size_z) in nanometers
+        """
+        if not self.ng_tracker:
+            print(f"[QUERY_AGENT] No NG tracker, using default voxel size (8, 8, 8)", flush=True)
+            return (8, 8, 8)
+
+        try:
+            # Get the full state JSON
+            with self.ng_tracker.viewer.txn() as s:
+                state = s.to_json()
+
+            # Debug: print dimensions structure
+            if "dimensions" in state:
+                print(f"[QUERY_AGENT] State dimensions: {state['dimensions']}", flush=True)
+
+                # Neuroglancer dimensions format: {axis_name: [scale, unit], ...}
+                # e.g., {'x': [6e-09, 'm'], 'y': [6e-09, 'm'], 'z': [6e-09, 'm']}
+                # The scale is in meters, we need to convert to nanometers (multiply by 1e9)
+                dims = state["dimensions"]
+                if isinstance(dims, dict):
+                    voxel_sizes = []
+                    for axis in ['x', 'y', 'z']:
+                        if axis in dims:
+                            dim_info = dims[axis]
+                            if isinstance(dim_info, list) and len(dim_info) >= 2:
+                                # First element is the scale, second is the unit
+                                scale = float(dim_info[0])
+                                unit = dim_info[1] if len(dim_info) > 1 else 'm'
+
+                                # Convert to nanometers
+                                if unit == 'm':
+                                    # Meters to nanometers: multiply by 1e9
+                                    voxel_size_nm = scale * 1e9
+                                elif unit == 'nm':
+                                    voxel_size_nm = scale
+                                else:
+                                    print(f"[QUERY_AGENT] Unknown unit '{unit}', assuming meters", flush=True)
+                                    voxel_size_nm = scale * 1e9
+
+                                voxel_sizes.append(voxel_size_nm)
+                            else:
+                                voxel_sizes.append(1.0)
+                        else:
+                            voxel_sizes.append(1.0)
+
+                    if len(voxel_sizes) == 3:
+                        result = tuple(voxel_sizes)
+                        print(f"[QUERY_AGENT] Extracted voxel size (in nm): {result}", flush=True)
+                        return result
+
+            print(f"[QUERY_AGENT] Could not parse voxel size, using default (8, 8, 8)", flush=True)
+            return (8, 8, 8)
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error getting voxel size from state: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return (8, 8, 8)
+
+    def _nm_to_voxel_coords(self, x_nm: float, y_nm: float, z_nm: float) -> List[int]:
+        """
+        Convert nanometer coordinates to voxel coordinates.
+
+        The database stores positions in nanometers (from CSV 'COM X/Y/Z (nm)' columns),
+        but Neuroglancer state uses voxel coordinates. We need to divide by the voxel size.
+
+        Args:
+            x_nm, y_nm, z_nm: Coordinates in nanometers
+
+        Returns:
+            List of [x_voxel, y_voxel, z_voxel] as integers
+        """
+        # Get voxel size from Neuroglancer state
+        voxel_size = self._get_voxel_size_from_state()
+
+        # Convert nm to voxels by dividing by voxel size
+        x_voxel = int(x_nm / voxel_size[0])
+        y_voxel = int(y_nm / voxel_size[1])
+        z_voxel = int(z_nm / voxel_size[2])
+
+        print(f"[QUERY_AGENT] Converted ({x_nm:.1f}, {y_nm:.1f}, {z_nm:.1f}) nm → ({x_voxel}, {y_voxel}, {z_voxel}) voxels (voxel_size={voxel_size})", flush=True)
+
+        return [x_voxel, y_voxel, z_voxel]
 
     def _calculate_zoom_for_volume(self, volume: float) -> int:
         """
@@ -1237,11 +1673,15 @@ Layer name:"""
         Smaller objects need lower scale (zoomed in).
 
         Args:
-            volume: Object volume
+            volume: Object volume (can be None)
 
         Returns:
             Appropriate scale value
         """
+        # Handle None or invalid volume
+        if volume is None or volume <= 0:
+            return 100  # Default medium zoom
+
         if volume < 1000:
             return 10  # Very zoomed in for tiny objects
         elif volume < 10000:
@@ -1256,7 +1696,8 @@ Layer name:"""
     def _format_answer(
         self,
         results: List[Dict[str, Any]],
-        user_query: str
+        user_query: str,
+        ai_interactions: List[Dict[str, Any]] = None
     ) -> str:
         """
         Format query results into natural language answer using LLM.
@@ -1276,26 +1717,51 @@ Layer name:"""
             key = list(results[0].keys())[0]
             value = results[0][key]
 
+            # Infer units from key name
+            unit = ""
+            if 'volume' in key.lower():
+                unit = " nm³"
+            elif 'surface' in key.lower() or 'area' in key.lower():
+                unit = " nm²"
+            elif 'position' in key.lower() or 'lsp' in key.lower() or 'radius' in key.lower() or 'length' in key.lower():
+                unit = " nm"
+
             if key == 'count' or 'count' in key.lower():
                 return f"There are {int(value)} matching organelles."
             elif 'average' in key.lower() or 'avg' in key.lower():
-                return f"The average is {value:.2f}"
+                if value >= 1e6:
+                    return f"The average is {value:.2e}{unit}"
+                else:
+                    return f"The average is {value:.2f}{unit}"
             elif 'sum' in key.lower() or 'total' in key.lower():
-                return f"The total is {value:.2f}"
+                if value >= 1e6:
+                    return f"The total is {value:.2e}{unit}"
+                else:
+                    return f"The total is {value:.2f}{unit}"
             elif 'min' in key.lower():
-                return f"The minimum is {value:.2f}"
+                if value >= 1e6:
+                    return f"The minimum is {value:.2e}{unit}"
+                else:
+                    return f"The minimum is {value:.2f}{unit}"
             elif 'max' in key.lower():
-                return f"The maximum is {value:.2f}"
+                if value >= 1e6:
+                    return f"The maximum is {value:.2e}{unit}"
+                else:
+                    return f"The maximum is {value:.2f}{unit}"
             else:
-                return f"The {key} is {value}"
+                if value >= 1e6:
+                    return f"The {key} is {value:.2e}{unit}"
+                else:
+                    return f"The {key} is {value}{unit}"
 
         # For complex results, use LLM to format answer
-        return self._format_answer_with_llm(results, user_query)
+        return self._format_answer_with_llm(results, user_query, ai_interactions)
 
     def _format_answer_with_llm(
         self,
         results: List[Dict[str, Any]],
-        user_query: str
+        user_query: str,
+        ai_interactions: List[Dict[str, Any]] = None
     ) -> str:
         """
         Use LLM (nemotron-3-nano) to format results into a natural language answer.
@@ -1303,6 +1769,7 @@ Layer name:"""
         Args:
             results: Query results
             user_query: Original query
+            ai_interactions: Optional list to track AI interactions
 
         Returns:
             Formatted natural language answer
@@ -1329,16 +1796,47 @@ Instructions:
 4. Be concise but informative - include key details like volume and surface area
 5. Keep your answer to 2-3 sentences maximum
 6. Use natural language, not just listing data
+7. ALWAYS include units in your answer:
+   - Volume: (nm³) - cubic nanometers
+   - Surface area: (nm²) - square nanometers
+   - Position coordinates: (nm) - nanometers
+   - Lengths/distances: (nm) - nanometers
+   - Example: "The volume is 3.05e11 nm³" or "Position at (1234, 5678, 9012) nm"
+8. NOTE: Position coordinates in the database are in (position_x, position_y, position_z) order
+   which corresponds to the order used in the CSV files and Neuroglancer viewer.
 
 Answer:"""
 
         try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] ANSWER FORMATTING", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
             response = ollama.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}]
             )
 
             answer = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(answer, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            # Track AI interaction
+            if ai_interactions is not None:
+                ai_interactions.append({
+                    'type': 'answer_formatting',
+                    'prompt': prompt,
+                    'response': answer,
+                    'model': self.model
+                })
+
             print(f"[QUERY_AGENT] LLM formatted answer: {answer}", flush=True)
             return answer
 

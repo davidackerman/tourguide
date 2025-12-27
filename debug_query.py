@@ -100,27 +100,97 @@ def run_query(agent: QueryAgent, query: str):
         print_separator()
         print("VISUALIZATION COMMAND (would update Neuroglancer):")
         print_separator()
-        viz = result["visualization"]
-        layer_name = viz.get('layer_name')
-        segment_ids = viz.get('segment_ids', [])
-        action = viz.get('action', 'show_only')
 
-        print(f"  Layer: {layer_name}")
-        print(f"  Action: {action}")
-        print(f"  Segment IDs: {segment_ids[:5]}{'...' if len(segment_ids) > 5 else ''}")
-        print(f"  Total segments: {len(segment_ids)}")
+        viz = result["visualization"]
+
+        # Handle both single command (dict) and multiple commands (list)
+        viz_commands = viz if isinstance(viz, list) else [viz]
+
+        print(f"  Number of layer commands: {len(viz_commands)}")
+        print()
+
+        for i, viz_cmd in enumerate(viz_commands, 1):
+            layer_name = viz_cmd.get('layer_name')
+            segment_ids = viz_cmd.get('segment_ids', [])
+            action = viz_cmd.get('action', 'show_only')
+
+            if len(viz_commands) > 1:
+                print(f"  Command {i}:")
+                prefix = "    "
+            else:
+                prefix = "  "
+
+            print(f"{prefix}Layer: {layer_name}")
+            print(f"{prefix}Action: {action}")
+            print(f"{prefix}Segment IDs: {segment_ids[:5]}{'...' if len(segment_ids) > 5 else ''}")
+            print(f"{prefix}Total segments: {len(segment_ids)}")
+            if i < len(viz_commands):
+                print()
+
         print()
         print("  Python code that would execute:")
         print(f"    with viewer.txn() as s:")
-        if action == "show_only":
-            print(f"        s.layers['{layer_name}'].segments = {{{', '.join(repr(s) for s in segment_ids[:3])}{', ...' if len(segment_ids) > 3 else ''}}}")
-        elif action == "add":
-            print(f"        current = set(s.layers['{layer_name}'].segments)")
-            print(f"        s.layers['{layer_name}'].segments = current | {{{', '.join(repr(s) for s in segment_ids[:3])}}}")
-        elif action == "remove":
-            print(f"        current = set(s.layers['{layer_name}'].segments)")
-            print(f"        s.layers['{layer_name}'].segments = current - {{{', '.join(repr(s) for s in segment_ids[:3])}}}")
+        for viz_cmd in viz_commands:
+            layer_name = viz_cmd.get('layer_name')
+            segment_ids = viz_cmd.get('segment_ids', [])
+            action = viz_cmd.get('action', 'show_only')
+
+            if action == "show_only":
+                print(f"        s.layers['{layer_name}'].segments = {{{', '.join(repr(s) for s in segment_ids[:3])}{', ...' if len(segment_ids) > 3 else ''}}}")
+            elif action == "add":
+                print(f"        current = set(s.layers['{layer_name}'].segments)")
+                print(f"        s.layers['{layer_name}'].segments = current | {{{', '.join(repr(s) for s in segment_ids[:3])}}}")
+            elif action == "remove":
+                print(f"        current = set(s.layers['{layer_name}'].segments)")
+                print(f"        s.layers['{layer_name}'].segments = current - {{{', '.join(repr(s) for s in segment_ids[:3])}}}")
         print()
+
+    # Display AI interactions if available
+    if "ai_interactions" in result and result["ai_interactions"]:
+        print_separator()
+        print("AI INTERACTIONS:")
+        print_separator()
+        print(f"  Model: {result.get('model', 'unknown')}")
+        print(f"  Total interactions: {len(result['ai_interactions'])}")
+        print()
+
+        for i, interaction in enumerate(result['ai_interactions'], 1):
+            interaction_type = interaction.get('type', 'unknown')
+            print(f"  [{i}] {interaction_type.upper().replace('_', ' ')}")
+            print()
+
+            # Show prompt (truncated)
+            prompt = interaction.get('prompt', '')
+            print("    PROMPT:")
+            if len(prompt) > 500:
+                print(f"      {prompt[:500]}...")
+                print(f"      (truncated, {len(prompt)} chars total)")
+            else:
+                for line in prompt.split('\n'):
+                    print(f"      {line}")
+            print()
+
+            # Show response
+            response = interaction.get('response', '')
+            print("    RESPONSE:")
+            for line in response.split('\n'):
+                print(f"      {line}")
+            print()
+
+            # Show cleaned SQL if available
+            if 'cleaned_sql' in interaction:
+                print("    CLEANED SQL:")
+                print(f"      {interaction['cleaned_sql']}")
+                print()
+
+            # Show retry info if available
+            if interaction.get('retry'):
+                print(f"    ⚠️  RETRY ATTEMPT (error: {interaction.get('previous_error', 'unknown')})")
+                print()
+
+            if i < len(result['ai_interactions']):
+                print_separator("-")
+                print()
 
     # Display final answer
     print_separator()
@@ -190,7 +260,7 @@ def main():
 
     csv_paths = [p.strip() for p in csv_paths_str.split(",") if p.strip()]
     db_path = os.getenv("ORGANELLE_DB_PATH", "organelles.db")
-    model = os.getenv("QUERY_AI_MODEL", "nemotron")
+    model = os.getenv("QUERY_AI_MODEL", "nemotron-3-nano")
 
     # Check for --verbose flag
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
