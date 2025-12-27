@@ -48,6 +48,11 @@ def create_app(tracker, query_agent=None) -> FastAPI:
     default_mode = "query" if query_agent else "explore"
     current_mode = {"mode": default_mode}
 
+    # Set initial narration state based on mode
+    # Disable narration in query mode to avoid conflicts
+    ng_tracker.narration_enabled = (default_mode == "explore")
+    print(f"[INIT] Starting in {default_mode} mode with narration {'enabled' if ng_tracker.narration_enabled else 'disabled'}", flush=True)
+
     async def broadcast_narration(narration_text: str):
         """Broadcast narration to all connected clients."""
         message = {
@@ -503,6 +508,11 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             current_mode["mode"] = mode
             print(f"[MODE] Switched to {mode} mode", flush=True)
 
+            # Auto-disable narration in query mode (to avoid conflicts with query-based navigation)
+            # Enable narration in explore mode
+            ng_tracker.narration_enabled = (mode == "explore")
+            print(f"[MODE] Narration {'enabled' if ng_tracker.narration_enabled else 'disabled'}", flush=True)
+
             # Broadcast mode change to all connected clients
             message = {
                 "type": "mode_change",
@@ -517,7 +527,7 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                     disconnected.add(connection)
             active_connections.difference_update(disconnected)
 
-            return {"status": "ok", "mode": mode}
+            return {"status": "ok", "mode": mode, "narration_enabled": ng_tracker.narration_enabled}
 
         except Exception as e:
             print(f"[MODE] Error setting mode: {e}", flush=True)
@@ -535,11 +545,12 @@ def create_app(tracker, query_agent=None) -> FastAPI:
         try:
             data = await request.json()
             user_query = data.get("query", "").strip()
+            generate_audio = data.get("generate_audio", True)  # Default to True for backward compatibility
 
             if not user_query:
                 return {"status": "error", "message": "Empty query"}
 
-            print(f"[QUERY] Processing: {user_query}", flush=True)
+            print(f"[QUERY] Processing: {user_query} (audio: {'yes' if generate_audio else 'no'})", flush=True)
 
             # Process query with QueryAgent
             result = app.state.query_agent.process_query(user_query)
@@ -600,14 +611,16 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                     print(f"[QUERY] Visualization failed: {e}", flush=True)
                     result["visualization_error"] = str(e)
 
-            # Generate audio for response (reuse TTS pipeline)
+            # Generate audio for response (reuse TTS pipeline) if requested
             audio_data = None
-            if result.get("answer"):
+            if generate_audio and result.get("answer"):
                 try:
                     audio_data = await ng_tracker.narrator.generate_audio_async(result["answer"])
                     print(f"[QUERY] Generated audio: {len(audio_data) if audio_data else 0} bytes", flush=True)
                 except Exception as e:
                     print(f"[QUERY] Audio generation failed: {e}", flush=True)
+            elif not generate_audio:
+                print(f"[QUERY] Audio generation skipped (voice disabled)", flush=True)
 
             return {
                 "status": "ok",
@@ -669,7 +682,8 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                     latest_frame["state"] = ng_tracker.current_state_summary
 
                     # Check if we should generate narration (pass screenshot timestamp)
-                    if ng_tracker.narrator.should_narrate(
+                    # Skip narration if disabled (e.g., during query-based navigation)
+                    if ng_tracker.narration_enabled and ng_tracker.narrator.should_narrate(
                         ng_tracker.current_state_summary,
                         screenshot_ts=latest_frame["timestamp"],
                     ):

@@ -27,6 +27,7 @@ class NGLiveStream {
 
         // Query mode state
         this.currentMode = 'query';  // Default to query mode
+        this.voiceEnabled = true;  // Voice narration enabled by default
         this.chatHistory = [];
 
         // DOM elements
@@ -58,6 +59,7 @@ class NGLiveStream {
         // Query mode UI elements
         this.modeExploreBtn = document.getElementById('mode-explore');
         this.modeQueryBtn = document.getElementById('mode-query');
+        this.voiceToggleBtn = document.getElementById('voice-toggle');
         this.chatPanel = document.getElementById('chat-panel');
         this.chatMessagesContainer = document.getElementById('chat-messages');
         this.verboseMessagesContainer = document.getElementById('verbose-messages');
@@ -112,6 +114,7 @@ class NGLiveStream {
 
         // Setup query mode controls
         this.setupModeToggle();
+        this.setupVoiceToggle();
         this.setupChatHandlers();
 
         this.loadNeuroglancerURL();
@@ -465,11 +468,13 @@ class NGLiveStream {
 
         // Update the narration display
         this.updateNarrationDisplay();
-        
-        // Queue audio if available
-        if (data.audio) {
+
+        // Queue audio if available and voice is enabled
+        if (data.audio && this.voiceEnabled) {
             console.log('Queueing audio for playback');
             this.queueAudio(data.audio);
+        } else if (data.audio && !this.voiceEnabled) {
+            console.log('Audio available but voice is disabled');
         } else {
             console.warn('No audio data in narration message');
         }
@@ -1103,6 +1108,28 @@ class NGLiveStream {
         });
     }
 
+    setupVoiceToggle() {
+        if (!this.voiceToggleBtn) return;
+
+        this.voiceToggleBtn.addEventListener('click', () => {
+            this.voiceEnabled = !this.voiceEnabled;
+            this.updateVoiceUI();
+            console.log(`[VOICE] Voice narration ${this.voiceEnabled ? 'enabled' : 'disabled'}`);
+        });
+    }
+
+    updateVoiceUI() {
+        if (!this.voiceToggleBtn) return;
+
+        if (this.voiceEnabled) {
+            this.voiceToggleBtn.classList.add('active');
+            this.voiceToggleBtn.querySelector('.voice-icon').textContent = '🔊';
+        } else {
+            this.voiceToggleBtn.classList.remove('active');
+            this.voiceToggleBtn.querySelector('.voice-icon').textContent = '🔇';
+        }
+    }
+
     async switchMode(mode) {
         try {
             const response = await fetch('/api/mode/set', {
@@ -1209,7 +1236,10 @@ class NGLiveStream {
             const response = await fetch('/api/query/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query })
+                body: JSON.stringify({
+                    query,
+                    generate_audio: this.voiceEnabled
+                })
             });
 
             const data = await response.json();
@@ -1226,9 +1256,11 @@ class NGLiveStream {
                 // Add verbose log entry
                 this.addVerboseLogEntry(query, result);
 
-                // Play audio if available
-                if (data.audio) {
+                // Play audio if available and voice is enabled
+                if (data.audio && this.voiceEnabled) {
                     this.queueAudio(data.audio);
+                } else if (data.audio && !this.voiceEnabled) {
+                    console.log('[QUERY] Audio available but voice is disabled');
                 }
 
                 // Log navigation if applicable
