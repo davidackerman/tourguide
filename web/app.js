@@ -60,9 +60,14 @@ class NGLiveStream {
         this.modeQueryBtn = document.getElementById('mode-query');
         this.chatPanel = document.getElementById('chat-panel');
         this.chatMessagesContainer = document.getElementById('chat-messages');
+        this.verboseMessagesContainer = document.getElementById('verbose-messages');
         this.chatInput = document.getElementById('chat-input');
         this.chatSend = document.getElementById('chat-send');
         this.sidePanels = document.querySelector('.side-panels');
+
+        // Chat tab elements
+        this.chatTabBtns = document.querySelectorAll('.chat-tab-btn');
+        this.chatTabContents = document.querySelectorAll('.chat-tab-content');
 
         // Enable audio on ANY user interaction
         const enableAudioOnInteraction = () => {
@@ -1143,6 +1148,34 @@ class NGLiveStream {
                 this.sendQuery();
             }
         });
+
+        // Setup tab switching
+        this.chatTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                this.switchChatTab(tabName);
+            });
+        });
+    }
+
+    switchChatTab(tabName) {
+        // Update button states
+        this.chatTabBtns.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update tab content visibility
+        this.chatTabContents.forEach(content => {
+            if (content.id === `chat-tab-${tabName}`) {
+                content.classList.add('active');
+            } else {
+                content.classList.remove('active');
+            }
+        });
     }
 
     async sendQuery() {
@@ -1173,6 +1206,9 @@ class NGLiveStream {
 
                 // Add AI response to chat
                 this.addChatMessage('ai', result.answer || 'Query processed');
+
+                // Add verbose log entry
+                this.addVerboseLogEntry(query, result);
 
                 // Play audio if available
                 if (data.audio) {
@@ -1220,6 +1256,148 @@ class NGLiveStream {
         if (message) {
             message.remove();
         }
+    }
+
+    addVerboseLogEntry(query, result) {
+        if (!this.verboseMessagesContainer) return;
+
+        const entryDiv = document.createElement('div');
+        entryDiv.className = 'verbose-entry';
+
+        let html = `<div class="verbose-query">❯ ${this.escapeHtml(query)}</div>`;
+
+        // Model info
+        if (result.model) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">AI Model</div>
+                <div><strong>${result.model}</strong></div>
+            </div>`;
+        }
+
+        // AI Interactions (full prompts and responses)
+        if (result.ai_interactions && result.ai_interactions.length > 0) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">AI Interactions (${result.ai_interactions.length})</div>`;
+
+            result.ai_interactions.forEach((interaction, idx) => {
+                const typeLabel = this.formatInteractionType(interaction.type);
+                html += `
+                    <div class="ai-interaction">
+                        <div class="ai-interaction-header">
+                            <strong>${idx + 1}. ${typeLabel}</strong>
+                            ${interaction.model ? `<span class="ai-model-badge">${interaction.model}</span>` : ''}
+                        </div>
+                        <div class="ai-interaction-prompt">
+                            <div class="ai-interaction-label">Prompt:</div>
+                            <pre>${this.escapeHtml(interaction.prompt)}</pre>
+                        </div>
+                        <div class="ai-interaction-response">
+                            <div class="ai-interaction-label">Response:</div>
+                            <pre>${this.escapeHtml(interaction.response)}</pre>
+                        </div>
+                        ${interaction.cleaned_sql ? `
+                            <div class="ai-interaction-cleaned">
+                                <div class="ai-interaction-label">Cleaned SQL:</div>
+                                <pre>${this.escapeHtml(interaction.cleaned_sql)}</pre>
+                            </div>
+                        ` : ''}
+                        ${interaction.retry ? `
+                            <div class="ai-interaction-retry">
+                                ⚠️ Retry attempt (previous error: ${this.escapeHtml(interaction.previous_error || 'unknown')})
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            });
+
+            html += `</div>`;
+        }
+
+        // Query type
+        if (result.type) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Query Type</div>
+                <div>${result.type}</div>
+            </div>`;
+        }
+
+        // SQL query
+        if (result.sql) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Generated SQL</div>
+                <div class="verbose-sql">${this.escapeHtml(result.sql)}</div>
+            </div>`;
+        }
+
+        // Results
+        if (result.results && result.results.length > 0) {
+            const resultsPreview = JSON.stringify(result.results, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Query Results (${result.results.length} row${result.results.length !== 1 ? 's' : ''})</div>
+                <div class="verbose-result">${this.escapeHtml(resultsPreview)}</div>
+            </div>`;
+        }
+
+        // Navigation command
+        if (result.navigation) {
+            const navPreview = JSON.stringify(result.navigation, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Navigation Command</div>
+                <div class="verbose-result">${this.escapeHtml(navPreview)}</div>
+            </div>`;
+        }
+
+        // Visualization command
+        if (result.visualization) {
+            const vizPreview = JSON.stringify(result.visualization, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Visualization Command</div>
+                <div class="verbose-result">${this.escapeHtml(vizPreview)}</div>
+            </div>`;
+        }
+
+        // Answer
+        if (result.answer) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Answer</div>
+                <div>${this.escapeHtml(result.answer)}</div>
+            </div>`;
+        }
+
+        // Timing info
+        if (result.timing) {
+            const timingInfo = Object.entries(result.timing)
+                .map(([key, value]) => `${key}: ${value.toFixed(3)}s`)
+                .join(', ');
+            html += `<div class="verbose-timing">⏱ ${timingInfo}</div>`;
+        }
+
+        entryDiv.innerHTML = html;
+
+        // Remove placeholder if exists
+        const placeholder = this.verboseMessagesContainer.querySelector('.chat-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.verboseMessagesContainer.appendChild(entryDiv);
+        this.verboseMessagesContainer.scrollTop = this.verboseMessagesContainer.scrollHeight;
+    }
+
+    formatInteractionType(type) {
+        const typeMap = {
+            'intent_classification': '🎯 Intent Classification',
+            'sql_generation': '💾 SQL Generation',
+            'answer_formatting': '✍️ Answer Formatting',
+            'visualization_answer': '🎨 Visualization Answer'
+        };
+        return typeMap[type] || type;
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 }
 
