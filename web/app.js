@@ -705,6 +705,11 @@ class NGLiveStream {
 
     capturePageScreenshot() {
         try {
+            // Skip screenshot capture in query mode (screenshots only needed for AI narration in explore mode)
+            if (this.currentMode === 'query') {
+                return;
+            }
+
             // Create a canvas the size of the Neuroglancer viewer area
             const viewerContainer = document.querySelector('.ng-iframe-container');
             if (!viewerContainer) {
@@ -1075,6 +1080,12 @@ class NGLiveStream {
             const data = await response.json();
             this.currentMode = data.mode;
             this.updateModeUI();
+            console.log(`[MODE] Synced to ${data.mode} mode`);
+            if (data.mode === 'query') {
+                console.log('[MODE] Screenshot capture disabled in query mode');
+            } else {
+                console.log('[MODE] Screenshot capture enabled in explore mode');
+            }
         } catch (e) {
             console.error('[MODE] Failed to sync mode:', e);
         }
@@ -1105,6 +1116,11 @@ class NGLiveStream {
                 this.currentMode = mode;
                 this.updateModeUI();
                 console.log(`[MODE] Switched to ${mode} mode`);
+                if (mode === 'query') {
+                    console.log('[MODE] Screenshot capture disabled in query mode');
+                } else {
+                    console.log('[MODE] Screenshot capture enabled in explore mode');
+                }
             } else {
                 console.error('[MODE] Failed to switch mode:', data.message);
             }
