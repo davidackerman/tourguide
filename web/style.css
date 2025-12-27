@@ -696,17 +696,53 @@ button:disabled {
 /* Verbose Log Styles */
 .verbose-entry {
     margin-bottom: 20px;
-    padding: 15px;
     background: #2a2a2a;
     border-radius: 6px;
     border-left: 3px solid #4a9eff;
+    overflow: hidden;
+}
+
+.verbose-entry-header {
+    padding: 15px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.verbose-entry-header:hover {
+    background: #333;
 }
 
 .verbose-query {
     font-weight: 600;
     color: #4a9eff;
-    margin-bottom: 10px;
     font-size: 15px;
+    flex: 1;
+}
+
+.verbose-toggle {
+    color: #888;
+    font-size: 18px;
+    margin-left: 10px;
+    transition: transform 0.2s ease;
+}
+
+.verbose-entry.expanded .verbose-toggle {
+    transform: rotate(90deg);
+}
+
+.verbose-entry-content {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+    padding: 0 15px;
+}
+
+.verbose-entry.expanded .verbose-entry-content {
+    max-height: 10000px;
+    padding: 0 15px 15px 15px;
 }
 
 .verbose-section {

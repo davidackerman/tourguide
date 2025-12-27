@@ -1310,9 +1310,15 @@ class NGLiveStream {
         if (!this.verboseMessagesContainer) return;
 
         const entryDiv = document.createElement('div');
-        entryDiv.className = 'verbose-entry';
+        entryDiv.className = 'verbose-entry';  // Start collapsed by default
 
-        let html = `<div class="verbose-query">❯ ${this.escapeHtml(query)}</div>`;
+        // Create header (always visible) with query and toggle arrow
+        let html = `
+            <div class="verbose-entry-header">
+                <div class="verbose-query">❯ ${this.escapeHtml(query)}</div>
+                <div class="verbose-toggle">▶</div>
+            </div>
+            <div class="verbose-entry-content">`;
 
         // Model info
         if (result.model) {
@@ -1420,7 +1426,16 @@ class NGLiveStream {
             html += `<div class="verbose-timing">⏱ ${timingInfo}</div>`;
         }
 
+        // Close the content wrapper
+        html += `</div>`;
+
         entryDiv.innerHTML = html;
+
+        // Add click handler to toggle expansion
+        const header = entryDiv.querySelector('.verbose-entry-header');
+        header.addEventListener('click', () => {
+            entryDiv.classList.toggle('expanded');
+        });
 
         // Remove placeholder if exists
         const placeholder = this.verboseMessagesContainer.querySelector('.chat-placeholder');
