@@ -54,3 +54,6 @@ ignore/
 
 # Claude artifacts
 .claude/
+
+# Organelle data
+organelle_data/

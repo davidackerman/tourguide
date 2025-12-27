@@ -1334,15 +1334,215 @@ Return ONLY this JSON (no explanation):
         ai_interactions: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Handle visualization query (show/hide specific segments).
+        Handle visualization query using AI to determine state updates.
 
         Args:
             user_query: Original user query
             sql: Generated SQL
             results: Query results
+            ai_interactions: Optional list to track AI interactions
 
         Returns:
             Response dictionary with visualization commands
+        """
+        if not results:
+            return {
+                "type": "error",
+                "answer": "No objects found to visualize.",
+                "sql": sql,
+                "results": results
+            }
+
+        # Use AI to generate visualization state updates
+        viz_updates = self._generate_visualization_state_update(
+            user_query=user_query,
+            sql_results=results,
+            ai_interactions=ai_interactions
+        )
+
+        if viz_updates.get("error"):
+            return {
+                "type": "error",
+                "answer": viz_updates["error"],
+                "sql": sql,
+                "results": results
+            }
+
+        return {
+            "type": "visualization",
+            "sql": sql,
+            "results": results,
+            "answer": viz_updates.get("answer", "Updating visualization..."),
+            "visualization": viz_updates.get("commands", [])
+        }
+
+    def _generate_visualization_state_update(
+        self,
+        user_query: str,
+        sql_results: List[Dict[str, Any]],
+        ai_interactions: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Use AI to generate visualization state updates based on query and results.
+
+        This agent-driven approach allows flexible interpretation of:
+        - Which layers to show/hide
+        - Whether to replace or add to current selection
+        - How to format segment IDs
+        - What action to take (show_only, add, remove)
+
+        Args:
+            user_query: Original user query
+            sql_results: Results from SQL query
+            ai_interactions: Optional list to track AI interactions
+
+        Returns:
+            Dictionary with 'commands' (list of viz commands) and 'answer' (natural language)
+        """
+        import json
+
+        # Get current NG state if available
+        current_state = {}
+        if self.ng_tracker:
+            try:
+                with self.ng_tracker.viewer.txn() as s:
+                    state_json = s.to_json()
+                    # Extract relevant parts: visible layers and selected segments
+                    current_state = {
+                        "layers": []
+                    }
+                    if "layers" in state_json:
+                        for layer in state_json["layers"]:
+                            layer_info = {
+                                "name": layer.get("name"),
+                                "type": layer.get("type"),
+                                "visible": layer.get("visible", True)
+                            }
+                            if "segments" in layer:
+                                layer_info["segments"] = layer["segments"]
+                            current_state["layers"].append(layer_info)
+            except Exception as e:
+                print(f"[QUERY_AGENT] Could not get current NG state: {e}", flush=True)
+
+        # Build available layers info
+        available_layers = list(self.available_layers.keys()) if self.available_layers else []
+
+        # Limit results to avoid token overflow
+        max_results = 10
+        results_to_show = sql_results[:max_results]
+
+        prompt = f"""You are helping visualize organelle data in Neuroglancer based on a user query and SQL results.
+
+User Query: {user_query}
+
+SQL Results (showing {len(results_to_show)} of {len(sql_results)} objects):
+{json.dumps(results_to_show, indent=2)}
+
+Available Neuroglancer Layers: {available_layers}
+
+Current Neuroglancer State:
+{json.dumps(current_state, indent=2)}
+
+Instructions:
+1. Based on the user query and SQL results, determine what visualization updates are needed
+2. Generate visualization commands that update the Neuroglancer state appropriately
+3. Consider the semantics of the query:
+   - "show X" / "show me X" → show_only (hide other segments in same layer)
+   - "also show X" / "add X" → add (keep existing segments visible)
+   - "hide X" / "remove X" → remove
+   - "show X and Y" → show_only with both X and Y
+4. Map organelle types to the correct layer names (be flexible with matching)
+5. Extract segment IDs from the SQL results' object_id field
+   - Segment IDs should be stringified object IDs (e.g., if object_id=123, use "123")
+6. Create a natural language answer describing what will be shown (1-2 sentences max)
+
+Examples of layer matching:
+- mitochondria → mito
+- nucleus → nuc
+- endoplasmic_reticulum → er
+- lipid_droplet → ld
+- lysosome → lyso
+- peroxisome → perox
+- yolk → yolk
+
+Output Format (respond ONLY with valid JSON, no other text):
+{{
+    "commands": [
+        {{
+            "layer_name": "mito",
+            "segment_ids": ["123", "456"],
+            "action": "show_only"
+        }}
+    ],
+    "answer": "Showing the 2 largest mitochondria with volumes 3.2e11 nm³ and 2.8e11 nm³"
+}}
+
+Response:"""
+
+        try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] VISUALIZATION STATE UPDATE", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                format="json"  # Request JSON output
+            )
+
+            response_text = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(response_text, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            # Track AI interaction
+            if ai_interactions is not None:
+                ai_interactions.append({
+                    'type': 'visualization_state_update',
+                    'prompt': prompt,
+                    'response': response_text,
+                    'model': self.model
+                })
+
+            # Parse JSON response
+            try:
+                viz_data = json.loads(response_text)
+                commands = viz_data.get("commands", [])
+                answer = viz_data.get("answer", "Updating visualization...")
+
+                print(f"[QUERY_AGENT] AI generated {len(commands)} visualization commands", flush=True)
+                return {
+                    "commands": commands,
+                    "answer": answer
+                }
+
+            except json.JSONDecodeError as e:
+                print(f"[QUERY_AGENT] Failed to parse AI JSON response: {e}", flush=True)
+                print(f"[QUERY_AGENT] Response was: {response_text}", flush=True)
+                # Fall back to hardcoded approach
+                return self._fallback_visualization_update(sql_results)
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error in AI visualization update: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return self._fallback_visualization_update(sql_results)
+
+    def _fallback_visualization_update(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Fallback visualization update when AI fails.
+
+        Args:
+            results: SQL query results
+
+        Returns:
+            Visualization commands dict
         """
         # Extract segment IDs and organelle type from results
         segment_ids = []
@@ -1362,42 +1562,34 @@ Return ONLY this JSON (no explanation):
                 except (ValueError, TypeError):
                     obj_id_str = str(obj_id)
 
-                # Format segment ID as "organelle_type_id" (e.g., "mitochondria_372")
-                # This matches the Neuroglancer segment naming convention
-                if org_type:
-                    segment_id = f"{org_type}_{obj_id_str}"
-                else:
-                    segment_id = obj_id_str
-
-                segment_ids.append(segment_id)
+                # Segment IDs are just stringified object IDs
+                segment_ids.append(obj_id_str)
 
         if not segment_ids:
             return {
-                "type": "error",
-                "answer": "No objects found to visualize.",
-                "sql": sql,
-                "results": results
+                "error": "No objects found to visualize."
             }
 
-        # Map organelle type to layer name
-        layer_name = self._get_layer_name(organelle_type)
+        # Map organelle type to layer name using fallback
+        layer_name = self._get_layer_name_fallback(organelle_type)
 
-        # Create visualization command
-        visualization = {
-            "layer_name": layer_name,
-            "segment_ids": segment_ids,
-            "action": "show_only"  # show_only, add, remove
-        }
-
-        # Format answer using AI
-        answer = self._format_visualization_answer(user_query, results, organelle_type, segment_ids, ai_interactions)
+        # Create simple answer
+        count = len(segment_ids)
+        type_name = organelle_type.replace('_', ' ') if organelle_type else "organelle"
+        if count == 1:
+            vol = results[0].get('volume')
+            vol_str = f" with volume {vol:.2e} nm³" if vol else ""
+            answer = f"Showing {type_name} {segment_ids[0]}{vol_str}"
+        else:
+            answer = f"Showing {count} {type_name} objects"
 
         return {
-            "type": "visualization",
-            "sql": sql,
-            "results": results,
-            "answer": answer,
-            "visualization": visualization
+            "commands": [{
+                "layer_name": layer_name,
+                "segment_ids": segment_ids,
+                "action": "show_only"
+            }],
+            "answer": answer
         }
 
     def _get_layer_name(self, organelle_type: str) -> str:
