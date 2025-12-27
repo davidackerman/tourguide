@@ -489,6 +489,185 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             "message": "Session not found"
         }
 
+    @app.post("/api/narration/generate")
+    async def generate_narration_for_screenshot(request: Request):
+        """Generate narration for a specific screenshot (for movie creation)."""
+        try:
+            data = await request.json()
+            jpeg_b64 = data.get("jpeg_b64")
+            state = data.get("state")
+            generate_audio = data.get("generate_audio", True)
+            movie_mode = data.get("movie_mode", False)
+            duration_seconds = data.get("duration_seconds", 25)
+
+            if not jpeg_b64:
+                return {"status": "error", "message": "No screenshot data"}
+
+            # Generate narration using the narrator
+            # For movie mode, use a special prompt that assumes specific duration
+            if movie_mode:
+                # Create a custom prompt for movie narration
+                narration_prompt = f"""You are creating narration for a scientific tour movie.
+This screenshot shows a Neuroglancer view of cellular structures.
+This narration will be displayed for approximately {duration_seconds} seconds.
+
+Create engaging, scientific narration that:
+1. Describes what is visible in this view
+2. Explains the scientific significance
+3. Uses smooth transitions appropriate for a movie format
+4. Is timed for about {duration_seconds} seconds of narration
+
+Current view state: {json.dumps(state) if state else 'Not available'}
+
+Provide narration:"""
+
+                narration = ng_tracker.narrator.generate_narration(
+                    state,
+                    screenshot_b64=jpeg_b64,
+                    custom_prompt=narration_prompt
+                )
+            else:
+                narration = ng_tracker.narrator.generate_narration(
+                    state,
+                    screenshot_b64=jpeg_b64
+                )
+
+            # Generate audio if requested
+            audio_data = None
+            if generate_audio and narration:
+                audio_data = await ng_tracker.narrator.generate_audio_async(narration)
+
+            return {
+                "status": "ok",
+                "narration": narration,
+                "audio": audio_data,
+                "timestamp": time.time()
+            }
+
+        except Exception as e:
+            print(f"[NARRATION] Generation error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    @app.post("/api/movie/create-from-screenshots")
+    async def create_movie_from_screenshots(request: Request, background_tasks: BackgroundTasks):
+        """Create a movie from selected screenshots with narrations."""
+        try:
+            data = await request.json()
+            screenshots = data.get("screenshots", [])
+            transition_type = data.get("transition_type", "cut")
+            transition_duration = data.get("transition_duration", 2.0)
+
+            if not screenshots:
+                return {
+                    "status": "error",
+                    "message": "No screenshots provided"
+                }
+
+            # Create a new recording session from screenshots
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            session_id = f"session_selected_{timestamp}"
+            session_dir = recording_manager.base_recordings_dir / session_id
+
+            # Create directory structure
+            session_dir.mkdir(exist_ok=True)
+            (session_dir / "frames").mkdir(exist_ok=True)
+            (session_dir / "audio").mkdir(exist_ok=True)
+            (session_dir / "states").mkdir(exist_ok=True)
+            (session_dir / "urls").mkdir(exist_ok=True)
+            (session_dir / "output").mkdir(exist_ok=True)
+
+            # Create session object
+            from recording import RecordingSession, FrameRecord
+            session = RecordingSession(
+                session_id=session_id,
+                base_dir=session_dir,
+                created_at=datetime.now(),
+                fps=0.5,  # Doesn't matter for selected screenshots
+                status="stopped",  # Skip recording state
+                transition_type=transition_type,
+                transition_duration=transition_duration
+            )
+
+            # Save each screenshot
+            for i, screenshot in enumerate(screenshots):
+                frame_number = i + 1
+
+                # Save JPEG
+                frame_file = f"frames/frame_{frame_number:05d}.jpg"
+                jpeg_bytes = base64.b64decode(screenshot["jpeg_b64"])
+                with open(session_dir / frame_file, "wb") as f:
+                    f.write(jpeg_bytes)
+
+                # Save state if available
+                state_file = f"states/state_{frame_number:05d}.json"
+                if screenshot.get("state"):
+                    with open(session_dir / state_file, "w") as f:
+                        json.dump(screenshot["state"], f, indent=2)
+
+                # Save URL (generate from state)
+                urls_file = f"urls/url_{frame_number:05d}.txt"
+                if screenshot.get("state"):
+                    from recording import generate_public_url
+                    url = generate_public_url(screenshot["state"])
+                    with open(session_dir / urls_file, "w") as f:
+                        f.write(url)
+
+                # Save audio if available
+                narration_file = None
+                if screenshot.get("audio"):
+                    narration_file = f"audio/narration_{frame_number:05d}.mp3"
+                    audio_bytes = base64.b64decode(screenshot["audio"])
+                    with open(session_dir / narration_file, "wb") as f:
+                        f.write(audio_bytes)
+
+                # Create frame record
+                frame_record = FrameRecord(
+                    frame_number=frame_number,
+                    timestamp=screenshot.get("timestamp", time.time()),
+                    frame_file=frame_file,
+                    state_file=state_file,
+                    urls_file=urls_file,
+                    has_narration=bool(screenshot.get("narration")),
+                    narration_file=narration_file,
+                    narration_text=screenshot.get("narration"),
+                    display_duration=2.0  # Default duration
+                )
+
+                session.frames.append(frame_record)
+
+            # Save metadata
+            session.save_metadata()
+
+            # Set as current session and start compilation
+            recording_manager.current_session = session
+
+            # Start compilation in background
+            background_tasks.add_task(
+                compile_movie_task,
+                session
+            )
+
+            return {
+                "status": "ok",
+                "message": "Movie compilation started from selected screenshots",
+                "session_id": session_id,
+                "frame_count": len(screenshots)
+            }
+
+        except Exception as e:
+            print(f"[MOVIE] Creation error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     # Query Mode API endpoints
     @app.get("/api/mode")
     async def get_mode():
