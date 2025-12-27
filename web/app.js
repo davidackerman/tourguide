@@ -25,6 +25,11 @@ class NGLiveStream {
         this.currentSessionId = null;
         this.recordedFrameCount = 0;
 
+        // Query mode state
+        this.currentMode = 'query';  // Default to query mode
+        this.voiceEnabled = true;  // Voice narration enabled by default
+        this.chatHistory = [];
+
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
         this.frameImg = document.getElementById('frame');
@@ -50,6 +55,21 @@ class NGLiveStream {
         this.compilationProgress = document.getElementById('compilation-progress');
         this.progressFill = document.getElementById('progress-fill');
         this.progressText = document.getElementById('progress-text');
+
+        // Query mode UI elements
+        this.modeExploreBtn = document.getElementById('mode-explore');
+        this.modeQueryBtn = document.getElementById('mode-query');
+        this.voiceToggleBtn = document.getElementById('voice-toggle');
+        this.chatPanel = document.getElementById('chat-panel');
+        this.chatMessagesContainer = document.getElementById('chat-messages');
+        this.verboseMessagesContainer = document.getElementById('verbose-messages');
+        this.chatInput = document.getElementById('chat-input');
+        this.chatSend = document.getElementById('chat-send');
+        this.sidePanels = document.querySelector('.side-panels');
+
+        // Chat tab elements
+        this.chatTabBtns = document.querySelectorAll('.chat-tab-btn');
+        this.chatTabContents = document.querySelectorAll('.chat-tab-content');
 
         // Enable audio on ANY user interaction
         const enableAudioOnInteraction = () => {
@@ -92,8 +112,14 @@ class NGLiveStream {
         // Setup recording controls
         this.setupRecordingControls();
 
+        // Setup query mode controls
+        this.setupModeToggle();
+        this.setupVoiceToggle();
+        this.setupChatHandlers();
+
         this.loadNeuroglancerURL();
         this.connect();
+        this.syncMode();
         // Re-enable client-side screenshot capture (no cross-origin data now)
         this.setupPageScreenshotCapture();
     }
@@ -301,6 +327,10 @@ class NGLiveStream {
             this.handleFrame(data);
         } else if (data.type === 'narration') {
             this.handleNarration(data);
+        } else if (data.type === 'mode_change') {
+            this.currentMode = data.mode;
+            this.updateModeUI();
+            console.log(`[MODE] Received mode change: ${data.mode}`);
         }
     }
 
@@ -438,11 +468,13 @@ class NGLiveStream {
 
         // Update the narration display
         this.updateNarrationDisplay();
-        
-        // Queue audio if available
-        if (data.audio) {
+
+        // Queue audio if available and voice is enabled
+        if (data.audio && this.voiceEnabled) {
             console.log('Queueing audio for playback');
             this.queueAudio(data.audio);
+        } else if (data.audio && !this.voiceEnabled) {
+            console.log('Audio available but voice is disabled');
         } else {
             console.warn('No audio data in narration message');
         }
@@ -678,6 +710,11 @@ class NGLiveStream {
 
     capturePageScreenshot() {
         try {
+            // Skip screenshot capture in query mode (screenshots only needed for AI narration in explore mode)
+            if (this.currentMode === 'query') {
+                return;
+            }
+
             // Create a canvas the size of the Neuroglancer viewer area
             const viewerContainer = document.querySelector('.ng-iframe-container');
             if (!viewerContainer) {
@@ -1039,6 +1076,391 @@ class NGLiveStream {
                 console.error('[RECORDING] Compilation status poll error:', e);
             }
         }, 2000);
+    }
+
+    // Query Mode Methods
+    async syncMode() {
+        try {
+            const response = await fetch('/api/mode');
+            const data = await response.json();
+            this.currentMode = data.mode;
+            this.updateModeUI();
+            console.log(`[MODE] Synced to ${data.mode} mode`);
+            if (data.mode === 'query') {
+                console.log('[MODE] Screenshot capture disabled in query mode');
+            } else {
+                console.log('[MODE] Screenshot capture enabled in explore mode');
+            }
+        } catch (e) {
+            console.error('[MODE] Failed to sync mode:', e);
+        }
+    }
+
+    setupModeToggle() {
+        if (!this.modeExploreBtn || !this.modeQueryBtn) return;
+
+        this.modeExploreBtn.addEventListener('click', () => {
+            this.switchMode('explore');
+        });
+
+        this.modeQueryBtn.addEventListener('click', () => {
+            this.switchMode('query');
+        });
+    }
+
+    setupVoiceToggle() {
+        if (!this.voiceToggleBtn) return;
+
+        this.voiceToggleBtn.addEventListener('click', () => {
+            this.voiceEnabled = !this.voiceEnabled;
+            this.updateVoiceUI();
+            console.log(`[VOICE] Voice narration ${this.voiceEnabled ? 'enabled' : 'disabled'}`);
+        });
+    }
+
+    updateVoiceUI() {
+        if (!this.voiceToggleBtn) return;
+
+        if (this.voiceEnabled) {
+            this.voiceToggleBtn.classList.add('active');
+            this.voiceToggleBtn.querySelector('.voice-icon').textContent = '🔊';
+        } else {
+            this.voiceToggleBtn.classList.remove('active');
+            this.voiceToggleBtn.querySelector('.voice-icon').textContent = '🔇';
+        }
+    }
+
+    async switchMode(mode) {
+        try {
+            const response = await fetch('/api/mode/set', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode })
+            });
+
+            const data = await response.json();
+            if (data.status === 'ok') {
+                this.currentMode = mode;
+                this.updateModeUI();
+                console.log(`[MODE] Switched to ${mode} mode`);
+                if (mode === 'query') {
+                    console.log('[MODE] Screenshot capture disabled in query mode');
+                } else {
+                    console.log('[MODE] Screenshot capture enabled in explore mode');
+                }
+            } else {
+                console.error('[MODE] Failed to switch mode:', data.message);
+            }
+        } catch (e) {
+            console.error('[MODE] Failed to switch mode:', e);
+        }
+    }
+
+    updateModeUI() {
+        if (this.currentMode === 'explore') {
+            // Show explore panels
+            if (this.sidePanels) this.sidePanels.style.display = 'flex';
+            if (this.chatPanel) this.chatPanel.style.display = 'none';
+
+            // Update button states
+            if (this.modeExploreBtn) this.modeExploreBtn.classList.add('active');
+            if (this.modeQueryBtn) this.modeQueryBtn.classList.remove('active');
+        } else if (this.currentMode === 'query') {
+            // Show chat panel
+            if (this.sidePanels) this.sidePanels.style.display = 'none';
+            if (this.chatPanel) this.chatPanel.style.display = 'block';
+
+            // Update button states
+            if (this.modeExploreBtn) this.modeExploreBtn.classList.remove('active');
+            if (this.modeQueryBtn) this.modeQueryBtn.classList.add('active');
+
+            // Focus on input
+            if (this.chatInput) this.chatInput.focus();
+        }
+    }
+
+    setupChatHandlers() {
+        if (!this.chatSend || !this.chatInput) return;
+
+        this.chatSend.addEventListener('click', () => {
+            this.sendQuery();
+        });
+
+        this.chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                this.sendQuery();
+            }
+        });
+
+        // Setup tab switching
+        this.chatTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                this.switchChatTab(tabName);
+            });
+        });
+    }
+
+    switchChatTab(tabName) {
+        // Update button states
+        this.chatTabBtns.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update tab content visibility
+        this.chatTabContents.forEach(content => {
+            if (content.id === `chat-tab-${tabName}`) {
+                content.classList.add('active');
+            } else {
+                content.classList.remove('active');
+            }
+        });
+    }
+
+    async sendQuery() {
+        const query = this.chatInput.value.trim();
+        if (!query) return;
+
+        // Add user message to chat
+        this.addChatMessage('user', query);
+        this.chatInput.value = '';
+
+        // Show loading indicator
+        const loadingId = this.addChatMessage('loading', 'Processing...');
+
+        try {
+            const response = await fetch('/api/query/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query,
+                    generate_audio: this.voiceEnabled
+                })
+            });
+
+            const data = await response.json();
+
+            // Remove loading indicator
+            this.removeChatMessage(loadingId);
+
+            if (data.status === 'ok') {
+                const result = data.result;
+
+                // Add AI response to chat
+                this.addChatMessage('ai', result.answer || 'Query processed');
+
+                // Add verbose log entry
+                this.addVerboseLogEntry(query, result);
+
+                // Play audio if available and voice is enabled
+                if (data.audio && this.voiceEnabled) {
+                    this.queueAudio(data.audio);
+                } else if (data.audio && !this.voiceEnabled) {
+                    console.log('[QUERY] Audio available but voice is disabled');
+                }
+
+                // Log navigation if applicable
+                if (result.type === 'navigation') {
+                    console.log('[QUERY] Navigated to:', result.navigation);
+                }
+            } else {
+                this.addChatMessage('error', data.message || 'Query failed');
+            }
+        } catch (e) {
+            this.removeChatMessage(loadingId);
+            this.addChatMessage('error', 'Failed to send query: ' + e.message);
+            console.error('[QUERY] Error:', e);
+        }
+    }
+
+    addChatMessage(type, text) {
+        if (!this.chatMessagesContainer) return;
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `chat-message chat-${type}`;
+        messageDiv.textContent = text;
+        messageDiv.dataset.id = Date.now();
+
+        // Remove placeholder if exists
+        const placeholder = this.chatMessagesContainer.querySelector('.chat-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.chatMessagesContainer.appendChild(messageDiv);
+        this.chatMessagesContainer.scrollTop = this.chatMessagesContainer.scrollHeight;
+
+        return messageDiv.dataset.id;
+    }
+
+    removeChatMessage(id) {
+        if (!this.chatMessagesContainer) return;
+
+        const message = this.chatMessagesContainer.querySelector(`[data-id="${id}"]`);
+        if (message) {
+            message.remove();
+        }
+    }
+
+    addVerboseLogEntry(query, result) {
+        if (!this.verboseMessagesContainer) return;
+
+        const entryDiv = document.createElement('div');
+        entryDiv.className = 'verbose-entry';  // Start collapsed by default
+
+        // Create header (always visible) with query and toggle arrow
+        let html = `
+            <div class="verbose-entry-header">
+                <div class="verbose-query">❯ ${this.escapeHtml(query)}</div>
+                <div class="verbose-toggle">▶</div>
+            </div>
+            <div class="verbose-entry-content">`;
+
+        // Model info
+        if (result.model) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">AI Model</div>
+                <div><strong>${result.model}</strong></div>
+            </div>`;
+        }
+
+        // AI Interactions (full prompts and responses)
+        if (result.ai_interactions && result.ai_interactions.length > 0) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">AI Interactions (${result.ai_interactions.length})</div>`;
+
+            result.ai_interactions.forEach((interaction, idx) => {
+                const typeLabel = this.formatInteractionType(interaction.type);
+                html += `
+                    <div class="ai-interaction">
+                        <div class="ai-interaction-header">
+                            <strong>${idx + 1}. ${typeLabel}</strong>
+                            ${interaction.model ? `<span class="ai-model-badge">${interaction.model}</span>` : ''}
+                        </div>
+                        <div class="ai-interaction-prompt">
+                            <div class="ai-interaction-label">Prompt:</div>
+                            <pre>${this.escapeHtml(interaction.prompt)}</pre>
+                        </div>
+                        <div class="ai-interaction-response">
+                            <div class="ai-interaction-label">Response:</div>
+                            <pre>${this.escapeHtml(interaction.response)}</pre>
+                        </div>
+                        ${interaction.cleaned_sql ? `
+                            <div class="ai-interaction-cleaned">
+                                <div class="ai-interaction-label">Cleaned SQL:</div>
+                                <pre>${this.escapeHtml(interaction.cleaned_sql)}</pre>
+                            </div>
+                        ` : ''}
+                        ${interaction.retry ? `
+                            <div class="ai-interaction-retry">
+                                ⚠️ Retry attempt (previous error: ${this.escapeHtml(interaction.previous_error || 'unknown')})
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            });
+
+            html += `</div>`;
+        }
+
+        // Query type
+        if (result.type) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Query Type</div>
+                <div>${result.type}</div>
+            </div>`;
+        }
+
+        // SQL query
+        if (result.sql) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Generated SQL</div>
+                <div class="verbose-sql">${this.escapeHtml(result.sql)}</div>
+            </div>`;
+        }
+
+        // Results
+        if (result.results && result.results.length > 0) {
+            const resultsPreview = JSON.stringify(result.results, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Query Results (${result.results.length} row${result.results.length !== 1 ? 's' : ''})</div>
+                <div class="verbose-result">${this.escapeHtml(resultsPreview)}</div>
+            </div>`;
+        }
+
+        // Navigation command
+        if (result.navigation) {
+            const navPreview = JSON.stringify(result.navigation, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Navigation Command</div>
+                <div class="verbose-result">${this.escapeHtml(navPreview)}</div>
+            </div>`;
+        }
+
+        // Visualization command
+        if (result.visualization) {
+            const vizPreview = JSON.stringify(result.visualization, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Visualization Command</div>
+                <div class="verbose-result">${this.escapeHtml(vizPreview)}</div>
+            </div>`;
+        }
+
+        // Answer
+        if (result.answer) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Answer</div>
+                <div>${this.escapeHtml(result.answer)}</div>
+            </div>`;
+        }
+
+        // Timing info
+        if (result.timing) {
+            const timingInfo = Object.entries(result.timing)
+                .map(([key, value]) => `${key}: ${value.toFixed(3)}s`)
+                .join(', ');
+            html += `<div class="verbose-timing">⏱ ${timingInfo}</div>`;
+        }
+
+        // Close the content wrapper
+        html += `</div>`;
+
+        entryDiv.innerHTML = html;
+
+        // Add click handler to toggle expansion
+        const header = entryDiv.querySelector('.verbose-entry-header');
+        header.addEventListener('click', () => {
+            entryDiv.classList.toggle('expanded');
+        });
+
+        // Remove placeholder if exists
+        const placeholder = this.verboseMessagesContainer.querySelector('.chat-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.verboseMessagesContainer.appendChild(entryDiv);
+        this.verboseMessagesContainer.scrollTop = this.verboseMessagesContainer.scrollHeight;
+    }
+
+    formatInteractionType(type) {
+        const typeMap = {
+            'intent_classification': '🎯 Intent Classification',
+            'sql_generation': '💾 SQL Generation',
+            'answer_formatting': '✍️ Answer Formatting',
+            'visualization_answer': '🎨 Visualization Answer'
+        };
+        return typeMap[type] || type;
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 }
 

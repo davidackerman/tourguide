@@ -21,12 +21,15 @@ from recording import RecordingManager, MovieCompiler
 ng_tracker = None
 
 
-def create_app(tracker) -> FastAPI:
+def create_app(tracker, query_agent=None) -> FastAPI:
     """Create FastAPI app with WebSocket streaming."""
     global ng_tracker
     ng_tracker = tracker
 
     app = FastAPI(title="Neuroglancer Live Stream")
+
+    # Store query agent reference
+    app.state.query_agent = query_agent
 
     # Track active WebSocket connections
     active_connections: Set[WebSocket] = set()
@@ -39,6 +42,16 @@ def create_app(tracker) -> FastAPI:
 
     # Recording manager for movie creation
     recording_manager = RecordingManager()
+
+    # Mode state (explore vs query)
+    # Default to query mode if query_agent is available, otherwise explore
+    default_mode = "query" if query_agent else "explore"
+    current_mode = {"mode": default_mode}
+
+    # Set initial narration state based on mode
+    # Disable narration in query mode to avoid conflicts
+    ng_tracker.narration_enabled = (default_mode == "explore")
+    print(f"[INIT] Starting in {default_mode} mode with narration {'enabled' if ng_tracker.narration_enabled else 'disabled'}", flush=True)
 
     async def broadcast_narration(narration_text: str):
         """Broadcast narration to all connected clients."""
@@ -476,6 +489,162 @@ def create_app(tracker) -> FastAPI:
             "message": "Session not found"
         }
 
+    # Query Mode API endpoints
+    @app.get("/api/mode")
+    async def get_mode():
+        """Get current mode (explore or query)."""
+        return {"mode": current_mode["mode"]}
+
+    @app.post("/api/mode/set")
+    async def set_mode(request: Request):
+        """Switch between explore and query modes."""
+        try:
+            data = await request.json()
+            mode = data.get("mode", "explore")
+
+            if mode not in ["explore", "query"]:
+                return {"status": "error", "message": "Invalid mode. Must be 'explore' or 'query'."}
+
+            current_mode["mode"] = mode
+            print(f"[MODE] Switched to {mode} mode", flush=True)
+
+            # Auto-disable narration in query mode (to avoid conflicts with query-based navigation)
+            # Enable narration in explore mode
+            ng_tracker.narration_enabled = (mode == "explore")
+            print(f"[MODE] Narration {'enabled' if ng_tracker.narration_enabled else 'disabled'}", flush=True)
+
+            # Broadcast mode change to all connected clients
+            message = {
+                "type": "mode_change",
+                "mode": mode,
+                "timestamp": time.time()
+            }
+            disconnected = set()
+            for connection in active_connections:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    disconnected.add(connection)
+            active_connections.difference_update(disconnected)
+
+            return {"status": "ok", "mode": mode, "narration_enabled": ng_tracker.narration_enabled}
+
+        except Exception as e:
+            print(f"[MODE] Error setting mode: {e}", flush=True)
+            return {"status": "error", "message": str(e)}
+
+    @app.post("/api/query/ask")
+    async def process_query(request: Request):
+        """Process natural language query using AI agent."""
+        if not app.state.query_agent:
+            return {
+                "status": "error",
+                "message": "Query mode not available. No database configured (check ORGANELLE_CSV_PATHS in .env)."
+            }
+
+        try:
+            data = await request.json()
+            user_query = data.get("query", "").strip()
+            generate_audio = data.get("generate_audio", True)  # Default to True for backward compatibility
+
+            if not user_query:
+                return {"status": "error", "message": "Empty query"}
+
+            print(f"[QUERY] Processing: {user_query} (audio: {'yes' if generate_audio else 'no'})", flush=True)
+
+            # Process query with QueryAgent
+            result = app.state.query_agent.process_query(user_query)
+
+            # If navigation query, update Neuroglancer state
+            if result.get("type") == "navigation" and result.get("navigation"):
+                nav = result["navigation"]
+                try:
+                    with ng_tracker.viewer.txn() as s:
+                        s.position = nav["position"]
+                        if "scale" in nav:
+                            s.crossSectionScale = nav["scale"]
+                    print(f"[QUERY] Navigated to position {nav['position']} with scale {nav.get('scale')}", flush=True)
+                except Exception as e:
+                    print(f"[QUERY] Navigation failed: {e}", flush=True)
+                    result["navigation_error"] = str(e)
+
+            # If visualization query, update segment visibility
+            if result.get("type") == "visualization" and result.get("visualization"):
+                viz = result["visualization"]
+
+                # Handle both single command (dict) and multiple commands (list)
+                viz_commands = viz if isinstance(viz, list) else [viz]
+
+                try:
+                    with ng_tracker.viewer.txn() as s:
+                        for viz_cmd in viz_commands:
+                            layer_name = viz_cmd["layer_name"]
+                            segment_ids = viz_cmd["segment_ids"]
+                            action = viz_cmd.get("action", "show_only")
+
+                            # Get the layer
+                            if layer_name not in s.layers:
+                                print(f"[QUERY] Warning: Layer '{layer_name}' not found, skipping", flush=True)
+                                continue
+
+                            layer = s.layers[layer_name]
+
+                            # Convert segment IDs to integers (Neuroglancer expects uint64)
+                            try:
+                                segment_ids_int = [int(sid) for sid in segment_ids]
+                            except (ValueError, TypeError) as e:
+                                print(f"[QUERY] Warning: Could not convert segment IDs to integers: {e}", flush=True)
+                                segment_ids_int = segment_ids
+
+                            # Update segment visibility based on action
+                            if action == "show_only":
+                                # Clear existing segments and show only these
+                                layer.segments = set(segment_ids_int)
+                            elif action == "add":
+                                # Add to existing visible segments
+                                current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
+                                layer.segments = current_segments | set(segment_ids_int)
+                            elif action == "remove":
+                                # Remove from visible segments
+                                current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
+                                layer.segments = current_segments - set(segment_ids_int)
+
+                            print(f"[QUERY] Updated layer '{layer_name}' with {len(segment_ids)} segments (action: {action})", flush=True)
+
+                    if len(viz_commands) > 1:
+                        print(f"[QUERY] Applied {len(viz_commands)} visualization commands", flush=True)
+
+                except Exception as e:
+                    print(f"[QUERY] Visualization failed: {e}", flush=True)
+                    result["visualization_error"] = str(e)
+
+            # Generate audio for response (reuse TTS pipeline) if requested
+            audio_data = None
+            if generate_audio and result.get("answer"):
+                try:
+                    audio_data = await ng_tracker.narrator.generate_audio_async(result["answer"])
+                    print(f"[QUERY] Generated audio: {len(audio_data) if audio_data else 0} bytes", flush=True)
+                except Exception as e:
+                    print(f"[QUERY] Audio generation failed: {e}", flush=True)
+            elif not generate_audio:
+                print(f"[QUERY] Audio generation skipped (voice disabled)", flush=True)
+
+            return {
+                "status": "ok",
+                "result": result,
+                "audio": audio_data,
+                "timestamp": time.time()
+            }
+
+        except Exception as e:
+            print(f"[QUERY] Error processing query: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": f"Query processing failed: {str(e)}"
+            }
+
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for streaming frames."""
@@ -520,7 +689,8 @@ def create_app(tracker) -> FastAPI:
                     latest_frame["state"] = ng_tracker.current_state_summary
 
                     # Check if we should generate narration (pass screenshot timestamp)
-                    if ng_tracker.narrator.should_narrate(
+                    # Skip narration if disabled (e.g., during query-based navigation)
+                    if ng_tracker.narration_enabled and ng_tracker.narrator.should_narrate(
                         ng_tracker.current_state_summary,
                         screenshot_ts=latest_frame["timestamp"],
                     ):
