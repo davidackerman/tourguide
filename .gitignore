@@ -42,6 +42,7 @@ test_coqui.py
 test_output.wav
 test_output_coqui.wav
 test_*.wav
+simple_tests/
 
 # Voice recording files
 voice_recording/

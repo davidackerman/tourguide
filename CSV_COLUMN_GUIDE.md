@@ -2,6 +2,36 @@
 
 This guide explains how CSV columns are interpreted and mapped to the database.
 
+## IMPORTANT: Units and Coordinate System
+
+### Units
+All measurements in the database use the following units:
+- **Volume**: nm³ (cubic nanometers)
+- **Surface Area**: nm² (square nanometers)
+- **Position coordinates**: nm (nanometers)
+- **Lengths/distances**: nm (nanometers) - e.g., 'lsp (nm)', 'radius mean (nm)'
+
+**Note**: The CSV files specify "8nm" resolution in some column headers, but the actual coordinate values are already in nanometers, not voxels. The "8nm" refers to the voxel size of the imaging data.
+
+### Coordinate System
+- **Database columns**: `position_x, position_y, position_z` in (X, Y, Z) order, stored in **nanometers**
+- **CSV columns**: Usually labeled as `COM X (nm), COM Y (nm), COM Z (nm)` in the same order, in **nanometers**
+- **Neuroglancer state**: Uses (X, Y, Z) order in the `position` field, but in **voxel coordinates**
+
+**IMPORTANT - Coordinate Conversion**:
+- The database stores positions in **nanometers** (from the CSV files)
+- Neuroglancer viewer uses **voxel coordinates**
+- When navigating, the system automatically converts: `voxel_coords = nm_coords / voxel_size`
+- For C. elegans dataset: voxel_size = (8, 8, 8) nm
+- Example: Position (8000, 16000, 24000) nm → (1000, 2000, 3000) voxels
+
+When the AI responds to queries, it now automatically includes proper units in all answers:
+- "The volume is 3.05e11 nm³"
+- "Taking you to mitochondria 123 at position (8000, 16000, 24000) nm" (shown in nm for clarity)
+- "The average length is 456.7 nm"
+
+The navigation command internally converts to voxel coordinates before updating the Neuroglancer viewer.
+
 ## Quick Inspection Tool
 
 Use `inspect_csv.py` to see how any CSV file will be interpreted:
