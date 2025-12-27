@@ -8,6 +8,8 @@ A sidecar service that streams live screenshots and viewer state from Neuroglanc
 - **State Tracking**: Position, zoom, orientation, layer visibility, and segment selection
 - **WebSocket Updates**: Real-time updates to browser panel
 - **AI Narration**: Context-aware descriptions using cloud (Gemini/Claude) or local (Ollama) AI
+- **Natural Language Query**: Ask questions about organelles in plain English
+- **Agent-Driven Visualization**: AI interprets queries to show/hide segments intelligently
 - **Voice Synthesis**: Browser-based TTS or edge-tts with multiple voices
 - **Movie Recording**: Record navigation sessions with synchronized narration
 - **Multiple Transition Modes**: Direct cuts, crossfade, or smooth state interpolation
@@ -54,6 +56,27 @@ The web panel now includes:
 - **Recording controls** (bottom) to capture and compile narrated tours
 
 Navigate in the embedded viewer and watch the live stream update automatically!
+
+### Natural Language Queries
+
+Ask questions about organelles in plain English:
+
+**Examples:**
+- "show the largest mitochondrion"
+- "how many nuclei are there?"
+- "take me to the smallest peroxisome"
+- "show mitochondria larger than 1e11 nm³"
+- "also show nucleus 5" (adds to current selection)
+- "hide all mitochondria" (removes from view)
+
+The AI agent:
+1. Converts your question to SQL
+2. Queries the organelle database
+3. Interprets the results based on query semantics
+4. Updates the visualization intelligently
+5. Provides a natural language answer with voice narration
+
+See [AGENT_DRIVEN_VISUALIZATION.md](AGENT_DRIVEN_VISUALIZATION.md) for technical details.
 
 ### Recording Tours
 
@@ -117,6 +140,16 @@ See [QUICKSTART.md](QUICKSTART.md) for detailed usage guide.
 - FFmpeg-based video compilation with audio sync
 - Neuroglancer video_tool integration for smooth camera movements
 
+### Stage 7: Natural Language Query System ✅
+
+- SQLite database for organelle metadata (volume, position, etc.)
+- AI-powered natural language to SQL conversion
+- Multi-query support with automatic splitting
+- Intent classification: navigation, visualization, or informational
+- Agent-driven visualization state updates
+- Semantic understanding: "show X" vs "also show X" vs "hide X"
+- Context-aware command generation using current viewer state
+
 ## Project Structure
 
 ```
@@ -124,8 +157,10 @@ tourguide/
 ├── server/
 │   ├── main.py          # Entry point
 │   ├── ng.py            # Neuroglancer viewer + state tracking
-│   ├── stream.py        # FastAPI WebSocket server
+│   ├── stream.py        # FastAPI WebSocket server + query endpoint
 │   ├── narrator.py      # AI narration engine
+│   ├── query_agent.py   # Natural language query agent
+│   ├── organelle_db.py  # SQLite database for organelle metadata
 │   ├── recording.py     # Movie recording and compilation
 │   └── requirements.txt # Legacy pip requirements
 ├── web/
@@ -133,8 +168,10 @@ tourguide/
 │   ├── app.js          # WebSocket client + recording logic
 │   ├── style.css       # Styling with spinner animations
 │   └── ng-screenshot-handler.js  # Neuroglancer screenshot capture
+├── organelle_data/     # Organelle CSV files and database (gitignored)
 ├── recordings/         # Recorded sessions (auto-created)
 ├── pixi.toml           # Pixi environment config
+├── AGENT_DRIVEN_VISUALIZATION.md  # Agent visualization docs
 └── README.md
 ```
 
@@ -159,7 +196,8 @@ tourguide/
 - [x] **Stage 4**: AI narrator
 - [x] **Stage 5**: Voice/TTS
 - [x] **Stage 6**: Movie recording and compilation
-- [ ] **Stage 7**: Quality upgrades (ROI crop, advanced UI controls)
+- [x] **Stage 7**: Natural language query system with agent-driven visualization
+- [ ] **Stage 8**: Quality upgrades (ROI crop, advanced UI controls)
 
 ## Using AI Narration
 
