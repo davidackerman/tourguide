@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 from datetime import datetime
 import ollama
+from ollama_manager import ensure_ollama_running
 
 
 class OrganelleDatabase:
@@ -30,6 +31,11 @@ class OrganelleDatabase:
         self.csv_paths = [p for p in csv_paths if p.strip()]
         self.ai_model = ai_model  # For AI-driven column mapping and type inference
 
+        # Ensure Ollama is running if AI model is specified
+        if self.ai_model:
+            if not ensure_ollama_running():
+                print("[DB] Warning: Failed to start Ollama, AI features may not work", flush=True)
+
         # Ensure database directory exists
         db_dir = os.path.dirname(db_path)
         if db_dir and not os.path.exists(db_dir):
@@ -38,6 +44,9 @@ class OrganelleDatabase:
 
         # Initialize database
         self._create_tables()
+
+        # Cache metadata schema for AI prompts
+        self._metadata_schema = None
 
         # Import CSV files
         if self.csv_paths:
@@ -459,26 +468,43 @@ JSON mapping:"""
 
     def get_schema_description(self) -> str:
         """
-        Get human-readable schema description for AI prompts.
+        Get comprehensive schema description including metadata fields for AI prompts.
 
         Returns:
-            Schema description string
+            Detailed schema description string
         """
-        return """
+        available_types = self.get_available_organelle_types()
+        metadata_schema = self.get_metadata_schema()
+
+        desc = """
 Table: organelles
 
-Columns:
+Core Columns (directly accessible):
 - object_id (TEXT): Unique identifier for each organelle
-- organelle_type (TEXT): Type of organelle (e.g., 'mitochondria', 'nucleus', 'endoplasmic_reticulum')
-- volume (REAL): Volume in nm³ or voxels
-- surface_area (REAL): Surface area
-- position_x (REAL): X coordinate of center position
-- position_y (REAL): Y coordinate of center position
-- position_z (REAL): Z coordinate of center position
-- metadata (TEXT): Additional properties as JSON
+- organelle_type (TEXT): Type of organelle
+- volume (REAL): Volume in nm³
+- surface_area (REAL): Surface area in nm²
+- position_x (REAL): X coordinate of center position (nm)
+- position_y (REAL): Y coordinate of center position (nm)
+- position_z (REAL): Z coordinate of center position (nm)
+- metadata (TEXT): Additional properties as JSON (see below)
 
 Available organelle types: {}
-        """.format(", ".join(self.get_available_organelle_types()))
+
+Metadata Fields (access via json_extract):
+""".format(", ".join(available_types))
+
+        # Add metadata fields per organelle type
+        for org_type in sorted(metadata_schema.keys()):
+            fields = metadata_schema[org_type]
+            if fields:
+                desc += f"\n{org_type}:\n"
+                for field in fields:
+                    desc += f"  - {field}: json_extract(metadata, '$.{field}')\n"
+            else:
+                desc += f"\n{org_type}:\n  - (no additional metadata)\n"
+
+        return desc
 
     def get_available_organelle_types(self) -> List[str]:
         """
@@ -494,6 +520,50 @@ Available organelle types: {}
             return [row['organelle_type'] for row in results]
         except:
             return []
+
+    def get_metadata_schema(self, force_refresh: bool = False) -> Dict[str, List[str]]:
+        """
+        Get metadata fields available for each organelle type with caching.
+
+        Args:
+            force_refresh: Force re-discovery of schema
+
+        Returns:
+            Dict mapping organelle_type -> list of metadata field names
+        """
+        if self._metadata_schema is None or force_refresh:
+            self._metadata_schema = self._discover_metadata_schema()
+        return self._metadata_schema
+
+    def _discover_metadata_schema(self) -> Dict[str, List[str]]:
+        """
+        Discover metadata fields by sampling database.
+
+        Returns:
+            Dict mapping organelle_type -> list of metadata field names
+        """
+        schema = {}
+
+        try:
+            organelle_types = self.get_available_organelle_types()
+
+            for org_type in organelle_types:
+                # Sample first record with non-null metadata
+                results = self.execute_query(
+                    "SELECT metadata FROM organelles WHERE organelle_type = ? AND metadata IS NOT NULL LIMIT 1",
+                    (org_type,)
+                )
+
+                if results and results[0].get('metadata'):
+                    metadata = json.loads(results[0]['metadata'])
+                    schema[org_type] = list(metadata.keys())
+                else:
+                    schema[org_type] = []
+
+            return schema
+        except Exception as e:
+            print(f"[DB] Error discovering metadata schema: {e}", flush=True)
+            return {}
 
     def get_row_count(self) -> int:
         """

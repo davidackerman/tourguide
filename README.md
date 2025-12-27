@@ -218,6 +218,23 @@ Use `ANTHROPIC_API_KEY` in `.env` instead of `GOOGLE_API_KEY`.
 
 Navigate in Neuroglancer and watch the AI narrate your exploration in real-time!
 
+## Running on GPU Cluster (LSF/H100)
+
+To run on a GPU cluster node, use `mode=shared` when requesting GPUs:
+
+```bash
+bsub -P cellmap -n 12 -gpu "num=1:mode=shared" -q gpu_h100 -Is /bin/bash
+```
+
+**Important**: The `mode=shared` parameter is required! Without it, the GPU will be in exclusive mode, preventing both PyTorch (Chatterbox) and Ollama from using the GPU simultaneously.
+
+Once on the node, run the application normally:
+```bash
+pixi run start
+```
+
+See [CLUSTER_TROUBLESHOOTING.md](CLUSTER_TROUBLESHOOTING.md) for detailed cluster setup and troubleshooting.
+
 ## Requirements
 
 - Python 3.10+

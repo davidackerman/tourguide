@@ -560,32 +560,42 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             # If visualization query, update segment visibility
             if result.get("type") == "visualization" and result.get("visualization"):
                 viz = result["visualization"]
+
+                # Handle both single command (dict) and multiple commands (list)
+                viz_commands = viz if isinstance(viz, list) else [viz]
+
                 try:
                     with ng_tracker.viewer.txn() as s:
-                        layer_name = viz["layer_name"]
-                        segment_ids = viz["segment_ids"]
-                        action = viz.get("action", "show_only")
+                        for viz_cmd in viz_commands:
+                            layer_name = viz_cmd["layer_name"]
+                            segment_ids = viz_cmd["segment_ids"]
+                            action = viz_cmd.get("action", "show_only")
 
-                        # Get the layer
-                        if layer_name not in s.layers:
-                            raise ValueError(f"Layer '{layer_name}' not found in viewer")
+                            # Get the layer
+                            if layer_name not in s.layers:
+                                print(f"[QUERY] Warning: Layer '{layer_name}' not found, skipping", flush=True)
+                                continue
 
-                        layer = s.layers[layer_name]
+                            layer = s.layers[layer_name]
 
-                        # Update segment visibility based on action
-                        if action == "show_only":
-                            # Clear existing segments and show only these
-                            layer.segments = set(segment_ids)
-                        elif action == "add":
-                            # Add to existing visible segments
-                            current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
-                            layer.segments = current_segments | set(segment_ids)
-                        elif action == "remove":
-                            # Remove from visible segments
-                            current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
-                            layer.segments = current_segments - set(segment_ids)
+                            # Update segment visibility based on action
+                            if action == "show_only":
+                                # Clear existing segments and show only these
+                                layer.segments = set(segment_ids)
+                            elif action == "add":
+                                # Add to existing visible segments
+                                current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
+                                layer.segments = current_segments | set(segment_ids)
+                            elif action == "remove":
+                                # Remove from visible segments
+                                current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
+                                layer.segments = current_segments - set(segment_ids)
 
-                    print(f"[QUERY] Updated layer '{layer_name}' with {len(segment_ids)} segments (action: {action})", flush=True)
+                            print(f"[QUERY] Updated layer '{layer_name}' with {len(segment_ids)} segments (action: {action})", flush=True)
+
+                    if len(viz_commands) > 1:
+                        print(f"[QUERY] Applied {len(viz_commands)} visualization commands", flush=True)
+
                 except Exception as e:
                     print(f"[QUERY] Visualization failed: {e}", flush=True)
                     result["visualization_error"] = str(e)

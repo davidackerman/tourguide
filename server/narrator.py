@@ -216,6 +216,7 @@ class Narrator:
                     f"[NARRATOR] Initializing Chatterbox TTS on {device}...", flush=True
                 )
                 self.chatterbox = ChatterboxTTS.from_pretrained(device=device)
+                print(f"[NARRATOR] Chatterbox model loaded onto {device}", flush=True)
 
                 # Prepare voice conditionals (embedding) ONCE at startup if reference provided
                 if self.voice_reference:

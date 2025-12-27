@@ -5,9 +5,11 @@ Uses Ollama/Nemotron to convert user queries to SQL and process results.
 """
 
 import re
+import os
 from typing import Dict, Any, List, Optional
 import ollama
 from organelle_db import OrganelleDatabase
+from ollama_manager import ensure_ollama_running, preload_model
 
 
 class QueryAgent:
@@ -30,16 +32,23 @@ class QueryAgent:
         'CREATE', 'TRUNCATE', 'REPLACE', 'GRANT', 'REVOKE'
     ]
 
-    def __init__(self, db: OrganelleDatabase, model: str = "nemotron", ng_tracker=None, verbose: bool = False):
+    def __init__(self, db: OrganelleDatabase, model: str = "nemotron-3-nano", ng_tracker=None, verbose: bool = False):
         """
         Initialize query agent.
 
         Args:
             db: OrganelleDatabase instance
-            model: Ollama model name (default: nemotron)
+            model: Ollama model name (default: nemotron-3-nano)
             ng_tracker: Optional NG_StateTracker instance for layer discovery
             verbose: Enable verbose logging of AI interactions
         """
+        # Ensure Ollama is running before initializing
+        if not ensure_ollama_running():
+            print("[QUERY_AGENT] Warning: Failed to start Ollama, queries may fail", flush=True)
+        else:
+            # Preload the model to avoid cold-start issues
+            preload_model(model)
+
         self.db = db
         self.model = model
         self.ng_tracker = ng_tracker
@@ -55,7 +64,7 @@ class QueryAgent:
 
     def process_query(self, user_query: str) -> Dict[str, Any]:
         """
-        Process natural language query and return results.
+        Process natural language query with agent-driven multi-query detection.
 
         Args:
             user_query: Natural language query from user
@@ -64,9 +73,7 @@ class QueryAgent:
             Dictionary with query results and metadata
         """
         import time
-
-        timing = {}
-        start_total = time.time()
+        start = time.time()
 
         if not user_query.strip():
             return {
@@ -75,70 +82,30 @@ class QueryAgent:
             }
 
         try:
-            # Classify query type
-            query_type = self._classify_query_type(user_query)
+            # Ask agent whether to split query
+            queries = self._detect_and_split_query(user_query)
 
-            # Generate SQL with timing
-            start_sql = time.time()
-            sql = self._generate_sql(user_query)
-            timing['sql_generation'] = time.time() - start_sql
+            if len(queries) > 1:
+                # Multi-query: process each separately
+                sub_results = []
+                for sq in queries:
+                    result = self._process_single_query(sq)
+                    sub_results.append(result)
 
-            if not sql:
-                return {
-                    "type": "error",
-                    "answer": "Could not generate a valid query. Try asking something like: 'What is the size of the biggest mito?'"
-                }
-
-            # Validate SQL
-            if not self._validate_sql(sql):
-                return {
-                    "type": "error",
-                    "answer": "Generated query contains unsafe operations. Please try rephrasing."
-                }
-
-            # Execute query with timing
-            start_exec = time.time()
-            results = self.db.execute_query(sql)
-            timing['query_execution'] = time.time() - start_exec
-
-            # Handle empty results
-            if not results:
-                available_types = self.db.get_available_organelle_types()
-                return {
-                    "type": "error",
-                    "answer": f"No results found. Available organelle types: {', '.join(available_types)}. Try asking about one of these.",
-                    "available_types": available_types,
-                    "sql": sql
-                }
-
-            # Format response based on query type
-            start_format = time.time()
-
-            # Smart fallback: if query type is visualization but we have position data
-            # and only 1 result, it's likely a navigation query
-            if query_type == "visualization" and len(results) == 1:
-                first_result = results[0]
-                has_position = all(k in first_result for k in ['position_x', 'position_y', 'position_z'])
-                if has_position and all(first_result[k] is not None for k in ['position_x', 'position_y', 'position_z']):
-                    print("[QUERY_AGENT] Auto-correcting to navigation (has position data, single result)", flush=True)
-                    query_type = "navigation"
-
-            if query_type == "navigation":
-                result = self._handle_navigation_query(user_query, sql, results)
-            elif query_type == "visualization":
-                result = self._handle_visualization_query(user_query, sql, results)
+                # Combine results
+                combined = self._combine_results(queries, sub_results)
+                combined['timing'] = {'total': time.time() - start}
+                return combined
             else:
-                result = self._handle_informational_query(user_query, sql, results)
-            timing['answer_formatting'] = time.time() - start_format
-
-            # Add timing info to result
-            timing['total'] = time.time() - start_total
-            result['timing'] = timing
-
-            return result
+                # Single query
+                result = self._process_single_query(queries[0])
+                result['timing'] = {'total': time.time() - start}
+                return result
 
         except Exception as e:
             print(f"[QUERY_AGENT] Error processing query: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return {
                 "type": "error",
                 "answer": f"Error processing query: {str(e)}"
@@ -200,12 +167,13 @@ Intent:"""
             print(f"[QUERY_AGENT] Error classifying query: {e}", flush=True)
             return "informational"
 
-    def _generate_sql(self, user_query: str) -> Optional[str]:
+    def _generate_sql(self, user_query: str, previous_error: Optional[str] = None) -> Optional[str]:
         """
         Generate SQL query from natural language using Ollama.
 
         Args:
             user_query: Natural language query
+            previous_error: Error message from previous attempt (for retry)
 
         Returns:
             SQL query string or None if generation failed
@@ -228,12 +196,53 @@ Examples of fuzzy name matching:
 Match the user's query to the closest available organelle type from the list above.
 """
 
+        # Add interpretation guidance (let AI decide, not hardcoded rules)
+        interpretation_guide = """
+IMPORTANT - Understanding User Intent:
+
+Common ambiguous terms and how to interpret them:
+- "longest" - Consider what metric best represents length/extent for the organelle type
+  * For mitochondria: 'lsp (nm)' measures morphological length along skeleton
+  * For other organelles: 'volume' or bounding box dimensions may be most relevant
+
+- "largest/biggest" - Usually refers to volume
+
+- "thickest/thinnest" - For mitochondria, 'radius mean (nm)' measures thickness
+
+- "branched/complex" - For mitochondria, 'num branches' indicates structural complexity
+
+YOU MUST DECIDE which field best answers the user's question based on:
+1. The organelle type mentioned
+2. What metadata fields are available (see schema above)
+3. What the user is likely asking for
+
+If unsure, choose the most semantically appropriate field.
+"""
+
+        # Add error feedback if retrying
+        error_feedback = ""
+        if previous_error:
+            error_feedback = f"""
+PREVIOUS SQL ATTEMPT FAILED with error:
+{previous_error}
+
+Fix the SQL to address this error. Common issues:
+- Incorrect json_extract syntax (use '$.field name with spaces')
+- Missing parentheses in nested functions
+- Wrong column names (check schema above)
+- Incorrect SQLite syntax
+"""
+
         prompt = f"""You are an expert at converting natural language to SQLite queries.
 
 Database Schema:
 {schema_desc}
 
 {fuzzy_matching_note}
+
+{interpretation_guide}
+
+{error_feedback}
 
 User Query: {user_query}
 
@@ -246,27 +255,74 @@ IMPORTANT RULES:
 6. Use proper SQLite syntax
 7. Match user's organelle names to the available types listed above
 
-Example Queries:
-- "What is the size of the biggest mito?"
-  → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 1;
+Example Queries (20 examples covering various patterns):
 
-- "How many nuclei are there?"
-  → SELECT COUNT(*) as count FROM organelles WHERE organelle_type='nucleus';
+# Basic queries
+1. "What is the size of the biggest mito?"
+   → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 1;
 
-- "Take me to the biggest nucleus"
-  → SELECT object_id, organelle_type, volume, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 1;
+2. "How many nuclei are there?"
+   → SELECT COUNT(*) as count FROM organelles WHERE organelle_type='nucleus';
 
-- "What is the average volume of ER?"
-  → SELECT AVG(volume) as average_volume FROM organelles WHERE organelle_type='endoplasmic_reticulum';
+3. "Take me to the biggest nucleus"
+   → SELECT object_id, organelle_type, volume, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 1;
 
-- "Describe the top 3 largest nuclei"
-  → SELECT object_id, organelle_type, volume, surface_area, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' ORDER BY volume DESC LIMIT 3;
+4. "What is the average volume of ER?"
+   → SELECT AVG(volume) as average_volume FROM organelles WHERE organelle_type='endoplasmic_reticulum';
 
-- "Show only the 3 largest mitos"
-  → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 3;
+5. "Show only the 3 largest mitos"
+   → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 3;
 
-- "Display the longest mito"
-  → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' ORDER BY volume DESC LIMIT 1;
+# Metadata field queries (NEW - shows json_extract usage)
+6. "What is the longest mitochondria?" (uses lsp, NOT volume)
+   → SELECT object_id, organelle_type, json_extract(metadata, '$.lsp (nm)') as lsp FROM organelles WHERE organelle_type='mitochondria' ORDER BY json_extract(metadata, '$.lsp (nm)') DESC LIMIT 1;
+
+7. "Find the thickest mito" (uses radius mean)
+   → SELECT object_id, organelle_type, json_extract(metadata, '$.radius mean (nm)') as radius FROM organelles WHERE organelle_type='mitochondria' ORDER BY json_extract(metadata, '$.radius mean (nm)') DESC LIMIT 1;
+
+8. "Show mitos with more than 5 branches"
+   → SELECT object_id, organelle_type, json_extract(metadata, '$.num branches') as branches FROM organelles WHERE organelle_type='mitochondria' AND json_extract(metadata, '$.num branches') > 5;
+
+9. "What is the average lsp of mitochondria?"
+   → SELECT AVG(json_extract(metadata, '$.lsp (nm)')) as avg_lsp FROM organelles WHERE organelle_type='mitochondria';
+
+10. "Display the 3 most branched mitos"
+    → SELECT object_id, organelle_type, json_extract(metadata, '$.num branches') as branches FROM organelles WHERE organelle_type='mitochondria' ORDER BY json_extract(metadata, '$.num branches') DESC LIMIT 3;
+
+# Range queries (NEW)
+11. "Find mitos with volume greater than 100000"
+    → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='mitochondria' AND volume > 100000;
+
+12. "Show nuclei with volume between 1000 and 5000"
+    → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='nucleus' AND volume BETWEEN 1000 AND 5000;
+
+13. "Find lysosomes smaller than 500"
+    → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type='lysosome' AND volume < 500;
+
+# Multiple organelle types (NEW)
+14. "How many mitos and nuclei are there?"
+    → SELECT organelle_type, COUNT(*) as count FROM organelles WHERE organelle_type IN ('mitochondria', 'nucleus') GROUP BY organelle_type;
+
+15. "Show all peroxisomes and lysosomes"
+    → SELECT object_id, organelle_type, volume FROM organelles WHERE organelle_type IN ('peroxisome', 'lysosome');
+
+# Aggregations (NEW)
+16. "What is the total volume of all mitos?"
+    → SELECT SUM(volume) as total_volume FROM organelles WHERE organelle_type='mitochondria';
+
+17. "Find the min and max volume of nuclei"
+    → SELECT MIN(volume) as min_volume, MAX(volume) as max_volume FROM organelles WHERE organelle_type='nucleus';
+
+# Navigation with metadata (NEW)
+18. "Take me to the longest mito" (uses lsp for navigation)
+    → SELECT object_id, organelle_type, json_extract(metadata, '$.lsp (nm)') as lsp, position_x, position_y, position_z FROM organelles WHERE organelle_type='mitochondria' ORDER BY json_extract(metadata, '$.lsp (nm)') DESC LIMIT 1;
+
+# Specific objects (NEW)
+19. "Show me nucleus 5"
+    → SELECT object_id, organelle_type, volume, position_x, position_y, position_z FROM organelles WHERE organelle_type='nucleus' AND object_id='5';
+
+20. "Describe mitochondria 1234"
+    → SELECT object_id, organelle_type, volume, surface_area, position_x, position_y, position_z, metadata FROM organelles WHERE organelle_type='mitochondria' AND object_id='1234';
 
 IMPORTANT:
 - ALWAYS include BOTH object_id AND organelle_type in SELECT for any query that returns specific organelles
@@ -330,13 +386,21 @@ SQL Query:"""
         # Remove extra whitespace
         sql = sql.strip()
 
-        # If multiple lines, take the line that looks like SQL
-        lines = sql.split('\n')
-        for line in lines:
-            line = line.strip()
-            if line.upper().startswith('SELECT'):
-                sql = line
-                break
+        # If the AI returned multiple SQL queries (separated by semicolons), take the first one
+        # This can happen when the AI formats queries nicely across multiple lines
+        if ';' in sql:
+            # Split by semicolon and take the first complete query
+            queries = sql.split(';')
+            for query in queries:
+                query = query.strip()
+                if query.upper().startswith('SELECT') and 'FROM' in query.upper():
+                    # Found a complete query
+                    sql = query + ';'
+                    break
+
+        # Collapse multi-line formatted SQL into single line
+        # This handles cases where AI formats SQL nicely with line breaks
+        sql = ' '.join(sql.split())
 
         return sql
 
@@ -379,6 +443,528 @@ SQL Query:"""
             return False
 
         return True
+
+    def _validate_sql_syntax(self, sql: str) -> tuple[bool, Optional[str]]:
+        """
+        Validate SQL syntax using SQLite EXPLAIN.
+
+        Args:
+            sql: SQL query string
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        try:
+            # Use EXPLAIN to validate without executing
+            explain_sql = f"EXPLAIN {sql}"
+            self.db.execute_query(explain_sql)
+            return (True, None)
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[QUERY_AGENT] SQL syntax validation failed: {error_msg}", flush=True)
+            return (False, error_msg)
+
+    def _generate_sql_with_retry(self, user_query: str, max_retries: int = 2) -> Optional[str]:
+        """
+        Generate SQL with retry mechanism.
+
+        Args:
+            user_query: Natural language query
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Valid SQL query string or None
+        """
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            # Generate SQL with error feedback
+            sql = self._generate_sql(user_query, previous_error=last_error if attempt > 0 else None)
+
+            if not sql:
+                return None
+
+            # Validate safety
+            if not self._validate_sql(sql):
+                print(f"[QUERY_AGENT] Unsafe SQL on attempt {attempt + 1}", flush=True)
+                continue
+
+            # Validate syntax
+            is_valid, error_msg = self._validate_sql_syntax(sql)
+            if not is_valid:
+                print(f"[QUERY_AGENT] Invalid SQL attempt {attempt + 1}/{max_retries + 1}", flush=True)
+                last_error = error_msg
+                if attempt < max_retries:
+                    print(f"[QUERY_AGENT] Retrying with error feedback...", flush=True)
+                    continue
+                else:
+                    return None
+
+            # Try executing
+            try:
+                self.db.execute_query(sql)
+                return sql
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[QUERY_AGENT] Execution failed attempt {attempt + 1}/{max_retries + 1}: {error_msg}", flush=True)
+                last_error = error_msg
+                if attempt < max_retries:
+                    print(f"[QUERY_AGENT] Retrying...", flush=True)
+                    continue
+                else:
+                    return None
+
+        return None
+
+    def _process_single_query(self, user_query: str) -> Dict[str, Any]:
+        """
+        Process a single query (main query processing logic).
+
+        Args:
+            user_query: Natural language query
+
+        Returns:
+            Query result dictionary
+        """
+        import time
+        timing = {}
+
+        try:
+            # Classify query type
+            query_type = self._classify_query_type(user_query)
+
+            # Generate SQL with retry mechanism and timing
+            start_sql = time.time()
+            sql = self._generate_sql_with_retry(user_query, max_retries=2)
+            timing['sql_generation'] = time.time() - start_sql
+
+            if not sql:
+                return {
+                    "type": "error",
+                    "answer": "Could not generate a valid query. Try asking something like: 'What is the size of the biggest mito?'"
+                }
+
+            # Execute query with timing (validation already done in retry wrapper)
+            start_exec = time.time()
+            results = self.db.execute_query(sql)
+            timing['query_execution'] = time.time() - start_exec
+
+            # Handle empty results
+            if not results:
+                available_types = self.db.get_available_organelle_types()
+                return {
+                    "type": query_type,
+                    "sql": sql,
+                    "results": [],
+                    "answer": f"No results found. Available organelle types: {', '.join(available_types)}",
+                    "timing": timing
+                }
+
+            # Handle based on query type
+            if query_type == "informational":
+                return self._handle_informational_query(user_query, sql, results)
+            elif query_type == "navigation":
+                return self._handle_navigation_query(user_query, sql, results)
+            elif query_type == "visualization":
+                return self._handle_visualization_query(user_query, sql, results)
+            else:
+                # Default to informational
+                return self._handle_informational_query(user_query, sql, results)
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error processing single query: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "type": "error",
+                "answer": f"Error processing query: {str(e)}"
+            }
+
+    def _combine_results(self, queries: List[str], results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Combine results from multiple sub-queries.
+
+        Args:
+            queries: List of query strings
+            results: List of result dictionaries
+
+        Returns:
+            Combined result dictionary
+        """
+        answers = []
+        all_results = []
+        sql_queries = []
+        visualizations = []
+        navigations = []
+
+        for i, (query, result) in enumerate(zip(queries, results), 1):
+            # Collect answers
+            answers.append(f"{i}. {result.get('answer', 'No answer')}")
+
+            # Collect results
+            all_results.extend(result.get('results', []))
+
+            # Collect SQL queries
+            if result.get('sql'):
+                sql_queries.append(f"-- Query {i}: {query}\n{result['sql']}")
+
+            # Collect visualizations
+            if result.get('visualization'):
+                visualizations.append(result['visualization'])
+
+            # Collect navigations
+            if result.get('navigation'):
+                navigations.append(result['navigation'])
+
+        # Determine combined type
+        types = [r.get('type') for r in results]
+        combined_type = 'visualization' if 'visualization' in types else 'informational'
+
+        # Build combined result
+        combined = {
+            'type': combined_type,
+            'results': all_results,
+            'sub_queries': queries,
+            'sub_results': results
+        }
+
+        # Add SQL queries if any
+        if sql_queries:
+            combined['sql'] = '\n\n'.join(sql_queries)
+
+        # Use AI to generate combined response based on type
+        if combined_type == 'visualization' and visualizations:
+            # Use AI to intelligently combine visualization commands
+            viz_result = self._combine_visualization_with_ai(queries, results, visualizations, all_results)
+            combined['answer'] = viz_result.get('answer', '\n'.join(answers))
+            combined['visualization'] = viz_result.get('visualization')
+        elif navigations:
+            # Navigation: use first one
+            combined['navigation'] = navigations[0]
+            combined['answer'] = '\n'.join(answers)
+        else:
+            # Informational: use AI to combine answers
+            combined['answer'] = self._combine_answers_with_ai(queries, results) if len(results) > 1 else answers[0] if answers else "No answer"
+
+        return combined
+
+    def _combine_visualization_with_ai(
+        self,
+        queries: List[str],
+        results: List[Dict[str, Any]],
+        visualizations: List[Dict[str, Any]],
+        all_results: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Use AI to intelligently combine multiple visualization commands.
+
+        Args:
+            queries: List of sub-query strings
+            results: List of result dictionaries
+            visualizations: List of visualization commands from sub-queries
+            all_results: Combined database results
+
+        Returns:
+            Dictionary with 'answer' and 'visualization' fields
+        """
+        import json
+
+        # If only one visualization, return it as-is
+        if len(visualizations) == 1:
+            answer = next((r.get('answer') for r in results if r.get('visualization')), "Visualization generated")
+            return {
+                'answer': answer,
+                'visualization': visualizations[0]
+            }
+
+        # Multiple visualizations - use AI to combine
+        viz_info = []
+        for i, result in enumerate(results):
+            if 'visualization' in result:
+                viz_info.append({
+                    'query': queries[i],
+                    'visualization': result['visualization'],
+                    'answer': result.get('answer', ''),
+                    'num_objects': len(result.get('results', []))
+                })
+
+        prompt = f"""You are combining multiple visualization commands for Neuroglancer.
+
+Sub-queries and their visualizations:
+{json.dumps(viz_info, indent=2)}
+
+IMPORTANT: Check if all visualizations use the SAME layer name:
+- If YES (all same layer): Combine all segment IDs into a single layer command
+- If NO (different layers): Keep as separate layer commands (return as a list)
+
+Task:
+1. Check if all layer_name values are the same
+2. If same layer: combine all segment IDs into one command
+3. If different layers: create separate commands for each layer
+4. Create a natural language answer describing what will be shown (mention all organelles)
+
+Respond in JSON format:
+- For SAME layer:
+{{
+    "layer_commands": [
+        {{
+            "layer_name": "layer_name",
+            "segment_ids": ["id1", "id2", ...],
+            "action": "show_only"
+        }}
+    ],
+    "answer": "Natural language answer"
+}}
+
+- For DIFFERENT layers:
+{{
+    "layer_commands": [
+        {{
+            "layer_name": "layer1",
+            "segment_ids": ["id1"],
+            "action": "show_only"
+        }},
+        {{
+            "layer_name": "layer2",
+            "segment_ids": ["id2"],
+            "action": "show_only"
+        }}
+    ],
+    "answer": "Natural language answer mentioning both/all"
+}}
+
+JSON:"""
+
+        try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] VISUALIZATION COMBINATION", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            response_text = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(response_text, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            # Clean and parse JSON
+            response_text = response_text.replace('```json', '').replace('```', '').strip()
+            viz_combined = json.loads(response_text)
+
+            layer_commands = viz_combined.get('layer_commands', [])
+
+            print(f"[QUERY_AGENT] AI combined {len(visualizations)} visualizations into {len(layer_commands)} layer command(s)", flush=True)
+
+            # Return in format expected by the system
+            # If multiple layers, we return visualization as a list of commands
+            # If single layer, return as a single command for backward compatibility
+            if len(layer_commands) == 1:
+                viz_result = {
+                    'answer': viz_combined.get('answer', 'Visualization generated'),
+                    'visualization': layer_commands[0]
+                }
+            else:
+                viz_result = {
+                    'answer': viz_combined.get('answer', 'Visualization generated'),
+                    'visualization': layer_commands  # List of commands for multi-layer
+                }
+
+            return viz_result
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error combining visualizations with AI: {e}, using fallback", flush=True)
+            import traceback
+            traceback.print_exc()
+
+            # Fallback: manually combine
+            # Group by layer name
+            layer_groups = {}
+            for viz in visualizations:
+                layer_name = viz.get('layer_name', 'unknown')
+                if layer_name not in layer_groups:
+                    layer_groups[layer_name] = []
+                layer_groups[layer_name].extend(viz.get('segment_ids', []))
+
+            # Create layer commands
+            layer_commands = []
+            for layer_name, segment_ids in layer_groups.items():
+                layer_commands.append({
+                    'layer_name': layer_name,
+                    'segment_ids': segment_ids,
+                    'action': 'show_only'
+                })
+
+            answers = [f"{i+1}. {r.get('answer', 'No answer')}" for i, r in enumerate(results) if r.get('type') == 'visualization']
+
+            # Return single command or list depending on number of layers
+            if len(layer_commands) == 1:
+                return {
+                    'answer': '\n'.join(answers),
+                    'visualization': layer_commands[0]
+                }
+            else:
+                return {
+                    'answer': '\n'.join(answers),
+                    'visualization': layer_commands
+                }
+
+    def _combine_answers_with_ai(self, queries: List[str], results: List[Dict[str, Any]]) -> str:
+        """
+        Use AI to create a combined natural language answer from multiple sub-query results.
+
+        Args:
+            queries: List of sub-query strings
+            results: List of result dictionaries
+
+        Returns:
+            Combined natural language answer
+        """
+        import json
+
+        # Build context
+        query_info = []
+        for i, (query, result) in enumerate(zip(queries, results), 1):
+            query_info.append({
+                'query': query,
+                'answer': result.get('answer', 'No answer'),
+                'sample_data': result.get('results', [])[:2]  # Limit to avoid token overflow
+            })
+
+        prompt = f"""You are combining answers from multiple related queries about organelle data.
+
+Queries and individual answers:
+{json.dumps(query_info, indent=2)}
+
+Task:
+Combine these answers into a single, cohesive natural language response.
+- Be concise (2-3 sentences max)
+- Include all key information from each query
+- Use natural language, not a numbered list
+
+Combined answer:"""
+
+        try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] ANSWER COMBINATION", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            answer = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(answer, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            print(f"[QUERY_AGENT] AI combined {len(results)} answers", flush=True)
+            return answer
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Error combining answers with AI: {e}, using fallback", flush=True)
+            # Fallback: numbered list
+            return '\n'.join([f"{i+1}. {r.get('answer', 'No answer')}" for i, r in enumerate(results)])
+
+    def _detect_and_split_query(self, user_query: str) -> List[str]:
+        """
+        Ask AI agent whether query should be split into multiple queries.
+        Returns list of queries (single item if no split needed).
+
+        Args:
+            user_query: User's natural language query
+
+        Returns:
+            List of query strings
+        """
+        prompt = f"""Analyze this user query about organelle data.
+
+User Query: {user_query}
+
+Does this query contain MULTIPLE DISTINCT QUESTIONS that should be answered separately?
+
+Examples of queries that SHOULD be split:
+- "show largest mito and smallest nucleus" (2 separate questions)
+- "what is biggest cell and how many lysosomes" (2 separate questions)
+- "display 3 biggest mitos and 2 smallest nuclei" (2 separate questions)
+
+Examples of queries that should NOT be split:
+- "show largest mito" (single question)
+- "how many mitos and nuclei are there" (single question asking for counts of multiple types)
+- "show mitos and nuclei with volume > 1000" (single question with one condition)
+
+If the query should be split, respond with:
+SPLIT
+1. [first query]
+2. [second query]
+...
+
+If the query should NOT be split, respond with:
+KEEP
+[original query]
+
+Your response:"""
+
+        try:
+            if self.verbose:
+                print("\n" + "="*80, flush=True)
+                print("[AI] QUERY SPLIT DETECTION", flush=True)
+                print("="*80, flush=True)
+                print("PROMPT:", flush=True)
+                print(prompt, flush=True)
+                print("-"*80, flush=True)
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            response_text = response["message"]["content"].strip()
+
+            if self.verbose:
+                print("RESPONSE:", flush=True)
+                print(response_text, flush=True)
+                print("="*80 + "\n", flush=True)
+
+            # Parse response
+            if response_text.startswith("SPLIT"):
+                # Extract queries
+                queries = []
+                import re
+                for line in response_text.split('\n')[1:]:  # Skip "SPLIT" line
+                    match = re.match(r'^[\d\-\*\.]+\s+(.+)$', line.strip())
+                    if match:
+                        queries.append(match.group(1).strip())
+
+                if queries:
+                    print(f"[QUERY_AGENT] Agent split into {len(queries)} queries: {queries}", flush=True)
+                    return queries
+                else:
+                    print(f"[QUERY_AGENT] Agent said split but couldn't parse, using original", flush=True)
+                    return [user_query]
+            else:
+                # Keep as single query
+                print(f"[QUERY_AGENT] Agent determined query should not be split", flush=True)
+                return [user_query]
+
+        except Exception as e:
+            print(f"[QUERY_AGENT] Split detection failed: {e}, using original", flush=True)
+            return [user_query]
 
     def _handle_informational_query(
         self,
