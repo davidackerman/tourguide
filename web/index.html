@@ -20,15 +20,6 @@
                         <span class="voice-icon">🔊</span> Voice
                     </button>
                 </div>
-                <div class="screenshot-controls" id="screenshot-controls" style="display: none;">
-                    <label class="screenshot-mode-label">
-                        <input type="checkbox" id="auto-screenshot" checked>
-                        Auto Capture
-                    </label>
-                    <button id="manual-screenshot" class="screenshot-btn" title="Take screenshot (or press 's')">
-                        📷 Capture
-                    </button>
-                </div>
                 <div class="status" id="status">
                     <span class="status-indicator"></span>
                     <span id="status-text">Connecting...</span>
@@ -38,7 +29,18 @@
 
         <main>
             <div class="ng-viewer-panel">
-                <h2>Neuroglancer Viewer</h2>
+                <div class="ng-header">
+                    <h2>Neuroglancer Viewer</h2>
+                    <div class="screenshot-controls" id="screenshot-controls" style="display: none;">
+                        <label class="screenshot-mode-label">
+                            <input type="checkbox" id="auto-screenshot">
+                            Live Capture
+                        </label>
+                        <button id="manual-screenshot" class="screenshot-btn" title="Take screenshot (or press 's')">
+                            📷 Capture
+                        </button>
+                    </div>
+                </div>
                 <div class="ng-iframe-container">
                     <iframe id="ng-iframe" allow="cross-origin-isolated"></iframe>
                 </div>
@@ -114,56 +116,80 @@
                 </span>
             </div>
 
-            <!-- Recording Controls -->
-            <div class="recording-controls">
-                <div class="recording-buttons">
-                    <button id="start-recording">
-                        <span class="record-icon">●</span> Start Recording
-                    </button>
-                    <button id="stop-recording" disabled>
-                        <span class="stop-icon">■</span> Stop Recording
-                    </button>
-                    <select id="transition-type">
-                        <option value="cut">Direct Cuts</option>
-                        <option value="crossfade">Crossfade</option>
-                        <option value="interpolate">State Interpolation</option>
-                    </select>
-                    <button id="create-movie" style="display: none;">
-                        🎬 Create Movie
-                    </button>
-                </div>
+            <!-- Movie Creation Tabs -->
+            <div class="movie-tabs" id="movie-tabs" style="display: none;">
+                <button class="movie-tab-btn active" data-tab="live-recording">Live Recording</button>
+                <button class="movie-tab-btn" data-tab="from-screenshots">Create from Screenshots</button>
+            </div>
 
-                <div class="recording-status">
-                    <span id="recording-status-text">Ready to record</span>
-                    <span id="recording-frame-count" style="display: none;">
-                        Frames: <span id="rec-frame-count">0</span>
-                    </span>
-                </div>
+            <!-- Live Recording Tab -->
+            <div class="movie-tab-content active" id="movie-tab-live-recording" style="display: none;">
+                <div class="recording-controls">
+                    <div class="recording-buttons">
+                        <button id="start-recording">
+                            <span class="record-icon">●</span> Start Recording
+                        </button>
+                        <button id="stop-recording" disabled>
+                            <span class="stop-icon">■</span> Stop Recording
+                        </button>
+                        <select id="transition-type">
+                            <option value="cut">Direct Cuts</option>
+                            <option value="crossfade">Crossfade</option>
+                            <option value="interpolate">State Interpolation</option>
+                        </select>
+                        <button id="create-movie" style="display: none;">
+                            🎬 Create Movie
+                        </button>
+                    </div>
 
-                <div class="compilation-progress" id="compilation-progress" style="display: none;">
-                    <div class="compilation-spinner"></div>
-                    <span id="progress-text">Compiling movie...</span>
+                    <div class="recording-status">
+                        <span id="recording-status-text">Ready to record</span>
+                        <span id="recording-frame-count" style="display: none;">
+                            Frames: <span id="rec-frame-count">0</span>
+                        </span>
+                    </div>
+
+                    <div class="compilation-progress" id="compilation-progress" style="display: none;">
+                        <div class="compilation-spinner"></div>
+                        <span id="progress-text">Compiling movie...</span>
+                    </div>
                 </div>
             </div>
 
-            <!-- Screenshot Movie Controls (Explore mode only) -->
-            <div class="screenshot-movie-controls" id="screenshot-movie-controls" style="display: none;">
-                <div class="screenshot-movie-buttons">
-                    <button id="select-all-screenshots">
-                        Select All
-                    </button>
-                    <button id="clear-selection-screenshots">
-                        Clear Selection
-                    </button>
-                    <button id="generate-narrations" disabled>
-                        🎤 Generate Narrations for Selected
-                    </button>
-                    <button id="create-selected-movie" disabled>
-                        🎬 Create Movie from Selected
-                    </button>
-                </div>
-                <div class="screenshot-movie-status">
-                    <span id="selected-count">0 screenshots selected</span>
+            <!-- From Screenshots Tab -->
+            <div class="movie-tab-content" id="movie-tab-from-screenshots" style="display: none;">
+                <div class="screenshot-movie-controls">
+                    <div class="screenshot-movie-header">
+                        <div class="screenshot-movie-buttons">
+                            <button id="select-all-screenshots">
+                                Select All
+                            </button>
+                            <button id="clear-selection-screenshots">
+                                Clear Selection
+                            </button>
+                            <button id="generate-narrations" disabled>
+                                🎤 Generate Narrations for Selected
+                            </button>
+                            <select id="movie-transition-type">
+                                <option value="cut">Direct Cuts</option>
+                                <option value="crossfade">Crossfade</option>
+                                <option value="interpolate">State Interpolation</option>
+                            </select>
+                            <button id="create-selected-movie" disabled>
+                                🎬 Create Movie from Selected
+                            </button>
+                        </div>
+                        <div class="screenshot-movie-status">
+                            <span id="selected-count">0 screenshots selected</span>
+                        </div>
+                    </div>
+
+                    <!-- Draggable screenshot list -->
+                    <div class="movie-screenshots-container" id="movie-screenshots-container">
+                        <div class="movie-screenshots-placeholder">
+                            No screenshots available. Switch to Explore mode and capture some screenshots first.
+                        </div>
+                    </div>
                 </div>
             </div>
         </footer>

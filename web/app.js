@@ -33,7 +33,8 @@ class NGLiveStream {
         // Screenshot management
         this.screenshots = [];  // Array of {jpeg_b64, timestamp, narration, state} objects
         this.maxScreenshots = 20;  // Maximum screenshots to keep in history
-        this.autoScreenshotEnabled = true;  // Auto-capture screenshots
+        this.autoScreenshotEnabled = false;  // Auto-capture disabled by default
+        this.draggedScreenshotIndex = null;  // For drag and drop
 
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
@@ -65,12 +66,16 @@ class NGLiveStream {
         this.progressText = document.getElementById('progress-text');
 
         // Screenshot movie UI elements
-        this.screenshotMovieControls = document.getElementById('screenshot-movie-controls');
+        this.movieTabs = document.getElementById('movie-tabs');
+        this.movieTabBtns = document.querySelectorAll('.movie-tab-btn');
+        this.movieTabContents = document.querySelectorAll('.movie-tab-content');
+        this.movieScreenshotsContainer = document.getElementById('movie-screenshots-container');
         this.selectAllBtn = document.getElementById('select-all-screenshots');
         this.clearSelectionBtn = document.getElementById('clear-selection-screenshots');
         this.generateNarrationsBtn = document.getElementById('generate-narrations');
         this.createSelectedMovieBtn = document.getElementById('create-selected-movie');
         this.selectedCountSpan = document.getElementById('selected-count');
+        this.movieTransitionType = document.getElementById('movie-transition-type');
 
         // Query mode UI elements
         this.modeExploreBtn = document.getElementById('mode-explore');
@@ -1035,19 +1040,28 @@ class NGLiveStream {
             return;
         }
 
+        // Setup movie tab switching
+        this.movieTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                this.switchMovieTab(tabName);
+            });
+        });
+
         // Select all screenshots
         this.selectAllBtn.addEventListener('click', () => {
-            this.screenshots.forEach((_, index) => {
-                const checkbox = document.querySelector(`.screenshot-select[data-index="${index}"]`);
-                if (checkbox) checkbox.checked = true;
+            document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(cb => {
+                cb.checked = true;
             });
-            this.updateSelectedCount();
+            this.updateMovieSelectedCount();
         });
 
         // Clear selection
         this.clearSelectionBtn.addEventListener('click', () => {
-            document.querySelectorAll('.screenshot-select').forEach(cb => cb.checked = false);
-            this.updateSelectedCount();
+            document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            this.updateMovieSelectedCount();
         });
 
         // Generate narrations for selected
@@ -1065,6 +1079,147 @@ class NGLiveStream {
         }
 
         console.log('[SCREENSHOT-MOVIE] Controls initialized');
+    }
+
+    switchMovieTab(tabName) {
+        // Update button states
+        this.movieTabBtns.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update tab content visibility
+        this.movieTabContents.forEach(content => {
+            if (content.id === `movie-tab-${tabName}`) {
+                content.classList.add('active');
+                content.style.display = 'block';
+            } else {
+                content.classList.remove('active');
+                content.style.display = 'none';
+            }
+        });
+
+        // If switching to "from-screenshots" tab, update the movie screenshots view
+        if (tabName === 'from-screenshots') {
+            this.updateMovieScreenshotsView();
+        }
+    }
+
+    updateMovieScreenshotsView() {
+        if (!this.movieScreenshotsContainer) return;
+
+        if (this.screenshots.length === 0) {
+            this.movieScreenshotsContainer.innerHTML = '<div class="movie-screenshots-placeholder">No screenshots available. Switch to Explore mode and capture some screenshots first.</div>';
+            return;
+        }
+
+        const screenshotsHTML = this.screenshots.map((screenshot, index) => {
+            const timeStr = new Date(screenshot.timestamp * 1000).toLocaleTimeString();
+            const hasNarration = !!screenshot.narration;
+
+            return `
+                <div class="movie-screenshot-item" draggable="true" data-index="${index}">
+                    <div class="drag-handle">⋮⋮</div>
+                    <div class="screenshot-checkbox-container">
+                        <input type="checkbox" class="screenshot-checkbox" data-index="${index}">
+                    </div>
+                    <div class="screenshot-preview">
+                        <img src="data:image/jpeg;base64,${screenshot.jpeg_b64}" alt="Screenshot ${index + 1}">
+                        <div class="screenshot-time">${timeStr}</div>
+                    </div>
+                    <div class="screenshot-info">
+                        <div class="screenshot-number">#${index + 1}</div>
+                        ${hasNarration ? `
+                            <div class="screenshot-narration-preview">
+                                <span class="narration-indicator">🎤</span>
+                                <span class="narration-text">${this.escapeHtml(screenshot.narration.substring(0, 100))}${screenshot.narration.length > 100 ? '...' : ''}</span>
+                            </div>
+                        ` : `
+                            <div class="screenshot-no-narration">
+                                <span class="no-narration-indicator">⏳</span> No narration
+                            </div>
+                        `}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        this.movieScreenshotsContainer.innerHTML = screenshotsHTML;
+
+        // Add drag and drop event listeners
+        const items = this.movieScreenshotsContainer.querySelectorAll('.movie-screenshot-item');
+        items.forEach(item => {
+            item.addEventListener('dragstart', (e) => this.handleDragStart(e));
+            item.addEventListener('dragover', (e) => this.handleDragOver(e));
+            item.addEventListener('drop', (e) => this.handleDrop(e));
+            item.addEventListener('dragend', (e) => this.handleDragEnd(e));
+        });
+
+        // Add checkbox event listeners
+        document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                this.updateMovieSelectedCount();
+            });
+        });
+    }
+
+    handleDragStart(e) {
+        this.draggedScreenshotIndex = parseInt(e.target.dataset.index);
+        e.target.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+    }
+
+    handleDragOver(e) {
+        if (e.preventDefault) {
+            e.preventDefault();
+        }
+        e.dataTransfer.dropEffect = 'move';
+
+        const item = e.target.closest('.movie-screenshot-item');
+        if (item && !item.classList.contains('dragging')) {
+            item.classList.add('drag-over');
+        }
+        return false;
+    }
+
+    handleDrop(e) {
+        if (e.stopPropagation) {
+            e.stopPropagation();
+        }
+
+        const targetItem = e.target.closest('.movie-screenshot-item');
+        if (!targetItem) return;
+
+        const targetIndex = parseInt(targetItem.dataset.index);
+
+        if (this.draggedScreenshotIndex !== null && this.draggedScreenshotIndex !== targetIndex) {
+            // Reorder screenshots array
+            const draggedItem = this.screenshots[this.draggedScreenshotIndex];
+            this.screenshots.splice(this.draggedScreenshotIndex, 1);
+            this.screenshots.splice(targetIndex, 0, draggedItem);
+
+            // Update both the movie view and explore panel
+            this.updateMovieScreenshotsView();
+            this.updateExplorePanel();
+
+            console.log(`[MOVIE] Moved screenshot from ${this.draggedScreenshotIndex} to ${targetIndex}`);
+        }
+
+        return false;
+    }
+
+    handleDragEnd(e) {
+        e.target.classList.remove('dragging');
+
+        // Remove drag-over class from all items
+        document.querySelectorAll('.movie-screenshot-item').forEach(item => {
+            item.classList.remove('drag-over');
+        });
+
+        this.draggedScreenshotIndex = null;
     }
 
     updateSelectedCount() {
@@ -1088,8 +1243,33 @@ class NGLiveStream {
         }
     }
 
+    updateMovieSelectedCount() {
+        const selectedCheckboxes = document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked');
+        const count = selectedCheckboxes.length;
+
+        if (this.selectedCountSpan) {
+            this.selectedCountSpan.textContent = `${count} screenshot${count !== 1 ? 's' : ''} selected`;
+        }
+
+        // Enable/disable buttons based on selection
+        const hasSelection = count > 0;
+        if (this.generateNarrationsBtn) {
+            this.generateNarrationsBtn.disabled = !hasSelection;
+        }
+        if (this.createSelectedMovieBtn) {
+            // Only enable if all selected have narrations
+            const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+            const allHaveNarrations = selectedIndices.every(idx => this.screenshots[idx]?.narration);
+            this.createSelectedMovieBtn.disabled = !hasSelection || !allHaveNarrations;
+        }
+    }
+
     async generateNarrationsForSelected() {
-        const selectedCheckboxes = document.querySelectorAll('.screenshot-select:checked');
+        // Check if we're in movie view or explore view
+        let selectedCheckboxes = document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked');
+        if (selectedCheckboxes.length === 0) {
+            selectedCheckboxes = document.querySelectorAll('.screenshot-select:checked');
+        }
         if (selectedCheckboxes.length === 0) return;
 
         const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
@@ -1134,8 +1314,9 @@ class NGLiveStream {
                     this.screenshots[index].narration = data.narration;
                     this.screenshots[index].audio = data.audio;
 
-                    // Update display
+                    // Update both displays
                     this.updateExplorePanel();
+                    this.updateMovieScreenshotsView();
                 }
             }
 
@@ -1145,12 +1326,16 @@ class NGLiveStream {
             alert('Failed to generate narrations: ' + e.message);
         } finally {
             this.generateNarrationsBtn.textContent = '🎤 Generate Narrations for Selected';
-            this.updateSelectedCount();
+            this.updateMovieSelectedCount();
         }
     }
 
     async createMovieFromSelected() {
-        const selectedCheckboxes = document.querySelectorAll('.screenshot-select:checked');
+        // Check if we're in movie view or explore view
+        let selectedCheckboxes = document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked');
+        if (selectedCheckboxes.length === 0) {
+            selectedCheckboxes = document.querySelectorAll('.screenshot-select:checked');
+        }
         if (selectedCheckboxes.length === 0) return;
 
         const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
@@ -1170,12 +1355,15 @@ class NGLiveStream {
             // Send selected screenshots to server
             const selectedScreenshots = selectedIndices.map(idx => this.screenshots[idx]);
 
+            // Use movie transition type if available, otherwise fall back to recording transition type
+            const transitionType = this.movieTransitionType ? this.movieTransitionType.value : this.transitionTypeSelect.value;
+
             const response = await fetch('/api/movie/create-from-screenshots', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     screenshots: selectedScreenshots,
-                    transition_type: this.transitionTypeSelect.value,
+                    transition_type: transitionType,
                     transition_duration: 2.0
                 })
             });
@@ -1192,7 +1380,7 @@ class NGLiveStream {
             alert('Failed to create movie: ' + e.message);
         } finally {
             this.createSelectedMovieBtn.textContent = '🎬 Create Movie from Selected';
-            this.updateSelectedCount();
+            this.updateMovieSelectedCount();
         }
     }
 
@@ -1467,7 +1655,11 @@ class NGLiveStream {
             if (this.sidePanels) this.sidePanels.style.display = 'flex';
             if (this.chatPanel) this.chatPanel.style.display = 'none';
             if (this.screenshotControls) this.screenshotControls.style.display = 'flex';
-            if (this.screenshotMovieControls) this.screenshotMovieControls.style.display = 'block';
+            if (this.movieTabs) this.movieTabs.style.display = 'flex';
+
+            // Show the active movie tab content
+            const activeMovieTab = document.querySelector('.movie-tab-content.active');
+            if (activeMovieTab) activeMovieTab.style.display = 'block';
 
             // Update button states
             if (this.modeExploreBtn) this.modeExploreBtn.classList.add('active');
@@ -1477,7 +1669,12 @@ class NGLiveStream {
             if (this.sidePanels) this.sidePanels.style.display = 'none';
             if (this.chatPanel) this.chatPanel.style.display = 'block';
             if (this.screenshotControls) this.screenshotControls.style.display = 'none';
-            if (this.screenshotMovieControls) this.screenshotMovieControls.style.display = 'none';
+            if (this.movieTabs) this.movieTabs.style.display = 'none';
+
+            // Hide all movie tab contents
+            this.movieTabContents.forEach(content => {
+                content.style.display = 'none';
+            });
 
             // Update button states
             if (this.modeExploreBtn) this.modeExploreBtn.classList.remove('active');
