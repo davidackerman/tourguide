@@ -59,29 +59,35 @@ class NG_StateTracker:
         self.narrator = Narrator()
         self.narrator_callback = narrator_callback  # Called when narration is generated
 
+        # Flag to temporarily disable narration (e.g., during query-based navigation)
+        self.narration_enabled = True
+
         # Register state change callback (for config changes only)
         self.viewer.config_state.add_changed_callback(self._on_state_change)
 
     def _add_celegans_data(self):
         """Add C. elegans embryo EM data with organelle segmentations (default)."""
         # Load zarr to get dataset dimensions and calculate center
-        zarr_path = "/nrs/cellmap/data/jrc_c-elegans-comma-1/jrc_c-elegans-comma-1.zarr/recon-1/em/fibsem-uint8"
+        zarr_path = "/nrs/cellmap/data/jrc_c-elegans-op50-1/jrc_c-elegans-op50-1.zarr/recon-1/em/fibsem-uint8"
         try:
             # zarr 3.x API: open directly with path
-            z = zarr.open(zarr_path, mode='r')
+            z = zarr.open(zarr_path, mode="r")
             # Calculate center position from dataset dimensions
-            center_position = [dim // 2 for dim in z.shape]
+            # center_position = [dim // 2 for dim in z.shape]
             print(f"[NG] C. elegans dataset shape: {z.shape}", flush=True)
-            print(f"[NG] Setting initial position to center: {center_position}", flush=True)
+            print(
+                f"[NG] Setting initial position to center: {center_position}",
+                flush=True,
+            )
         except Exception as e:
             print(f"[NG] Could not read zarr metadata: {e}", flush=True)
             print(f"[NG] Using default center position", flush=True)
-            center_position = [5000, 5000, 5000]
+            # center_position = [5000, 5000, 5000]
 
         with self.viewer.txn() as s:
             # C. elegans comma stage embryo EM data (via local cellmap-vm1 server)
             # Note: /nrs/cellmap/data/... maps to https://cellmap-vm1.int.janelia.org/nrs/data/...
-            base_url = "precomputed://https://cellmap-vm1.int.janelia.org/nrs/data/jrc_c-elegans-comma-1/jrc_c-elegans-comma-1.zarr/recon-1"
+            base_url = "zarr://https://cellmap-vm1.int.janelia.org/nrs/data/jrc_c-elegans-op50-1/jrc_c-elegans-op50-1.zarr/recon-1"
 
             s.layers["fibsem-uint8"] = neuroglancer.ImageLayer(
                 source=f"{base_url}/em/fibsem-uint8/"
@@ -93,18 +99,14 @@ class NG_StateTracker:
             s.layers["cell"] = neuroglancer.SegmentationLayer(
                 source=f"{seg_base}/cell/"
             )
-            s.layers["ld"] = neuroglancer.SegmentationLayer(
-                source=f"{seg_base}/ld/"
-            )
+            s.layers["ld"] = neuroglancer.SegmentationLayer(source=f"{seg_base}/ld/")
             s.layers["lyso"] = neuroglancer.SegmentationLayer(
                 source=f"{seg_base}/lyso/"
             )
-            s.layers["mito_filled"] = neuroglancer.SegmentationLayer(
-                source=f"{seg_base}/mito_filled/"
+            s.layers["mito"] = neuroglancer.SegmentationLayer(
+                source=f"{seg_base}/mito/"
             )
-            s.layers["nuc"] = neuroglancer.SegmentationLayer(
-                source=f"{seg_base}/nuc/"
-            )
+            s.layers["nuc"] = neuroglancer.SegmentationLayer(source=f"{seg_base}/nuc/")
             s.layers["perox"] = neuroglancer.SegmentationLayer(
                 source=f"{seg_base}/perox/"
             )
@@ -113,7 +115,7 @@ class NG_StateTracker:
             )
 
             # Set initial view position to center of dataset
-            s.position = center_position
+            # s.position = center_position
 
             # Set 3D view orientation
             s.projection_orientation = [0, 0, 0, 1]
@@ -447,8 +449,78 @@ class NG_StateTracker:
         except Exception as e:
             print(f"[NG] Error discovering layers: {e}")
             import traceback
+
             traceback.print_exc()
             return {}
+
+    def get_voxel_size(self) -> tuple:
+        """
+        Get voxel size from Neuroglancer viewer state.
+
+        Returns:
+            Tuple of (voxel_size_x, voxel_size_y, voxel_size_z) in nanometers
+            Returns (1, 1, 1) if unable to determine
+        """
+        try:
+            with self.viewer.txn() as s:
+                state_json = s.to_json()
+
+                # Try to get dimensions from first image layer
+                if "layers" in state_json:
+                    for layer in state_json["layers"]:
+                        if layer.get("type") == "image":
+                            # Check if layer has source with transform
+                            source = layer.get("source")
+                            if source and isinstance(source, dict):
+                                transform = source.get("transform")
+                                if transform and "outputDimensions" in transform:
+                                    output_dims = transform["outputDimensions"]
+                                    # Extract voxel sizes from dimensions
+                                    voxel_sizes = []
+                                    for dim_name, dim_info in output_dims.items():
+                                        if (
+                                            isinstance(dim_info, list)
+                                            and len(dim_info) >= 2
+                                        ):
+                                            voxel_sizes.append(
+                                                dim_info[1]
+                                            )  # [units, size]
+                                    if len(voxel_sizes) >= 3:
+                                        print(
+                                            f"[NG] Voxel size from state: {tuple(voxel_sizes[:3])}",
+                                            flush=True,
+                                        )
+                                        return tuple(voxel_sizes[:3])
+
+                # Fallback: check coordinate space in state
+                if "dimensions" in state_json:
+                    dims = state_json["dimensions"]
+                    if isinstance(dims, dict):
+                        voxel_sizes = []
+                        for axis in ["x", "y", "z"]:
+                            if axis in dims:
+                                voxel_sizes.append(
+                                    dims[axis][1] if isinstance(dims[axis], list) else 1
+                                )
+                        if len(voxel_sizes) == 3:
+                            print(
+                                f"[NG] Voxel size from dimensions: {tuple(voxel_sizes)}",
+                                flush=True,
+                            )
+                            return tuple(voxel_sizes)
+
+                print(
+                    f"[NG] Could not determine voxel size from state, using default (8, 8, 8)",
+                    flush=True,
+                )
+                return (8, 8, 8)  # Default for C. elegans dataset
+
+        except Exception as e:
+            print(f"[NG] Error getting voxel size: {e}", flush=True)
+            import traceback
+
+            traceback.print_exc()
+            return (8, 8, 8)  # Default fallback
 
 
 # Module-level instance for easy access

@@ -664,10 +664,6 @@ class NGLiveStream {
                     <div class="explore-screenshot">
                         <img src="data:image/jpeg;base64,${screenshot.jpeg_b64}" alt="Screenshot at ${timeStr}">
                         <div class="explore-timestamp">${timeStr}</div>
-                        <label class="screenshot-select-label">
-                            <input type="checkbox" class="screenshot-select" data-index="${index}">
-                            Select for movie
-                        </label>
                     </div>
                     ${hasNarration ? `
                         <div class="explore-narration">
@@ -683,13 +679,6 @@ class NGLiveStream {
         }).join('');
 
         this.exploreContainer.innerHTML = screenshotsHTML;
-
-        // Add event listeners to checkboxes
-        document.querySelectorAll('.screenshot-select').forEach(checkbox => {
-            checkbox.addEventListener('change', () => {
-                this.updateSelectedCount();
-            });
-        });
 
         // Scroll to top to show latest screenshot
         this.exploreContainer.scrollTop = 0;
@@ -1164,6 +1153,9 @@ class NGLiveStream {
                 this.updateMovieSelectedCount();
             });
         });
+
+        // Initialize button states
+        this.updateMovieSelectedCount();
     }
 
     handleDragStart(e) {
