@@ -395,6 +395,8 @@ class NGLiveStream {
                 audio: null
             });
 
+            console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
+
             // Keep only max screenshots
             if (this.screenshots.length > this.maxScreenshots) {
                 this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
@@ -516,10 +518,12 @@ class NGLiveStream {
             console.log('Audio data length:', data.audio.length);
         }
 
-        // In explore mode, attach narration to most recent screenshot
+        // In explore mode, attach narration to the most recent screenshot without narration
         if (this.currentMode === 'explore' && this.screenshots.length > 0) {
-            // Find the most recent screenshot without narration
+            // Find screenshots without narration (search from most recent)
+            // The narration should correspond to the most recent screenshot that doesn't have one yet
             const screenshotToUpdate = this.screenshots.find(s => !s.narration);
+
             if (screenshotToUpdate) {
                 screenshotToUpdate.narration = data.text;
                 screenshotToUpdate.audio = data.audio;
@@ -527,6 +531,8 @@ class NGLiveStream {
 
                 // Update the explore panel display
                 this.updateExplorePanel();
+            } else {
+                console.log('[NARRATION] No screenshot found without narration');
             }
         }
 
