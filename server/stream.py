@@ -48,10 +48,10 @@ def create_app(tracker, query_agent=None) -> FastAPI:
     default_mode = "query" if query_agent else "explore"
     current_mode = {"mode": default_mode}
 
-    # Set initial narration state based on mode
-    # Disable narration in query mode to avoid conflicts
-    ng_tracker.narration_enabled = (default_mode == "explore")
-    print(f"[INIT] Starting in {default_mode} mode with narration {'enabled' if ng_tracker.narration_enabled else 'disabled'}", flush=True)
+    # Narration is controlled by client's voice toggle (generate_audio flag in requests)
+    # Server-side narration_enabled kept at True for backward compatibility
+    ng_tracker.narration_enabled = True
+    print(f"[INIT] Starting in {default_mode} mode (audio generation controlled by client)", flush=True)
 
     async def broadcast_narration(narration_text: str):
         """Broadcast narration to all connected clients."""
@@ -269,13 +269,31 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             data = await request.json()
             jpeg_b64 = data.get("jpeg_b64")
             timestamp = data.get("timestamp", time.time())
+            generate_audio = data.get("generate_audio", True)  # Default to True for backward compatibility
+            manual_capture = data.get("manual_capture", False)  # Flag for manual captures that should always narrate
 
             if jpeg_b64:
-                # Capture current viewer state
+                # Capture current viewer state (includes layer sources automatically)
                 state_json = {}
                 try:
                     with ng_tracker.viewer.txn() as s:
                         state_json = s.to_json()
+
+                    # DEBUG: Check if sources are in the state
+                    if "layers" in state_json and len(state_json["layers"]) > 0:
+                        first_layer = state_json["layers"][0]
+                        has_source = "source" in first_layer
+                        print(f"[STATE-DEBUG] First layer '{first_layer.get('name')}' has source: {has_source}", flush=True)
+                        if has_source:
+                            source_val = first_layer['source']
+                            print(f"[STATE-DEBUG] Source type: {type(source_val)}", flush=True)
+                            print(f"[STATE-DEBUG] Source value: {source_val}", flush=True)
+                            # Also log full state JSON structure
+                            import json as json_module
+                            print(f"[STATE-DEBUG] Full state JSON (first 500 chars): {json_module.dumps(state_json)[:500]}", flush=True)
+                        else:
+                            print(f"[STATE-DEBUG] WARNING: No source in layer! Keys: {list(first_layer.keys())}", flush=True)
+
                     summary = ng_tracker.summarize_state(state_json)
                     ng_tracker.current_state_summary = summary
                     print(
@@ -292,10 +310,14 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                     "jpeg_bytes": jpeg_bytes,
                     "jpeg_b64": jpeg_b64,
                     "timestamp": timestamp,
-                    "state": ng_tracker.current_state_summary,
+                    "state": state_json,  # CRITICAL: Use full state with sources, not summary!
+                    "generate_audio": generate_audio,  # Store client's audio preference
+                    "manual_capture": manual_capture,  # Flag to force narration generation
                 }
                 ng_tracker.latest_frame_ts = timestamp
-                print(f"[SCREENSHOT] Received from client: {len(jpeg_bytes)} bytes")
+                capture_type = "manual" if manual_capture else "auto"
+                audio_setting = "enabled" if generate_audio else "disabled"
+                print(f"[SCREENSHOT] Received from client: {len(jpeg_bytes)} bytes, type={capture_type}, voice={audio_setting}", flush=True)
 
                 # Add to recording if active
                 if recording_manager.is_recording:
@@ -482,7 +504,8 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             return {
                 "session_id": session_id,
                 "status": recording_manager.current_session.status,
-                "progress": progress
+                "progress": progress,
+                "error_message": recording_manager.current_session.error_message
             }
         return {
             "status": "error",
@@ -499,15 +522,22 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             generate_audio = data.get("generate_audio", True)
             movie_mode = data.get("movie_mode", False)
             duration_seconds = data.get("duration_seconds", 25)
+            existing_narration = data.get("existing_narration")  # For generating audio from existing text
 
             if not jpeg_b64:
                 return {"status": "error", "message": "No screenshot data"}
 
-            # Generate narration using the narrator
-            # For movie mode, use a special prompt that assumes specific duration
-            if movie_mode:
-                # Create a custom prompt for movie narration
-                narration_prompt = f"""You are creating narration for a scientific tour movie.
+            # If existing narration provided, use it; otherwise generate new narration
+            if existing_narration:
+                narration = existing_narration
+                print(f"[NARRATION] Using existing narration text (skipping generation): {narration[:50]}...", flush=True)
+            else:
+                # Generate narration using the narrator
+                print(f"[NARRATION] Generating new narration text...", flush=True)
+                # For movie mode, use a special prompt that assumes specific duration
+                if movie_mode:
+                    # Create a custom prompt for movie narration
+                    narration_prompt = f"""You are creating narration for a scientific tour movie.
 This screenshot shows a Neuroglancer view of cellular structures.
 This narration will be displayed for approximately {duration_seconds} seconds.
 
@@ -521,21 +551,30 @@ Current view state: {json.dumps(state) if state else 'Not available'}
 
 Provide narration:"""
 
-                narration = ng_tracker.narrator.generate_narration(
-                    state,
-                    screenshot_b64=jpeg_b64,
-                    custom_prompt=narration_prompt
-                )
-            else:
-                narration = ng_tracker.narrator.generate_narration(
-                    state,
-                    screenshot_b64=jpeg_b64
-                )
+                    narration = ng_tracker.narrator.generate_narration(
+                        state,
+                        screenshot_b64=jpeg_b64,
+                        custom_prompt=narration_prompt
+                    )
+                else:
+                    narration = ng_tracker.narrator.generate_narration(
+                        state,
+                        screenshot_b64=jpeg_b64
+                    )
 
-            # Generate audio if requested
+            # Generate audio if requested OR if in movie mode (always need audio for movies)
             audio_data = None
-            if generate_audio and narration:
+            should_generate_audio = narration and (generate_audio or movie_mode)
+            if should_generate_audio:
+                reason = "movie mode" if movie_mode and not generate_audio else "voice enabled"
+                print(f"[NARRATION] Generating audio for narration (length: {len(narration)} chars, reason: {reason})...", flush=True)
                 audio_data = await ng_tracker.narrator.generate_audio_async(narration)
+                if audio_data:
+                    print(f"[NARRATION] Audio generated successfully ({len(audio_data)} bytes)", flush=True)
+                elif movie_mode:
+                    print(f"[NARRATION] Warning: Failed to generate audio in movie mode", flush=True)
+            elif narration and not generate_audio:
+                print(f"[NARRATION] Skipping audio generation (voice disabled by user)", flush=True)
 
             return {
                 "status": "ok",
@@ -603,11 +642,22 @@ Provide narration:"""
                 with open(session_dir / frame_file, "wb") as f:
                     f.write(jpeg_bytes)
 
-                # Save state if available
+                # Save state if available, otherwise save empty state
                 state_file = f"states/state_{frame_number:05d}.json"
                 if screenshot.get("state"):
+                    # Check if state has layer sources
+                    state_has_sources = False
+                    if "layers" in screenshot["state"]:
+                        state_has_sources = any("source" in layer for layer in screenshot["state"]["layers"])
+
                     with open(session_dir / state_file, "w") as f:
                         json.dump(screenshot["state"], f, indent=2)
+                    print(f"[MOVIE] Frame {frame_number} state saved (has_sources={state_has_sources}, layers={len(screenshot['state'].get('layers', []))})", flush=True)
+                else:
+                    # Create empty state placeholder
+                    with open(session_dir / state_file, "w") as f:
+                        json.dump({}, f, indent=2)
+                    print(f"[MOVIE] Warning: Frame {frame_number} has no state, using empty state", flush=True)
 
                 # Save URL (generate from state)
                 urls_file = f"urls/url_{frame_number:05d}.txt"
@@ -616,14 +666,24 @@ Provide narration:"""
                     url = generate_public_url(screenshot["state"])
                     with open(session_dir / urls_file, "w") as f:
                         f.write(url)
+                else:
+                    # Create placeholder URL file
+                    with open(session_dir / urls_file, "w") as f:
+                        f.write("No state available for this frame\n")
 
-                # Save audio if available
+                # Save audio if available and calculate duration
                 narration_file = None
+                display_duration = 2.0  # Default duration
                 if screenshot.get("audio"):
                     narration_file = f"audio/narration_{frame_number:05d}.mp3"
                     audio_bytes = base64.b64decode(screenshot["audio"])
-                    with open(session_dir / narration_file, "wb") as f:
+                    audio_path = session_dir / narration_file
+                    with open(audio_path, "wb") as f:
                         f.write(audio_bytes)
+
+                    # Calculate actual audio duration using ffprobe
+                    display_duration = recording_manager._get_audio_duration(audio_path)
+                    print(f"[MOVIE] Frame {frame_number} audio duration: {display_duration:.2f}s", flush=True)
 
                 # Create frame record
                 frame_record = FrameRecord(
@@ -635,7 +695,7 @@ Provide narration:"""
                     has_narration=bool(screenshot.get("narration")),
                     narration_file=narration_file,
                     narration_text=screenshot.get("narration"),
-                    display_duration=2.0  # Default duration
+                    display_duration=display_duration
                 )
 
                 session.frames.append(frame_record)
@@ -687,10 +747,9 @@ Provide narration:"""
             current_mode["mode"] = mode
             print(f"[MODE] Switched to {mode} mode", flush=True)
 
-            # Auto-disable narration in query mode (to avoid conflicts with query-based navigation)
-            # Enable narration in explore mode
-            ng_tracker.narration_enabled = (mode == "explore")
-            print(f"[MODE] Narration {'enabled' if ng_tracker.narration_enabled else 'disabled'}", flush=True)
+            # Note: Narration is controlled by client's voice toggle (generate_audio flag)
+            # Server-side narration_enabled is kept for backward compatibility but
+            # actual audio generation is controlled by the client's generate_audio preference
 
             # Broadcast mode change to all connected clients
             message = {
@@ -706,7 +765,7 @@ Provide narration:"""
                     disconnected.add(connection)
             active_connections.difference_update(disconnected)
 
-            return {"status": "ok", "mode": mode, "narration_enabled": ng_tracker.narration_enabled}
+            return {"status": "ok", "mode": mode}
 
         except Exception as e:
             print(f"[MODE] Error setting mode: {e}", flush=True)
@@ -801,12 +860,13 @@ Provide narration:"""
             audio_data = None
             if generate_audio and result.get("answer"):
                 try:
+                    print(f"[QUERY] Generating audio for answer (voice enabled)...", flush=True)
                     audio_data = await ng_tracker.narrator.generate_audio_async(result["answer"])
                     print(f"[QUERY] Generated audio: {len(audio_data) if audio_data else 0} bytes", flush=True)
                 except Exception as e:
                     print(f"[QUERY] Audio generation failed: {e}", flush=True)
-            elif not generate_audio:
-                print(f"[QUERY] Audio generation skipped (voice disabled)", flush=True)
+            elif not generate_audio and result.get("answer"):
+                print(f"[QUERY] Audio generation skipped (voice disabled by user)", flush=True)
 
             return {
                 "status": "ok",
@@ -837,6 +897,11 @@ Provide narration:"""
             # Send initial frame immediately if available
             latest_frame = ng_tracker.get_latest_frame()
             if latest_frame:
+                # Verify state has layer sources
+                state_has_sources = False
+                if latest_frame["state"] and "layers" in latest_frame["state"]:
+                    state_has_sources = any("source" in layer for layer in latest_frame["state"]["layers"])
+
                 message = {
                     "type": "frame",
                     "ts": latest_frame["timestamp"],
@@ -845,7 +910,7 @@ Provide narration:"""
                 }
                 await websocket.send_json(message)
                 last_sent_timestamp = latest_frame["timestamp"]
-                print(f"[WS] Sent initial frame")
+                print(f"[WS] Sent initial frame (state_has_sources={state_has_sources})", flush=True)
 
             # Keep connection alive and send updates
             while True:
@@ -864,26 +929,41 @@ Provide narration:"""
 
                 latest_frame = ng_tracker.get_latest_frame()
                 if latest_frame:
-                    # Update state in the frame
-                    latest_frame["state"] = ng_tracker.current_state_summary
+                    # Don't overwrite the full state! The frame already has the full state with sources
+                    # from the screenshot endpoint (line 313). We only use current_state_summary for
+                    # narration prompts, not for storing/sending to client.
+                    # latest_frame["state"] is already set with full state including layer sources
 
                     # Check if we should generate narration (pass screenshot timestamp)
                     # Skip narration if disabled (e.g., during query-based navigation)
-                    if ng_tracker.narration_enabled and ng_tracker.narrator.should_narrate(
-                        ng_tracker.current_state_summary,
-                        screenshot_ts=latest_frame["timestamp"],
-                    ):
-                        print(f"[NARRATOR] Generating narration...", flush=True)
+                    # For manual captures, always generate narration (bypass should_narrate check)
+                    manual_capture = latest_frame.get("manual_capture", False)
+                    should_generate_narration = ng_tracker.narration_enabled and (
+                        manual_capture or ng_tracker.narrator.should_narrate(
+                            ng_tracker.current_state_summary,
+                            screenshot_ts=latest_frame["timestamp"],
+                        )
+                    )
+
+                    if should_generate_narration:
+                        manual_flag = " (manual)" if manual_capture else ""
+                        print(f"[NARRATOR] Generating narration{manual_flag}...", flush=True)
                         narration = ng_tracker.narrator.generate_narration(
                             ng_tracker.current_state_summary,
                             screenshot_b64=latest_frame["jpeg_b64"],
                             screenshot_ts=latest_frame["timestamp"],
                         )
                         if narration:
-                            # Generate audio (async)
-                            audio_data = await ng_tracker.narrator.generate_audio_async(
-                                narration
-                            )
+                            # Generate audio only if client requested it
+                            audio_data = None
+                            client_wants_audio = latest_frame.get("generate_audio", True)
+                            if client_wants_audio:
+                                print(f"[NARRATOR] Generating audio (voice enabled)...", flush=True)
+                                audio_data = await ng_tracker.narrator.generate_audio_async(
+                                    narration
+                                )
+                            else:
+                                print(f"[NARRATOR] Skipping audio generation (voice disabled by user)", flush=True)
 
                             # Save audio to recording if active
                             if recording_manager.is_recording and audio_data:
@@ -919,11 +999,22 @@ Provide narration:"""
                                 flush=True,
                             )
 
+                            # Clear manual_capture flag after narration is generated
+                            # to prevent continuous generation on the same screenshot
+                            if manual_capture:
+                                latest_frame["manual_capture"] = False
+                                print(f"[NARRATOR] Cleared manual_capture flag for this screenshot", flush=True)
+
                     # Only send if this is a new frame
                     if (
                         last_sent_timestamp is None
                         or latest_frame["timestamp"] > last_sent_timestamp
                     ):
+                        # Verify state has layer sources before sending
+                        state_has_sources = False
+                        if latest_frame["state"] and "layers" in latest_frame["state"]:
+                            state_has_sources = any("source" in layer for layer in latest_frame["state"]["layers"])
+
                         message = {
                             "type": "frame",
                             "ts": latest_frame["timestamp"],
@@ -933,7 +1024,7 @@ Provide narration:"""
                         await websocket.send_json(message)
                         last_sent_timestamp = latest_frame["timestamp"]
                         print(
-                            f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f})"
+                            f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f}, audio_gen={'yes' if latest_frame.get('generate_audio', True) else 'no'}, state_has_sources={state_has_sources})"
                         )
 
         except WebSocketDisconnect:

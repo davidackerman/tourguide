@@ -120,6 +120,7 @@
             <div class="movie-tabs" id="movie-tabs" style="display: none;">
                 <button class="movie-tab-btn active" data-tab="live-recording">Live Recording</button>
                 <button class="movie-tab-btn" data-tab="from-screenshots">Create from Screenshots</button>
+                <button class="movie-tab-btn" data-tab="progress">Progress</button>
             </div>
 
             <!-- Live Recording Tab -->
@@ -167,9 +168,6 @@
                             <button id="clear-selection-screenshots">
                                 Clear Selection
                             </button>
-                            <button id="generate-narrations" disabled>
-                                🎤 Generate Narrations for Selected
-                            </button>
                             <select id="movie-transition-type">
                                 <option value="cut">Direct Cuts</option>
                                 <option value="crossfade">Crossfade</option>
@@ -189,6 +187,23 @@
                         <div class="movie-screenshots-placeholder">
                             No screenshots available. Switch to Explore mode and capture some screenshots first.
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Progress Tab -->
+            <div class="movie-tab-content" id="movie-tab-progress" style="display: none;">
+                <div class="movie-progress-panel">
+                    <div class="progress-header">
+                        <h3>Movie Compilation Progress</h3>
+                        <button id="clear-progress-log" class="clear-btn">Clear Log</button>
+                    </div>
+                    <div class="progress-status" id="progress-status">
+                        <span class="progress-indicator">⏸️</span>
+                        <span id="progress-status-text">No active compilation</span>
+                    </div>
+                    <div class="progress-log" id="progress-log">
+                        <div class="progress-log-placeholder">Compilation logs will appear here...</div>
                     </div>
                 </div>
             </div>

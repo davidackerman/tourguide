@@ -89,8 +89,8 @@ class NG_StateTracker:
             # Note: /nrs/cellmap/data/... maps to https://cellmap-vm1.int.janelia.org/nrs/data/...
             base_url = "zarr://https://cellmap-vm1.int.janelia.org/nrs/data/jrc_c-elegans-op50-1/jrc_c-elegans-op50-1.zarr/recon-1"
 
-            s.layers["fibsem-uint8"] = neuroglancer.ImageLayer(
-                source=f"{base_url}/em/fibsem-uint8/"
+            s.layers["fibsem-int16"] = neuroglancer.ImageLayer(
+                source=f"{base_url}/em/fibsem-int16/"
             )
 
             # Organelle segmentations
