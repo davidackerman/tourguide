@@ -17,6 +17,7 @@ import subprocess
 import urllib.parse
 import time
 import shutil
+import sys
 
 
 def generate_public_url(state_json: Dict[str, Any]) -> str:
@@ -75,6 +76,7 @@ class RecordingSession:
     frames: List[FrameRecord] = field(default_factory=list)
     transition_type: str = "cut"  # cut|crossfade|interpolate
     transition_duration: float = 0.5  # for crossfade/interpolate
+    error_message: Optional[str] = None  # error message if compilation fails
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
@@ -95,6 +97,7 @@ class RecordingSession:
             "frame_count": len(self.frames),
             "narration_count": sum(1 for f in self.frames if f.has_narration),
             "status": self.status,
+            "error_message": self.error_message,
             "transitions": {
                 "type": self.transition_type,
                 "duration": self.transition_duration,
@@ -461,6 +464,7 @@ class MovieCompiler:
 
         except Exception as e:
             self.session.status = "error"
+            self.session.error_message = str(e)
             self.session.save_metadata()
             print(f"[COMPILER] Error: {e}", flush=True)
             raise
@@ -524,6 +528,8 @@ class MovieCompiler:
         audio_file = self._create_audio_timeline(add_transition_silence=True)
 
         # FFmpeg command with audio
+        # NOTE: Removed -shortest flag to ensure all frames are included
+        # The audio and video timelines should match due to careful duration calculation
         cmd = [
             "ffmpeg",
             "-y",
@@ -547,7 +553,6 @@ class MovieCompiler:
             "aac",
             "-b:a",
             "192k",
-            "-shortest",  # Match shortest stream
             str(output_file),
         ]
 
@@ -639,7 +644,9 @@ class MovieCompiler:
         concat_file = temp_dir / "concat_list.txt"
         with open(concat_file, "w") as f:
             for clip in clip_files:
-                f.write(f"file '{clip}'\n")
+                # Use absolute path to avoid path resolution issues
+                abs_clip = clip.absolute()
+                f.write(f"file '{abs_clip}'\n")
 
         # Final concat
         cmd = [
@@ -661,6 +668,7 @@ class MovieCompiler:
         if has_audio:
             # Create audio timeline with 2s silence between narrations for transitions
             audio_file = self._create_audio_timeline(add_transition_silence=True)
+            # NOTE: Removed -shortest flag to ensure all frames are included
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -678,7 +686,6 @@ class MovieCompiler:
                 "aac",
                 "-b:a",
                 "192k",
-                "-shortest",
                 str(output_file),
             ]
 
@@ -729,21 +736,96 @@ class MovieCompiler:
             )
 
             # Build script with alternating URLs and transition durations
+            # IMPORTANT: We use state JSON files directly and generate URLs with sources
+            valid_frames = []
             with open(script_file, "w") as f:
                 for i, frame in enumerate(narrated_frames):
-                    # Read the public URL we already generated
-                    url_file = self.session_dir / frame.urls_file
-                    with open(url_file, "r") as url_f:
-                        lines = url_f.readlines()
-                        # URL is on line 3 (after header and separator)
-                        public_url = lines[2].strip()
+                    # Read the state JSON file (which now includes layer sources)
+                    state_file = self.session_dir / frame.state_file
+                    try:
+                        with open(state_file, "r") as state_f:
+                            state_json = json.load(state_f)
 
-                    f.write(f"{public_url}\n")
+                        # Check if state has layers with sources
+                        if "layers" not in state_json or not state_json["layers"]:
+                            print(f"[COMPILER] Warning: Frame {i + 1} has no layers, skipping for interpolation", flush=True)
+                            continue
 
-                    # Transition duration (2 second smooth transition to next state)
-                    if i < len(narrated_frames) - 1:
+                        # Verify at least one layer has a source
+                        layers_with_sources = [layer for layer in state_json["layers"] if "source" in layer]
+                        if not layers_with_sources:
+                            print(f"[COMPILER] Warning: Frame {i + 1} has no layer sources, skipping for interpolation", flush=True)
+                            continue
+
+                        # Check if we have at least one image layer (not just segmentation)
+                        image_layers = [layer for layer in layers_with_sources if layer.get("type") == "image"]
+                        if not image_layers:
+                            print(
+                                f"[COMPILER] WARNING: Frame {i + 1} has no image layers (only segmentation layers).",
+                                flush=True
+                            )
+                            print(
+                                f"[COMPILER] This may cause neuroglancer video_tool to hang during rendering!",
+                                flush=True
+                            )
+                            print(
+                                f"[COMPILER] Layer types found: {[layer.get('type', 'unknown') for layer in layers_with_sources]}",
+                                flush=True
+                            )
+                            print(
+                                f"[COMPILER] Consider using 'cut' or 'crossfade' transitions instead of 'interpolate'.",
+                                flush=True
+                            )
+
+                        # Generate URL with embedded state (including sources!)
+                        public_url = generate_public_url(state_json)
+
+                    except Exception as e:
+                        print(f"[COMPILER] Warning: Failed to read state for frame {i + 1}: {e}", flush=True)
+                        continue
+
+                    # Add transition duration BEFORE the URL (except for first frame)
+                    if len(valid_frames) > 0:  # Add duration before all URLs except the first
                         transition_duration = 2.0
                         f.write(f"{transition_duration}\n")
+
+                    valid_frames.append(frame)
+                    f.write(f"{public_url}\n")
+
+            if len(valid_frames) < 2:
+                print(f"[COMPILER] Not enough valid frames with state for interpolation ({len(valid_frames)} found out of {len(narrated_frames)}, need at least 2)", flush=True)
+                raise RuntimeError(
+                    f"Interpolation requires at least 2 frames with valid Neuroglancer state. "
+                    f"Only {len(valid_frames)} of {len(narrated_frames)} frames have state data. "
+                    f"Try using 'Direct Cuts' or 'Crossfade' transition instead, which don't require state data."
+                )
+
+            # Check if any frames are missing image layers and warn
+            frames_without_image = 0
+            for i, frame in enumerate(narrated_frames):
+                state_file = self.session_dir / frame.state_file
+                try:
+                    with open(state_file, "r") as state_f:
+                        state_json = json.load(state_f)
+                    layers_with_sources = [layer for layer in state_json.get("layers", []) if "source" in layer]
+                    image_layers = [layer for layer in layers_with_sources if layer.get("type") == "image"]
+                    if not image_layers and layers_with_sources:
+                        frames_without_image += 1
+                except:
+                    pass
+
+            if frames_without_image > 0:
+                print(f"\n[COMPILER] ========================================", flush=True)
+                print(f"[COMPILER] CRITICAL WARNING:", flush=True)
+                print(f"[COMPILER] {frames_without_image} of {len(narrated_frames)} frames have NO IMAGE LAYERS!", flush=True)
+                print(f"[COMPILER] Only segmentation layers were found.", flush=True)
+                print(f"[COMPILER] ", flush=True)
+                print(f"[COMPILER] This WILL cause neuroglancer video_tool to hang indefinitely!", flush=True)
+                print(f"[COMPILER] ", flush=True)
+                print(f"[COMPILER] Solutions:", flush=True)
+                print(f"[COMPILER]   1. Use 'cut' or 'crossfade' transitions (recommended)", flush=True)
+                print(f"[COMPILER]   2. Ensure EM/image layer is visible when capturing screenshots", flush=True)
+                print(f"[COMPILER] ========================================\n", flush=True)
 
             print(f"[COMPILER] Script created at {script_file}", flush=True)
 
@@ -758,8 +840,9 @@ class MovieCompiler:
             )
 
             # Call neuroglancer video_tool as subprocess
+            # Use sys.executable to ensure we use the same Python environment
             render_cmd = [
-                "python",
+                sys.executable,
                 "-m",
                 "neuroglancer.tool.video_tool",
                 "render",
@@ -775,9 +858,16 @@ class MovieCompiler:
                 str(frames_dir),
             ]
 
+            print(f"[COMPILER] Running: {' '.join(str(x) for x in render_cmd)}", flush=True)
             result = subprocess.run(
                 render_cmd, capture_output=True, text=True, timeout=600
             )
+
+            # Log output for debugging
+            if result.stdout:
+                print(f"[COMPILER] Video tool stdout: {result.stdout}", flush=True)
+            if result.stderr:
+                print(f"[COMPILER] Video tool stderr: {result.stderr}", flush=True)
 
             if result.returncode != 0:
                 print(
@@ -858,6 +948,7 @@ class MovieCompiler:
             if has_audio:
                 # Create audio timeline with 2s silence between narrations for transitions
                 audio_file = self._create_audio_timeline(add_transition_silence=True)
+                # NOTE: Removed -shortest flag to ensure all frames are included
                 cmd = [
                     "ffmpeg",
                     "-y",
@@ -881,7 +972,6 @@ class MovieCompiler:
                     "aac",
                     "-b:a",
                     "192k",
-                    "-shortest",
                     str(output_file),
                 ]
             else:
