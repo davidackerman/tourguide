@@ -152,6 +152,7 @@ class NGLiveStream {
         this.setupVoiceToggle();
         this.setupChatHandlers();
         this.setupScreenshotControls();
+        this.setupExploreTabs();
 
         this.loadNeuroglancerURL();
         this.connect();
@@ -434,6 +435,13 @@ class NGLiveStream {
             });
             console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}, img_size=${data.jpeg_b64.length} chars`);
 
+            // Add verbose log entry
+            this.addExploreVerboseLog([
+                { icon: '📸', text: 'Screenshot captured', status: 'success' },
+                { icon: '📤', text: 'Sent to AI for narration', status: 'info' },
+                { icon: '⏳', text: 'Waiting for narration...', status: 'info' }
+            ]);
+
             // Keep only max screenshots
             if (this.screenshots.length > this.maxScreenshots) {
                 this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
@@ -575,6 +583,20 @@ class NGLiveStream {
                 screenshotToUpdate.narration = data.text;
                 screenshotToUpdate.audio = data.audio;
                 console.log('[NARRATION] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
+
+                // Add verbose log entry
+                const steps = [
+                    { icon: '✅', text: 'Narration received from AI', status: 'success' },
+                    { icon: '📝', text: `Text: ${data.text.substring(0, 80)}...`, status: 'success' }
+                ];
+
+                if (data.audio) {
+                    steps.push({ icon: '🔊', text: 'Audio generated', status: 'success' });
+                } else {
+                    steps.push({ icon: '🔇', text: 'No audio (voice disabled)', status: 'info' });
+                }
+
+                this.addExploreVerboseLog(steps);
 
                 // Update the explore panel display
                 this.updateExplorePanel();
@@ -2251,6 +2273,60 @@ class NGLiveStream {
         if (message) {
             message.remove();
         }
+    }
+
+    setupExploreTabs() {
+        const exploreTabBtns = document.querySelectorAll('.explore-tab-btn');
+        const exploreTabContents = document.querySelectorAll('.explore-tab-content');
+
+        exploreTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+
+                // Update button states
+                exploreTabBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+
+                // Update content visibility
+                exploreTabContents.forEach(content => {
+                    content.classList.remove('active');
+                });
+                const targetContent = document.getElementById(`explore-tab-${tabName}`);
+                if (targetContent) {
+                    targetContent.classList.add('active');
+                }
+
+                console.log(`[EXPLORE] Switched to ${tabName} tab`);
+            });
+        });
+
+        // Store reference to verbose log container
+        this.exploreVerboseLog = document.getElementById('explore-verbose-log');
+    }
+
+    addExploreVerboseLog(steps) {
+        if (!this.exploreVerboseLog) return;
+
+        // Remove placeholder if exists
+        const placeholder = this.exploreVerboseLog.querySelector('.explore-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        const entryDiv = document.createElement('div');
+        entryDiv.className = 'explore-verbose-entry';
+
+        const timestamp = new Date().toLocaleTimeString();
+        let html = `<div class="timestamp">${timestamp}</div>`;
+
+        steps.forEach(step => {
+            const statusClass = step.status || 'info';
+            html += `<div class="step ${statusClass}"><span class="icon">${step.icon}</span>${step.text}</div>`;
+        });
+
+        entryDiv.innerHTML = html;
+        this.exploreVerboseLog.appendChild(entryDiv);
+        this.exploreVerboseLog.scrollTop = this.exploreVerboseLog.scrollHeight;
     }
 
     addVerboseLogEntry(query, result) {
