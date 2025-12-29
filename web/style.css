@@ -1593,6 +1593,7 @@ button:disabled {
     margin-top: 0;
     margin-bottom: 15px;
     color: #e0e0e0;
+    flex-shrink: 0;
 }
 
 /* Analysis Tabs */
@@ -1601,6 +1602,7 @@ button:disabled {
     gap: 5px;
     margin-bottom: 15px;
     border-bottom: 2px solid #444;
+    flex-shrink: 0;
 }
 
 .analysis-tab-btn {
@@ -1628,22 +1630,27 @@ button:disabled {
 
 .analysis-tab-content {
     display: none;
-    flex: 1;
+    flex: 1 1 0;
     overflow: hidden;
+    min-height: 0;
 }
 
 .analysis-tab-content.active {
     display: flex;
     flex-direction: column;
+    min-height: 0;
 }
 
 .analysis-messages,
-.code-messages {
+.code-messages,
+.analysis-verbose-messages {
     flex: 1;
     overflow-y: auto;
     padding: 15px;
     background: #1a1a1a;
     border-radius: 4px;
+    min-height: 0;
+    max-height: 100%;
 }
 
 .analysis-placeholder {
@@ -1691,16 +1698,21 @@ button:disabled {
     padding: 15px;
     margin-bottom: 15px;
     border-left: 3px solid #66bb6a;
+    max-width: 100%;
 }
 
 .analysis-plots {
     margin-bottom: 15px;
+    max-width: 100%;
 }
 
 .analysis-plots iframe {
     border: 1px solid #444;
     border-radius: 4px;
     margin-bottom: 10px;
+    max-width: 100%;
+    height: 500px;
+    display: block;
 }
 
 .analysis-plots img {
@@ -1708,6 +1720,8 @@ button:disabled {
     border-radius: 4px;
     margin-bottom: 10px;
     display: block;
+    max-width: 100%;
+    height: auto;
 }
 
 .analysis-stats {
@@ -1776,6 +1790,7 @@ button:disabled {
     display: flex;
     gap: 10px;
     margin-top: 15px;
+    flex-shrink: 0;
 }
 
 .analysis-input-container input {
@@ -1830,22 +1845,26 @@ button:disabled {
 
 /* Scrollbar for analysis messages */
 .analysis-messages::-webkit-scrollbar,
-.code-messages::-webkit-scrollbar {
+.code-messages::-webkit-scrollbar,
+.analysis-verbose-messages::-webkit-scrollbar {
     width: 8px;
 }
 
 .analysis-messages::-webkit-scrollbar-track,
-.code-messages::-webkit-scrollbar-track {
+.code-messages::-webkit-scrollbar-track,
+.analysis-verbose-messages::-webkit-scrollbar-track {
     background: #1a1a1a;
 }
 
 .analysis-messages::-webkit-scrollbar-thumb,
-.code-messages::-webkit-scrollbar-thumb {
+.code-messages::-webkit-scrollbar-thumb,
+.analysis-verbose-messages::-webkit-scrollbar-thumb {
     background: #444;
     border-radius: 4px;
 }
 
 .analysis-messages::-webkit-scrollbar-thumb:hover,
-.code-messages::-webkit-scrollbar-thumb:hover {
+.code-messages::-webkit-scrollbar-thumb:hover,
+.analysis-verbose-messages::-webkit-scrollbar-thumb:hover {
     background: #555;
 }

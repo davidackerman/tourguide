@@ -971,6 +971,8 @@ Provide narration:"""
                 "plots": exec_result["plots"],
                 "output_path": exec_result["output_path"],
                 "session_id": session_id,
+                "model": getattr(app.state.analysis_agent, 'model', None),
+                "provider": getattr(app.state.analysis_agent, 'provider', None),
                 "timing": {
                     "code_generation_seconds": round(code_gen_time, 3),
                     "execution_seconds": round(exec_result["execution_time"], 3),
