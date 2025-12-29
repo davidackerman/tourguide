@@ -1,0 +1,36 @@
+# Dockerfile for Analysis Sandbox
+# This is a reference file - the actual image is built programmatically by docker_sandbox.py
+#
+# This Docker image provides a secure, isolated environment for executing
+# AI-generated Python code for data analysis and visualization.
+
+FROM python:3.11-slim
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python packages for data analysis
+RUN pip install --no-cache-dir \
+    pandas==2.1.4 \
+    numpy==1.24.4 \
+    plotly==5.18.0 \
+    matplotlib==3.8.2 \
+    seaborn==0.13.0 \
+    kaleido==0.2.1
+
+# Create directories
+RUN mkdir -p /data /output /code
+
+# Create non-root user for security
+RUN useradd -m -u 1000 analyst && \
+    chown -R analyst:analyst /output
+
+# Switch to non-root user
+USER analyst
+
+WORKDIR /code
+
+# Default command
+CMD ["python", "analysis.py"]
