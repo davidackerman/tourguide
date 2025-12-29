@@ -938,10 +938,11 @@ Provide narration:"""
                     # narration prompts, not for storing/sending to client.
                     # latest_frame["state"] is already set with full state including layer sources
 
-                    # Check if we should generate narration (pass screenshot timestamp)
-                    # Skip narration if disabled (e.g., during query-based navigation)
-                    # For manual captures, always generate narration (bypass should_narrate check)
+                    # Check if we should generate narration
+                    # - Manual captures: always generate (user explicitly requested)
+                    # - Auto captures: use should_narrate() to check for state changes
                     manual_capture = latest_frame.get("manual_capture", False)
+
                     should_generate_narration = ng_tracker.narration_enabled and (
                         manual_capture or ng_tracker.narrator.should_narrate(
                             ng_tracker.current_state_summary,
@@ -959,7 +960,8 @@ Provide narration:"""
                         # If so, skip this frame to avoid overwhelming the narrator
                         if is_generating_narration["generating"]:
                             # Skip this frame - still generating narration for previous frame
-                            last_sent_timestamp = latest_frame["timestamp"]
+                            # DON'T update last_sent_timestamp - we want to check this frame again
+                            # after the current narration completes
                             print(f"[NARRATOR] Skipping frame (still generating narration for previous frame), ts={latest_frame['timestamp']:.2f}", flush=True)
                             continue
 
@@ -986,7 +988,7 @@ Provide narration:"""
                                 await websocket.send_json(message)
                                 last_sent_timestamp = latest_frame["timestamp"]
                                 print(
-                                    f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f}, audio_gen={'yes' if latest_frame.get('generate_audio', True) else 'no'}, state_has_sources={state_has_sources})"
+                                    f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f}, audio_gen={'yes' if latest_frame.get('generate_audio', True) else 'no'}, state_has_sources={state_has_sources}, img_size={len(latest_frame['jpeg_b64'])} chars)"
                                 )
                             except Exception as e:
                                 print(f"[WS] Failed to send frame (WebSocket error): {e}", flush=True)

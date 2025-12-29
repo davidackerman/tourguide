@@ -170,8 +170,8 @@ class NGLiveStream {
 
             // Start or stop the capture interval based on the checkbox
             if (this.autoScreenshotEnabled) {
-                // Take a screenshot immediately first
-                this.capturePageScreenshot(false);  // Not manual, but immediate
+                // Take a screenshot immediately first (force it to ensure initial capture)
+                this.capturePageScreenshot(true);  // Force capture on initial enable
                 // Then start the interval for subsequent captures
                 this.startScreenshotInterval();
             } else {
@@ -416,6 +416,8 @@ class NGLiveStream {
     }
 
     handleFrame(data) {
+        console.log(`[FRAME] Received frame message, mode=${this.currentMode}, ts=${data.ts}`);
+
         // In explore mode, add screenshot to history
         if (this.currentMode === 'explore') {
             // Server only sends frames that will receive narration
@@ -427,7 +429,7 @@ class NGLiveStream {
                 narration: null,  // Will be filled when narration arrives
                 audio: null
             });
-            console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
+            console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}, img_size=${data.jpeg_b64.length} chars`);
 
             // Keep only max screenshots
             if (this.screenshots.length > this.maxScreenshots) {
@@ -435,7 +437,9 @@ class NGLiveStream {
             }
 
             // Update the explore panel display
+            console.log('[FRAME] Calling updateExplorePanel()...');
             this.updateExplorePanel();
+            console.log('[FRAME] updateExplorePanel() completed');
 
             // Also update movie screenshots view if the tab is visible
             this.updateMovieScreenshotsViewIfVisible();
