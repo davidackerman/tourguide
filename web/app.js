@@ -418,28 +418,16 @@ class NGLiveStream {
     handleFrame(data) {
         // In explore mode, add screenshot to history
         if (this.currentMode === 'explore') {
-            // Check if this is a server response for a locally captured screenshot
-            // Find any local screenshot (recently captured, not yet confirmed by server)
-            const localScreenshot = this.screenshots.find(s => s.local === true);
-
-            if (localScreenshot) {
-                // Update the existing local screenshot with server data
-                localScreenshot.state = data.state;
-                localScreenshot.timestamp = data.ts;
-                localScreenshot.jpeg_b64 = data.jpeg_b64;  // Update with server's version
-                localScreenshot.local = false;  // Mark as confirmed by server
-                console.log(`[FRAME] Updated local screenshot with server state at ${new Date(data.ts * 1000).toLocaleTimeString()}`);
-            } else {
-                // This is a new screenshot from server (e.g., from auto-capture)
-                this.screenshots.unshift({
-                    jpeg_b64: data.jpeg_b64,
-                    timestamp: data.ts,
-                    state: data.state,
-                    narration: null,  // Will be filled when narration arrives
-                    audio: null
-                });
-                console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
-            }
+            // Server only sends frames that will receive narration
+            // Add new screenshot to the array
+            this.screenshots.unshift({
+                jpeg_b64: data.jpeg_b64,
+                timestamp: data.ts,
+                state: data.state,
+                narration: null,  // Will be filled when narration arrives
+                audio: null
+            });
+            console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
 
             // Keep only max screenshots
             if (this.screenshots.length > this.maxScreenshots) {
@@ -1033,24 +1021,9 @@ class NGLiveStream {
 
             console.log(`[SCREENSHOT] Captured ${jpegBase64.length} chars${forceCapture ? ' (manual)' : ''}`);
 
-            // Add screenshot to local array immediately for instant UI feedback
-            this.screenshots.unshift({
-                jpeg_b64: jpegBase64,
-                timestamp: Date.now() / 1000,
-                state: null,  // State will be filled when server responds
-                narration: null,  // Will be filled when narration arrives
-                audio: null,
-                local: true  // Mark as locally captured (not yet confirmed by server)
-            });
-
-            // Keep only max screenshots
-            if (this.screenshots.length > this.maxScreenshots) {
-                this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
-            }
-
-            // Update UI immediately
-            this.updateExplorePanel();
-            this.updateMovieScreenshotsViewIfVisible();
+            // Don't add to local array yet - wait for server to send frame message
+            // This prevents showing screenshots that won't get narration
+            // The server will only send a frame message if it will generate narration
 
             // Send to server for processing and narration
             // Pass forceCapture flag to indicate manual capture
