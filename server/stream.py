@@ -31,6 +31,33 @@ def create_app(tracker, query_agent=None) -> FastAPI:
     # Store query agent reference
     app.state.query_agent = query_agent
 
+    # Initialize analysis components
+    analysis_agent = None
+    container_sandbox = None
+
+    if query_agent:  # Only if database configured
+        try:
+            from analysis_agent import AnalysisAgent
+            from container_sandbox import ContainerSandbox
+            import os
+
+            analysis_agent = AnalysisAgent(
+                db=query_agent.db,
+                provider=None  # Auto-detect like narrator
+            )
+            container_sandbox = ContainerSandbox(
+                db_path=os.getenv("ORGANELLE_DB_PATH", "./organelle_data/organelles.db"),
+                timeout=int(os.getenv("DOCKER_TIMEOUT", "60"))
+            )
+            print("[ANALYSIS] Analysis mode initialized", flush=True)
+        except Exception as e:
+            print(f"[ANALYSIS] Failed to initialize analysis mode: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+    app.state.analysis_agent = analysis_agent
+    app.state.container_sandbox = container_sandbox
+
     # Track active WebSocket connections
     active_connections: Set[WebSocket] = set()
 
@@ -883,6 +910,88 @@ Provide narration:"""
                 "status": "error",
                 "message": f"Query processing failed: {str(e)}"
             }
+
+    @app.post("/api/analysis/ask")
+    async def process_analysis(request: Request):
+        """Process analysis request with AI code generation and container execution."""
+        if not app.state.analysis_agent or not app.state.container_sandbox:
+            return {
+                "status": "error",
+                "message": "Analysis mode not available. Check container runtime (Docker/Apptainer) and database configuration."
+            }
+
+        try:
+            data = await request.json()
+            user_query = data.get("query", "").strip()
+
+            if not user_query:
+                return {"status": "error", "message": "Empty query"}
+
+            print(f"[ANALYSIS] Processing: {user_query}", flush=True)
+
+            # Generate code using AI
+            code_result = app.state.analysis_agent.generate_analysis_code(user_query)
+
+            if "error" in code_result:
+                return {
+                    "status": "error",
+                    "message": code_result["error"]
+                }
+
+            # Execute code in container sandbox
+            session_id = f"session_{int(time.time()*1000)}"
+            exec_result = app.state.container_sandbox.execute(
+                code=code_result["code"],
+                session_id=session_id
+            )
+
+            # Return comprehensive response
+            return {
+                "status": "ok" if exec_result["status"] == "success" else "error",
+                "query": user_query,
+                "code": code_result["code"],
+                "stdout": exec_result["stdout"],
+                "stderr": exec_result["stderr"],
+                "plots": exec_result["plots"],
+                "output_path": exec_result["output_path"],
+                "session_id": session_id,
+                "execution_time": exec_result["execution_time"],
+                "execution_status": exec_result["status"],
+                "timestamp": time.time()
+            }
+
+        except Exception as e:
+            print(f"[ANALYSIS] Error processing analysis: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": f"Analysis failed: {str(e)}"
+            }
+
+    @app.get("/api/analysis/plot/{session_id}/{filename}")
+    async def get_analysis_plot(session_id: str, filename: str):
+        """Serve generated plot files with security validation."""
+        # Validate inputs (prevent path traversal)
+        if not session_id.startswith("session_") or ".." in filename or "/" in filename:
+            return Response(status_code=400, content="Invalid request")
+
+        file_path = Path(f"analysis_results/{session_id}/{filename}")
+
+        if not file_path.exists():
+            return Response(status_code=404, content="Plot file not found")
+
+        # Determine media type based on file extension
+        media_type_map = {
+            ".html": "text/html",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".svg": "image/svg+xml"
+        }
+        media_type = media_type_map.get(file_path.suffix, "application/octet-stream")
+
+        return FileResponse(path=str(file_path), media_type=media_type)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):

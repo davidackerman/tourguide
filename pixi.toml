@@ -17,6 +17,7 @@ google-generativeai = ">=0.8.6,<0.9"
 python-dotenv = "*"
 ffmpeg = "*"
 numpy = ">=1.24.0,<1.26.0"
+apptainer = "*"
 
 [pypi-dependencies]
 neuroglancer ="==2.40.1"
@@ -32,9 +33,11 @@ trio = "*"
 trio-websocket = "*"
 zarr = "*"
 pandas = "*"
+docker = "*"
 
 [tasks]
 install-chatterbox = { cmd = "pip install 'numpy>=1.24.0,<1.26.0' && pip install chatterbox-tts" }
+build-container = { cmd = "mkdir -p containers && apptainer build --fakeroot containers/tourguide-analysis.sif server/analysis_container.def" }
 start = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py" }
 dev = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py --fps 3" }
 debug = { cmd = "pkill -9 -f 'python.*main.py' 2>/dev/null || true && python server/main.py --debug" }
