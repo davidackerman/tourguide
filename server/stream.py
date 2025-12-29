@@ -773,7 +773,7 @@ Provide narration:"""
 
     @app.post("/api/query/ask")
     async def process_query(request: Request):
-        """Process natural language query using AI agent."""
+        """Process natural language query using AI agent with streaming progress updates."""
         if not app.state.query_agent:
             return {
                 "status": "error",
@@ -784,12 +784,129 @@ Provide narration:"""
             data = await request.json()
             user_query = data.get("query", "").strip()
             generate_audio = data.get("generate_audio", True)  # Default to True for backward compatibility
+            stream = data.get("stream", False)  # Whether to stream progress updates
 
             if not user_query:
                 return {"status": "error", "message": "Empty query"}
 
-            print(f"[QUERY] Processing: {user_query} (audio: {'yes' if generate_audio else 'no'})", flush=True)
+            print(f"[QUERY] Processing: {user_query} (audio: {'yes' if generate_audio else 'no'}, stream: {'yes' if stream else 'no'})", flush=True)
 
+            # If streaming is requested, use SSE endpoint
+            if stream:
+                async def generate_progress():
+                    """Generate SSE events for query progress."""
+                    progress_updates = []
+
+                    def progress_callback(step: str, data: dict = None):
+                        """Callback for progress updates."""
+                        event_data = {"step": step, "timestamp": time.time()}
+                        if data:
+                            event_data.update(data)
+                        progress_updates.append(event_data)
+                        # Send SSE event
+                        return f"data: {json.dumps(event_data)}\n\n"
+
+                    # Send initial progress update
+                    yield f"data: {json.dumps({'step': 'start', 'query': user_query, 'timestamp': time.time()})}\n\n"
+
+                    try:
+                        # Process query with progress callback
+                        result = app.state.query_agent.process_query(user_query, progress_callback=progress_callback)
+
+                        # Handle navigation
+                        if result.get("type") == "navigation" and result.get("navigation"):
+                            yield f"data: {json.dumps({'step': 'navigation', 'timestamp': time.time()})}\n\n"
+                            nav = result["navigation"]
+                            try:
+                                with ng_tracker.viewer.txn() as s:
+                                    s.position = nav["position"]
+                                    if "scale" in nav:
+                                        s.crossSectionScale = nav["scale"]
+                                print(f"[QUERY] Navigated to position {nav['position']} with scale {nav.get('scale')}", flush=True)
+                            except Exception as e:
+                                print(f"[QUERY] Navigation failed: {e}", flush=True)
+                                result["navigation_error"] = str(e)
+
+                        # Handle visualization
+                        if result.get("type") == "visualization" and result.get("visualization"):
+                            yield f"data: {json.dumps({'step': 'visualization', 'timestamp': time.time()})}\n\n"
+                            viz = result["visualization"]
+                            viz_commands = viz if isinstance(viz, list) else [viz]
+
+                            try:
+                                with ng_tracker.viewer.txn() as s:
+                                    for viz_cmd in viz_commands:
+                                        layer_name = viz_cmd["layer_name"]
+                                        segment_ids = viz_cmd["segment_ids"]
+                                        action = viz_cmd.get("action", "show_only")
+
+                                        if layer_name not in s.layers:
+                                            print(f"[QUERY] Warning: Layer '{layer_name}' not found, skipping", flush=True)
+                                            continue
+
+                                        layer = s.layers[layer_name]
+                                        try:
+                                            segment_ids_int = [int(sid) for sid in segment_ids]
+                                        except (ValueError, TypeError) as e:
+                                            print(f"[QUERY] Warning: Could not convert segment IDs to integers: {e}", flush=True)
+                                            segment_ids_int = segment_ids
+
+                                        if action == "show_only":
+                                            layer.segments = set(segment_ids_int)
+                                        elif action == "add":
+                                            current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
+                                            layer.segments = current_segments | set(segment_ids_int)
+                                        elif action == "remove":
+                                            current_segments = set(layer.segments) if hasattr(layer, 'segments') else set()
+                                            layer.segments = current_segments - set(segment_ids_int)
+
+                                        print(f"[QUERY] Updated layer '{layer_name}' with {len(segment_ids)} segments (action: {action})", flush=True)
+
+                                if len(viz_commands) > 1:
+                                    print(f"[QUERY] Applied {len(viz_commands)} visualization commands", flush=True)
+
+                            except Exception as e:
+                                print(f"[QUERY] Visualization failed: {e}", flush=True)
+                                result["visualization_error"] = str(e)
+
+                        # Generate audio
+                        audio_data = None
+                        if generate_audio and result.get("answer"):
+                            yield f"data: {json.dumps({'step': 'audio_generation', 'timestamp': time.time()})}\n\n"
+                            try:
+                                print(f"[QUERY] Generating audio for answer (voice enabled)...", flush=True)
+                                audio_data = await ng_tracker.narrator.generate_audio_async(result["answer"])
+                                print(f"[QUERY] Generated audio: {len(audio_data) if audio_data else 0} bytes", flush=True)
+                            except Exception as e:
+                                print(f"[QUERY] Audio generation failed: {e}", flush=True)
+                        elif not generate_audio and result.get("answer"):
+                            print(f"[QUERY] Audio generation skipped (voice disabled by user)", flush=True)
+
+                        # Send final result
+                        final_data = {
+                            "step": "complete",
+                            "status": "ok",
+                            "result": result,
+                            "audio": audio_data,
+                            "timestamp": time.time()
+                        }
+                        yield f"data: {json.dumps(final_data)}\n\n"
+
+                    except Exception as e:
+                        error_data = {
+                            "step": "error",
+                            "status": "error",
+                            "message": f"Query processing failed: {str(e)}",
+                            "timestamp": time.time()
+                        }
+                        yield f"data: {json.dumps(error_data)}\n\n"
+                        print(f"[QUERY] Error processing query: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+
+                return StreamingResponse(generate_progress(), media_type="text/event-stream")
+
+            # Non-streaming mode (backward compatibility)
             # Process query with QueryAgent
             result = app.state.query_agent.process_query(user_query)
 
@@ -947,22 +1064,68 @@ Provide narration:"""
 
                     if should_generate_narration:
                         manual_flag = " (manual)" if manual_capture else ""
+
+                        # Send progress update: starting narration generation
+                        progress_msg = {
+                            "type": "progress",
+                            "step": "narration_start",
+                            "message": f"Generating narration{manual_flag}...",
+                            "timestamp": time.time()
+                        }
+                        await websocket.send_json(progress_msg)
                         print(f"[NARRATOR] Generating narration{manual_flag}...", flush=True)
+
                         narration = ng_tracker.narrator.generate_narration(
                             ng_tracker.current_state_summary,
                             screenshot_b64=latest_frame["jpeg_b64"],
                             screenshot_ts=latest_frame["timestamp"],
                         )
+
                         if narration:
+                            # Send progress update: narration generated
+                            progress_msg = {
+                                "type": "progress",
+                                "step": "narration_generated",
+                                "message": "Narration generated",
+                                "timestamp": time.time()
+                            }
+                            await websocket.send_json(progress_msg)
+
                             # Generate audio only if client requested it
                             audio_data = None
                             client_wants_audio = latest_frame.get("generate_audio", True)
                             if client_wants_audio:
+                                # Send progress update: starting audio generation
+                                progress_msg = {
+                                    "type": "progress",
+                                    "step": "audio_start",
+                                    "message": "Generating audio (voice enabled)...",
+                                    "timestamp": time.time()
+                                }
+                                await websocket.send_json(progress_msg)
                                 print(f"[NARRATOR] Generating audio (voice enabled)...", flush=True)
+
                                 audio_data = await ng_tracker.narrator.generate_audio_async(
                                     narration
                                 )
+
+                                # Send progress update: audio generated
+                                progress_msg = {
+                                    "type": "progress",
+                                    "step": "audio_generated",
+                                    "message": f"Audio generated ({len(audio_data) if audio_data else 0} bytes)",
+                                    "timestamp": time.time()
+                                }
+                                await websocket.send_json(progress_msg)
                             else:
+                                # Send progress update: audio skipped
+                                progress_msg = {
+                                    "type": "progress",
+                                    "step": "audio_skipped",
+                                    "message": "Audio generation skipped (voice disabled by user)",
+                                    "timestamp": time.time()
+                                }
+                                await websocket.send_json(progress_msg)
                                 print(f"[NARRATOR] Skipping audio generation (voice disabled by user)", flush=True)
 
                             # Save audio to recording if active

@@ -62,12 +62,13 @@ class QueryAgent:
 
         print(f"[QUERY_AGENT] Initialized with model: {model}", flush=True)
 
-    def process_query(self, user_query: str) -> Dict[str, Any]:
+    def process_query(self, user_query: str, progress_callback=None) -> Dict[str, Any]:
         """
         Process natural language query with agent-driven multi-query detection.
 
         Args:
             user_query: Natural language query from user
+            progress_callback: Optional callback function for progress updates
 
         Returns:
             Dictionary with query results and metadata
@@ -82,23 +83,35 @@ class QueryAgent:
             }
 
         try:
+            # Notify start of query detection
+            if progress_callback:
+                progress_callback("query_detection", {"message": "Analyzing query..."})
+
             # Ask agent whether to split query
             queries = self._detect_and_split_query(user_query)
 
             if len(queries) > 1:
+                # Notify multi-query detection
+                if progress_callback:
+                    progress_callback("multi_query_detected", {"count": len(queries), "queries": queries})
+
                 # Multi-query: process each separately
                 sub_results = []
-                for sq in queries:
-                    result = self._process_single_query(sq)
+                for idx, sq in enumerate(queries):
+                    if progress_callback:
+                        progress_callback("processing_subquery", {"index": idx + 1, "total": len(queries), "query": sq})
+                    result = self._process_single_query(sq, progress_callback)
                     sub_results.append(result)
 
                 # Combine results
+                if progress_callback:
+                    progress_callback("combining_results", {"message": "Combining results..."})
                 combined = self._combine_results(queries, sub_results)
                 combined['timing'] = {'total': time.time() - start}
                 return combined
             else:
                 # Single query
-                result = self._process_single_query(queries[0])
+                result = self._process_single_query(queries[0], progress_callback)
                 result['timing'] = {'total': time.time() - start}
                 return result
 
@@ -550,12 +563,13 @@ SQL Query:"""
 
         return None
 
-    def _process_single_query(self, user_query: str) -> Dict[str, Any]:
+    def _process_single_query(self, user_query: str, progress_callback=None) -> Dict[str, Any]:
         """
         Process a single query (main query processing logic).
 
         Args:
             user_query: Natural language query
+            progress_callback: Optional callback function for progress updates
 
         Returns:
             Query result dictionary
@@ -568,9 +582,15 @@ SQL Query:"""
 
         try:
             # Classify query type
+            if progress_callback:
+                progress_callback("classifying_query", {"message": "Classifying query type..."})
             query_type = self._classify_query_type(user_query, ai_interactions)
+            if progress_callback:
+                progress_callback("query_classified", {"type": query_type})
 
             # Generate SQL with retry mechanism and timing
+            if progress_callback:
+                progress_callback("generating_sql", {"message": "Generating SQL query..."})
             start_sql = time.time()
             sql = self._generate_sql_with_retry(user_query, max_retries=2, ai_interactions=ai_interactions)
             timing['sql_generation'] = time.time() - start_sql
@@ -581,10 +601,17 @@ SQL Query:"""
                     "answer": "Could not generate a valid query. Try asking something like: 'What is the size of the biggest mito?'"
                 }
 
+            if progress_callback:
+                progress_callback("sql_generated", {"sql": sql, "time": timing['sql_generation']})
+
             # Execute query with timing (validation already done in retry wrapper)
+            if progress_callback:
+                progress_callback("executing_query", {"message": "Executing database query..."})
             start_exec = time.time()
             results = self.db.execute_query(sql)
             timing['query_execution'] = time.time() - start_exec
+            if progress_callback:
+                progress_callback("query_executed", {"rows": len(results) if results else 0, "time": timing['query_execution']})
 
             # Handle empty results
             if not results:
@@ -598,6 +625,9 @@ SQL Query:"""
                 }
 
             # Handle based on query type
+            if progress_callback:
+                progress_callback("generating_response", {"type": query_type, "message": f"Generating {query_type} response..."})
+
             result = None
             if query_type == "informational":
                 result = self._handle_informational_query(user_query, sql, results, ai_interactions)
@@ -608,6 +638,9 @@ SQL Query:"""
             else:
                 # Default to informational
                 result = self._handle_informational_query(user_query, sql, results, ai_interactions)
+
+            if progress_callback:
+                progress_callback("response_generated", {"type": query_type, "answer": result.get("answer", "")[:100]})
 
             # Always add AI interactions to result for verbose logging in UI
             if ai_interactions:

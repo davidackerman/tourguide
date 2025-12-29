@@ -404,6 +404,22 @@ class NGLiveStream {
             this.currentMode = data.mode;
             this.updateModeUI();
             console.log(`[MODE] Received mode change: ${data.mode}`);
+        } else if (data.type === 'progress') {
+            this.handleProgress(data);
+        }
+    }
+
+    handleProgress(data) {
+        // Handle progress updates from exploration mode
+        const message = data.message || data.step;
+        console.log(`[PROGRESS] ${data.step}: ${message}`);
+
+        // Add to progress log
+        this.addProgressMessage(message);
+
+        // Update status text if available
+        if (this.progressStatusText) {
+            this.progressStatusText.textContent = message;
         }
     }
 
@@ -2044,46 +2060,157 @@ class NGLiveStream {
         this.addChatMessage('user', query);
         this.chatInput.value = '';
 
-        // Show loading indicator
-        const loadingId = this.addChatMessage('loading', 'Processing...');
+        // Show loading indicator with progress
+        const loadingId = this.addChatMessage('loading', 'Starting query...');
+        const progressId = this.addProgressMessage('Query started');
 
         try {
+            // Use streaming endpoint for live progress updates
             const response = await fetch('/api/query/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     query,
-                    generate_audio: this.voiceEnabled
+                    generate_audio: this.voiceEnabled,
+                    stream: true  // Enable streaming
                 })
             });
 
-            const data = await response.json();
+            // Handle streaming response
+            if (response.headers.get('content-type')?.includes('text/event-stream')) {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let finalResult = null;
+                let finalAudio = null;
 
-            // Remove loading indicator
-            this.removeChatMessage(loadingId);
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
 
-            if (data.status === 'ok') {
-                const result = data.result;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop() || '';
 
-                // Add AI response to chat
-                this.addChatMessage('ai', result.answer || 'Query processed');
+                    for (const line of lines) {
+                        if (!line.trim() || !line.startsWith('data: ')) continue;
 
-                // Add verbose log entry
-                this.addVerboseLogEntry(query, result);
+                        try {
+                            const eventData = JSON.parse(line.substring(6));
 
-                // Play audio if available and voice is enabled
-                if (data.audio && this.voiceEnabled) {
-                    this.queueAudio(data.audio);
-                } else if (data.audio && !this.voiceEnabled) {
-                    console.log('[QUERY] Audio available but voice is disabled');
-                }
+                            // Update progress based on step
+                            switch (eventData.step) {
+                                case 'start':
+                                    this.updateChatMessage(loadingId, 'Analyzing query...');
+                                    this.updateProgressMessage(progressId, 'Query started');
+                                    break;
+                                case 'query_detection':
+                                    this.updateChatMessage(loadingId, eventData.message || 'Analyzing query...');
+                                    this.updateProgressMessage(progressId, eventData.message || 'Analyzing query...');
+                                    break;
+                                case 'multi_query_detected':
+                                    this.updateChatMessage(loadingId, `Processing ${eventData.count} sub-queries...`);
+                                    this.updateProgressMessage(progressId, `Detected ${eventData.count} sub-queries`);
+                                    break;
+                                case 'processing_subquery':
+                                    this.updateChatMessage(loadingId, `Processing query ${eventData.index}/${eventData.total}...`);
+                                    this.updateProgressMessage(progressId, `Sub-query ${eventData.index}/${eventData.total}: ${eventData.query}`);
+                                    break;
+                                case 'classifying_query':
+                                    this.updateChatMessage(loadingId, 'Classifying query...');
+                                    this.updateProgressMessage(progressId, 'Classifying query type');
+                                    break;
+                                case 'query_classified':
+                                    this.updateProgressMessage(progressId, `Query type: ${eventData.type}`);
+                                    break;
+                                case 'generating_sql':
+                                    this.updateChatMessage(loadingId, 'Generating SQL...');
+                                    this.updateProgressMessage(progressId, 'Generating SQL query');
+                                    break;
+                                case 'sql_generated':
+                                    this.updateProgressMessage(progressId, `SQL generated (${eventData.time?.toFixed(2)}s)`);
+                                    break;
+                                case 'executing_query':
+                                    this.updateChatMessage(loadingId, 'Executing query...');
+                                    this.updateProgressMessage(progressId, 'Executing database query');
+                                    break;
+                                case 'query_executed':
+                                    this.updateProgressMessage(progressId, `Query executed: ${eventData.rows} rows (${eventData.time?.toFixed(2)}s)`);
+                                    break;
+                                case 'generating_response':
+                                    this.updateChatMessage(loadingId, 'Generating response...');
+                                    this.updateProgressMessage(progressId, `Generating ${eventData.type} response`);
+                                    break;
+                                case 'response_generated':
+                                    this.updateProgressMessage(progressId, 'Response generated');
+                                    break;
+                                case 'navigation':
+                                    this.updateProgressMessage(progressId, 'Applying navigation');
+                                    break;
+                                case 'visualization':
+                                    this.updateProgressMessage(progressId, 'Applying visualization');
+                                    break;
+                                case 'audio_generation':
+                                    this.updateChatMessage(loadingId, 'Generating audio...');
+                                    this.updateProgressMessage(progressId, 'Generating audio narration');
+                                    break;
+                                case 'complete':
+                                    // Remove loading indicator
+                                    this.removeChatMessage(loadingId);
+                                    this.updateProgressMessage(progressId, 'Query completed');
 
-                // Log navigation if applicable
-                if (result.type === 'navigation') {
-                    console.log('[QUERY] Navigated to:', result.navigation);
+                                    finalResult = eventData.result;
+                                    finalAudio = eventData.audio;
+
+                                    // Add AI response to chat
+                                    this.addChatMessage('ai', finalResult.answer || 'Query processed');
+
+                                    // Add verbose log entry
+                                    this.addVerboseLogEntry(query, finalResult);
+
+                                    // Play audio if available and voice is enabled
+                                    if (finalAudio && this.voiceEnabled) {
+                                        this.queueAudio(finalAudio);
+                                    } else if (finalAudio && !this.voiceEnabled) {
+                                        console.log('[QUERY] Audio available but voice is disabled');
+                                    }
+
+                                    // Log navigation if applicable
+                                    if (finalResult.type === 'navigation') {
+                                        console.log('[QUERY] Navigated to:', finalResult.navigation);
+                                    }
+                                    break;
+                                case 'error':
+                                    this.removeChatMessage(loadingId);
+                                    this.updateProgressMessage(progressId, `Error: ${eventData.message}`);
+                                    this.addChatMessage('error', eventData.message || 'Query failed');
+                                    break;
+                            }
+                        } catch (e) {
+                            console.error('[QUERY] Error parsing SSE event:', e);
+                        }
+                    }
                 }
             } else {
-                this.addChatMessage('error', data.message || 'Query failed');
+                // Fallback to non-streaming mode
+                const data = await response.json();
+                this.removeChatMessage(loadingId);
+
+                if (data.status === 'ok') {
+                    const result = data.result;
+                    this.addChatMessage('ai', result.answer || 'Query processed');
+                    this.addVerboseLogEntry(query, result);
+
+                    if (data.audio && this.voiceEnabled) {
+                        this.queueAudio(data.audio);
+                    }
+
+                    if (result.type === 'navigation') {
+                        console.log('[QUERY] Navigated to:', result.navigation);
+                    }
+                } else {
+                    this.addChatMessage('error', data.message || 'Query failed');
+                }
             }
         } catch (e) {
             this.removeChatMessage(loadingId);
@@ -2118,6 +2245,40 @@ class NGLiveStream {
         const message = this.chatMessagesContainer.querySelector(`[data-id="${id}"]`);
         if (message) {
             message.remove();
+        }
+    }
+
+    updateChatMessage(id, text) {
+        if (!this.chatMessagesContainer) return;
+
+        const message = this.chatMessagesContainer.querySelector(`[data-id="${id}"]`);
+        if (message) {
+            message.textContent = text;
+        }
+    }
+
+    addProgressMessage(text) {
+        if (!this.progressLog) return null;
+
+        const timestamp = new Date().toLocaleTimeString();
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'progress-log-entry';
+        messageDiv.innerHTML = `<span class="progress-timestamp">[${timestamp}]</span> ${this.escapeHtml(text)}`;
+        messageDiv.dataset.id = Date.now();
+
+        this.progressLog.appendChild(messageDiv);
+        this.progressLog.scrollTop = this.progressLog.scrollHeight;
+
+        return messageDiv.dataset.id;
+    }
+
+    updateProgressMessage(id, text) {
+        if (!this.progressLog || !id) return;
+
+        const message = this.progressLog.querySelector(`[data-id="${id}"]`);
+        if (message) {
+            const timestamp = new Date().toLocaleTimeString();
+            message.innerHTML = `<span class="progress-timestamp">[${timestamp}]</span> ${this.escapeHtml(text)}`;
         }
     }
 

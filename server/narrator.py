@@ -80,9 +80,11 @@ class Narrator:
                 import google.generativeai as genai
 
                 genai.configure(api_key=google_key)
-                self.client = genai.GenerativeModel("gemini-3-flash-preview")
+                # Read model name from environment variable, default to gemini-3-flash-preview
+                gemini_model = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+                self.client = genai.GenerativeModel(gemini_model)
                 self.enabled = True
-                print("[NARRATOR] Using Gemini 1.5 Flash 8B")
+                print(f"[NARRATOR] Using Gemini model: {gemini_model}")
             except ImportError:
                 print(
                     "[NARRATOR] ERROR: google-generativeai not installed. Run: pip install google-generativeai"
