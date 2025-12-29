@@ -245,9 +245,7 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                         content = html.encode("utf-8")
                         # Update Content-Length header
                         headers["content-length"] = str(len(content))
-                        print(
-                            f"[PROXY] Injected WebGL patch and screenshot handler into HTML"
-                        )
+                        # Removed verbose logging to reduce console noise
                     except Exception as e:
                         print(f"[PROXY] Failed to inject script: {e}")
 
@@ -279,27 +277,8 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                     with ng_tracker.viewer.txn() as s:
                         state_json = s.to_json()
 
-                    # DEBUG: Check if sources are in the state
-                    if "layers" in state_json and len(state_json["layers"]) > 0:
-                        first_layer = state_json["layers"][0]
-                        has_source = "source" in first_layer
-                        print(f"[STATE-DEBUG] First layer '{first_layer.get('name')}' has source: {has_source}", flush=True)
-                        if has_source:
-                            source_val = first_layer['source']
-                            print(f"[STATE-DEBUG] Source type: {type(source_val)}", flush=True)
-                            print(f"[STATE-DEBUG] Source value: {source_val}", flush=True)
-                            # Also log full state JSON structure
-                            import json as json_module
-                            print(f"[STATE-DEBUG] Full state JSON (first 500 chars): {json_module.dumps(state_json)[:500]}", flush=True)
-                        else:
-                            print(f"[STATE-DEBUG] WARNING: No source in layer! Keys: {list(first_layer.keys())}", flush=True)
-
                     summary = ng_tracker.summarize_state(state_json)
                     ng_tracker.current_state_summary = summary
-                    print(
-                        f"[STATE] Updated: pos={summary.get('position', 'N/A')}",
-                        flush=True,
-                    )
                 except Exception as e:
                     print(f"[STATE] Error getting state: {e}", flush=True)
 
@@ -318,6 +297,12 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                 capture_type = "manual" if manual_capture else "auto"
                 audio_setting = "enabled" if generate_audio else "disabled"
                 print(f"[SCREENSHOT] Received from client: {len(jpeg_bytes)} bytes, type={capture_type}, voice={audio_setting}", flush=True)
+
+                # If this is a manual capture, suppress automatic screenshots for 2 seconds
+                # to prevent duplicate captures from state changes triggered by the manual capture
+                if manual_capture:
+                    ng_tracker.suppress_auto_capture_until = time.time() + 2.0
+                    print(f"[SCREENSHOT] Suppressing auto-capture for 2 seconds to prevent duplicates", flush=True)
 
                 # Add to recording if active
                 if recording_manager.is_recording:
@@ -769,6 +754,23 @@ Provide narration:"""
 
         except Exception as e:
             print(f"[MODE] Error setting mode: {e}", flush=True)
+            return {"status": "error", "message": str(e)}
+
+    @app.post("/api/live-capture/set")
+    async def set_live_capture(request: Request):
+        """Enable or disable live capture mode (automatic screenshots on state changes)."""
+        try:
+            data = await request.json()
+            enabled = data.get("enabled", False)
+
+            ng_tracker.live_capture_enabled = enabled
+            status_str = "enabled" if enabled else "disabled"
+            print(f"[LIVE-CAPTURE] Automatic screenshots {status_str}", flush=True)
+
+            return {"status": "ok", "enabled": enabled}
+
+        except Exception as e:
+            print(f"[LIVE-CAPTURE] Error setting live capture: {e}", flush=True)
             return {"status": "error", "message": str(e)}
 
     @app.post("/api/query/ask")

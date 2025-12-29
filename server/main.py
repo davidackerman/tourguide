@@ -111,10 +111,10 @@ def main():
         print(f"      No ORGANELLE_CSV_PATHS configured in .env", flush=True)
         print(f"      Query mode: DISABLED", flush=True)
 
-    # Use client-side screenshot capture (no cross-origin data)
-    print(f"\n[3/4] Using client-side screenshot capture", flush=True)
-    print(f"      No external data loaded (avoids WebGL canvas tainting)", flush=True)
-    # tracker.start_screenshot_loop(max_fps=0.033)  # Disabled - using client-side
+    # Start server-side screenshot loop to capture on state changes
+    print(f"\n[3/4] Starting server-side screenshot loop", flush=True)
+    print(f"      Captures screenshots only when Neuroglancer state changes", flush=True)
+    tracker.start_screenshot_loop(max_fps=args.fps)  # Enabled - captures on state changes only
 
     # Get hostname for display
     hostname = socket.gethostname()

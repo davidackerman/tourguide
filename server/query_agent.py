@@ -2019,13 +2019,33 @@ Response:"""
         import json
         results_json = json.dumps(results_to_show, indent=2)
 
+        # Find the SQL query from ai_interactions if available
+        sql_query = None
+        if ai_interactions:
+            for interaction in ai_interactions:
+                if interaction.get('type') == 'sql_generation' and interaction.get('cleaned_sql'):
+                    sql_query = interaction['cleaned_sql']
+                    break
+
+        # Build SQL context section if available
+        sql_context = ""
+        if sql_query:
+            sql_context = f"""
+SQL Query Used:
+{sql_query}
+
+NOTE: The query results reflect what was asked for in the SQL query. If the query used LIMIT 1,
+only the top result is returned - this does NOT mean there's only one object of that type in the database.
+Be precise about what the results show (e.g., "the largest nucleus" not "the only nucleus").
+"""
+
         prompt = f"""You are answering a user's question about organelle data from microscopy analysis.
 
 User Question: {user_query}
 
 Query Results:
 {results_json}
-
+{sql_context}
 Instructions:
 1. Answer the user's question directly and naturally
 2. If there are multiple results, describe ALL of them clearly
@@ -2041,6 +2061,8 @@ Instructions:
    - Example: "The volume is 3.05e11 nm³" or "Position at (1234, 5678, 9012) nm"
 8. NOTE: Position coordinates in the database are in (position_x, position_y, position_z) order
    which corresponds to the order used in the CSV files and Neuroglancer viewer.
+9. IMPORTANT: Don't make claims about the total number of objects in the database based on limited results.
+   If the SQL query has LIMIT 1, only comment on the result shown, not the entire dataset.
 
 Answer:"""
 

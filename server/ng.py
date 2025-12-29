@@ -50,6 +50,8 @@ class NG_StateTracker:
         self.latest_frame_ts = None
         self.screenshot_thread = None
         self.running = False
+        self.live_capture_enabled = False  # Controlled by client's "Live Capture" checkbox
+        self.suppress_auto_capture_until = 0  # Timestamp to suppress auto-capture (used during manual captures)
 
         # Movement thresholds to avoid spam
         self.position_threshold = 100  # voxels
@@ -172,7 +174,11 @@ class NG_StateTracker:
                 self._print_state_summary(summary)
                 self.last_state_summary = summary
                 self.state_dirty = True
-                self.screenshot_dirty = True  # Trigger screenshot on meaningful change
+                # Only trigger automatic screenshots if live capture is enabled
+                # AND not currently suppressed (e.g., during manual capture)
+                import time as time_mod
+                if self.live_capture_enabled and time_mod.time() > self.suppress_auto_capture_until:
+                    self.screenshot_dirty = True
 
                 # Narration is handled in stream.py with screenshots
                 # This callback just marks state as dirty
@@ -280,8 +286,8 @@ class NG_StateTracker:
             return
 
         self.running = True
-        # Set dirty flag to capture initial frame
-        self.screenshot_dirty = True
+        # Don't set screenshot_dirty here - only capture when state changes
+        # and live_capture_enabled is True
 
         self.screenshot_thread = threading.Thread(
             target=self._screenshot_loop, args=(max_fps,), daemon=True
@@ -292,15 +298,16 @@ class NG_StateTracker:
     def _screenshot_loop(self, max_fps):
         """Background loop that captures screenshots when dirty."""
         frame_interval = 1.0 / max_fps
-        idle_interval = 5.0  # Capture every 5 seconds when idle
+        idle_interval = 30.0  # Capture every 30 seconds when idle (reduced from 5s to avoid spam)
         last_capture_time = 0
 
         while self.running:
             current_time = time.time()
 
-            # Capture if dirty OR if it's been a while (idle refresh)
+            # Only capture if dirty (meaningful state change occurred)
+            # Removed idle capture to reduce unnecessary screenshots
             time_since_last = current_time - last_capture_time
-            should_capture = self.screenshot_dirty or (time_since_last >= idle_interval)
+            should_capture = self.screenshot_dirty
 
             if not should_capture:
                 time.sleep(0.1)
@@ -313,41 +320,19 @@ class NG_StateTracker:
 
             # Capture screenshot
             try:
-                print(f"[DEBUG] Attempting screenshot capture...", flush=True)
-                print(f"[DEBUG] Viewer object: {self.viewer}", flush=True)
-                print(
-                    f"[DEBUG] Viewer has screenshot method: {hasattr(self.viewer, 'screenshot')}",
-                    flush=True,
-                )
-
                 # Try screenshot with timeout using threading
                 screenshot_result = {"reply": None, "error": None}
 
                 def get_screenshot():
                     try:
-                        print(
-                            f"[DEBUG] Inside screenshot thread, calling viewer.screenshot()...",
-                            flush=True,
-                        )
                         # Use browser's natural window size (no resize)
                         result = self.viewer.screenshot()
-                        print(
-                            f"[DEBUG] viewer.screenshot() returned: {result}",
-                            flush=True,
-                        )
                         screenshot_result["reply"] = result
                     except Exception as e:
-                        print(
-                            f"[DEBUG] Exception in screenshot thread: {e}", flush=True
-                        )
                         screenshot_result["error"] = str(e)
 
                 screenshot_thread = threading.Thread(target=get_screenshot, daemon=True)
                 screenshot_thread.start()
-                print(
-                    f"[DEBUG] Screenshot thread started, waiting up to 30 seconds...",
-                    flush=True,
-                )
                 screenshot_thread.join(
                     timeout=30.0
                 )  # 30 second timeout (EM data takes time to render)
@@ -371,19 +356,12 @@ class NG_StateTracker:
                     continue
 
                 if not screenshot_result["reply"]:
-                    print(f"[WARN] Screenshot returned no data", flush=True)
                     self.screenshot_dirty = False
                     time.sleep(1.0)
                     continue
 
-                print(f"[DEBUG] Screenshot method returned!", flush=True)
-
                 # Extract PNG bytes from the reply object (using .image attribute)
                 png_bytes = screenshot_result["reply"].screenshot.image
-                print(
-                    f"[DEBUG] Screenshot captured: {len(png_bytes)} bytes PNG",
-                    flush=True,
-                )
 
                 # Convert PNG to JPEG to reduce bandwidth
                 png_image = Image.open(io.BytesIO(png_bytes))
@@ -391,12 +369,22 @@ class NG_StateTracker:
                 png_image.convert("RGB").save(jpeg_buffer, format="JPEG", quality=85)
                 jpeg_bytes = jpeg_buffer.getvalue()
 
-                # Store frame
+                # Capture full state JSON (not just summary) to include layer sources
+                state_json = {}
+                try:
+                    with self.viewer.txn() as s:
+                        state_json = s.to_json()
+                except Exception as e:
+                    print(f"[WARN] Failed to capture state JSON: {e}", flush=True)
+
+                # Store frame with full state (needed for client UI)
                 self.latest_frame = {
                     "jpeg_bytes": jpeg_bytes,
                     "jpeg_b64": base64.b64encode(jpeg_bytes).decode("utf-8"),
                     "timestamp": current_time,
-                    "state": self.current_state_summary,
+                    "state": state_json,  # Full state JSON, not summary
+                    "generate_audio": True,  # Server-side captures should generate narration/audio
+                    "manual_capture": False,  # This is automatic, not manual
                 }
                 self.latest_frame_ts = current_time
 

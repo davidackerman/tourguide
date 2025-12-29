@@ -99,6 +99,11 @@ class NGLiveStream {
         this.chatTabBtns = document.querySelectorAll('.chat-tab-btn');
         this.chatTabContents = document.querySelectorAll('.chat-tab-content');
 
+        // Explore tab elements
+        this.exploreTabBtns = document.querySelectorAll('.explore-tab-btn');
+        this.exploreTabContents = document.querySelectorAll('.explore-tab-content');
+        this.exploreVerboseMessagesContainer = document.getElementById('explore-verbose-messages');
+
         // Enable audio on ANY user interaction
         const enableAudioOnInteraction = () => {
             if (!this.audioEnabled) {
@@ -146,6 +151,7 @@ class NGLiveStream {
         this.setupModeToggle();
         this.setupVoiceToggle();
         this.setupChatHandlers();
+        this.setupExploreTabHandlers();
         this.setupScreenshotControls();
 
         this.loadNeuroglancerURL();
@@ -159,9 +165,20 @@ class NGLiveStream {
         if (!this.autoScreenshotCheckbox || !this.manualScreenshotBtn) return;
 
         // Auto screenshot toggle
-        this.autoScreenshotCheckbox.addEventListener('change', () => {
+        this.autoScreenshotCheckbox.addEventListener('change', async () => {
             this.autoScreenshotEnabled = this.autoScreenshotCheckbox.checked;
             console.log(`[SCREENSHOT] Auto-capture ${this.autoScreenshotEnabled ? 'enabled' : 'disabled'}`);
+
+            // Notify server to enable/disable automatic screenshot capture
+            try {
+                await fetch('/api/live-capture/set', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: this.autoScreenshotEnabled })
+                });
+            } catch (e) {
+                console.error('[SCREENSHOT] Failed to set live capture mode:', e);
+            }
 
             // Start or stop the capture interval based on the checkbox
             if (this.autoScreenshotEnabled) {
@@ -426,28 +443,17 @@ class NGLiveStream {
     handleFrame(data) {
         // In explore mode, add screenshot to history
         if (this.currentMode === 'explore') {
-            // Check if this is a server response for a locally captured screenshot
-            // Find any local screenshot (recently captured, not yet confirmed by server)
-            const localScreenshot = this.screenshots.find(s => s.local === true);
-
-            if (localScreenshot) {
-                // Update the existing local screenshot with server data
-                localScreenshot.state = data.state;
-                localScreenshot.timestamp = data.ts;
-                localScreenshot.jpeg_b64 = data.jpeg_b64;  // Update with server's version
-                localScreenshot.local = false;  // Mark as confirmed by server
-                console.log(`[FRAME] Updated local screenshot with server state at ${new Date(data.ts * 1000).toLocaleTimeString()}`);
-            } else {
-                // This is a new screenshot from server (e.g., from auto-capture)
-                this.screenshots.unshift({
-                    jpeg_b64: data.jpeg_b64,
-                    timestamp: data.ts,
-                    state: data.state,
-                    narration: null,  // Will be filled when narration arrives
-                    audio: null
-                });
-                console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
-            }
+            // Server sends 'frame' messages with screenshots when state changes
+            // These come from the server-side ng.py screenshot loop
+            // Just add them to our screenshot history
+            this.screenshots.unshift({
+                jpeg_b64: data.jpeg_b64,
+                timestamp: data.ts,
+                state: data.state,
+                narration: null,  // Will be filled when narration arrives
+                audio: null
+            });
+            console.log(`[FRAME] Received screenshot from server at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
 
             // Keep only max screenshots
             if (this.screenshots.length > this.maxScreenshots) {
@@ -583,6 +589,9 @@ class NGLiveStream {
                 screenshotToUpdate.narration = data.text;
                 screenshotToUpdate.audio = data.audio;
                 console.log('[NARRATION] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
+
+                // Add verbose log entry
+                this.addExploreVerboseLogEntry(data.text, screenshotToUpdate);
 
                 // Update the explore panel display
                 this.updateExplorePanel();
@@ -848,11 +857,9 @@ class NGLiveStream {
         // Stop any existing interval first
         this.stopScreenshotInterval();
 
-        // Start new interval
-        this.screenshotInterval = setInterval(() => {
-            this.capturePageScreenshot();
-        }, 1000 / this.screenshotFps);
-        console.log(`[SCREENSHOT] Started auto-capture at ${this.screenshotFps} fps`);
+        // When Live Capture is enabled, server-side automatic screenshots will be triggered
+        // by Neuroglancer state changes. No initial screenshot needed here.
+        console.log(`[SCREENSHOT] Live capture enabled - server will auto-capture on state changes`);
     }
 
     stopScreenshotInterval() {
@@ -918,24 +925,27 @@ class NGLiveStream {
 
             console.log(`[SCREENSHOT] Captured ${jpegBase64.length} chars${forceCapture ? ' (manual)' : ''}`);
 
-            // Add screenshot to local array immediately for instant UI feedback
-            this.screenshots.unshift({
-                jpeg_b64: jpegBase64,
-                timestamp: Date.now() / 1000,
-                state: null,  // State will be filled when server responds
-                narration: null,  // Will be filled when narration arrives
-                audio: null,
-                local: true  // Mark as locally captured (not yet confirmed by server)
-            });
+            // For manual captures, don't add to local array - wait for server response
+            // to avoid duplicates. For automatic captures, add immediately for instant feedback.
+            if (!forceCapture) {
+                this.screenshots.unshift({
+                    jpeg_b64: jpegBase64,
+                    timestamp: Date.now() / 1000,
+                    state: null,  // State will be filled when server responds
+                    narration: null,  // Will be filled when narration arrives
+                    audio: null,
+                    local: true  // Mark as locally captured (not yet confirmed by server)
+                });
 
-            // Keep only max screenshots
-            if (this.screenshots.length > this.maxScreenshots) {
-                this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
+                // Keep only max screenshots
+                if (this.screenshots.length > this.maxScreenshots) {
+                    this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
+                }
+
+                // Update UI immediately
+                this.updateExplorePanel();
+                this.updateMovieScreenshotsViewIfVisible();
             }
-
-            // Update UI immediately
-            this.updateExplorePanel();
-            this.updateMovieScreenshotsViewIfVisible();
 
             // Send to server for processing and narration
             // Pass forceCapture flag to indicate manual capture
@@ -2052,6 +2062,38 @@ class NGLiveStream {
         });
     }
 
+    setupExploreTabHandlers() {
+        if (!this.exploreTabBtns || this.exploreTabBtns.length === 0) return;
+
+        // Setup tab switching
+        this.exploreTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                this.switchExploreTab(tabName);
+            });
+        });
+    }
+
+    switchExploreTab(tabName) {
+        // Update button states
+        this.exploreTabBtns.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update tab content visibility
+        this.exploreTabContents.forEach(content => {
+            if (content.id === `explore-tab-${tabName}`) {
+                content.classList.add('active');
+            } else {
+                content.classList.remove('active');
+            }
+        });
+    }
+
     async sendQuery() {
         const query = this.chatInput.value.trim();
         if (!query) return;
@@ -2421,6 +2463,64 @@ class NGLiveStream {
 
         this.verboseMessagesContainer.appendChild(entryDiv);
         this.verboseMessagesContainer.scrollTop = this.verboseMessagesContainer.scrollHeight;
+    }
+
+    addExploreVerboseLogEntry(narration, screenshot) {
+        if (!this.exploreVerboseMessagesContainer) return;
+
+        const entryDiv = document.createElement('div');
+        entryDiv.className = 'verbose-entry';  // Start collapsed by default
+
+        const timeStr = new Date(screenshot.timestamp * 1000).toLocaleTimeString();
+
+        // Create header (always visible) with timestamp and toggle arrow
+        let html = `
+            <div class="verbose-entry-header">
+                <div class="verbose-query">▶ Narration for screenshot at ${timeStr}</div>
+                <div class="verbose-toggle">▶</div>
+            </div>
+            <div class="verbose-entry-content">`;
+
+        // Screenshot preview
+        html += `<div class="verbose-section">
+            <div class="verbose-section-title">Screenshot</div>
+            <img src="data:image/jpeg;base64,${screenshot.jpeg_b64}" style="max-width: 100%; border-radius: 4px;">
+        </div>`;
+
+        // Viewer state at time of screenshot
+        if (screenshot.state) {
+            const statePreview = JSON.stringify(screenshot.state, null, 2);
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">Viewer State</div>
+                <div class="verbose-result">${this.escapeHtml(statePreview)}</div>
+            </div>`;
+        }
+
+        // Generated narration
+        html += `<div class="verbose-section">
+            <div class="verbose-section-title">Generated Narration</div>
+            <div>${this.escapeHtml(narration)}</div>
+        </div>`;
+
+        // Close the content wrapper
+        html += `</div>`;
+
+        entryDiv.innerHTML = html;
+
+        // Add click handler to toggle expansion
+        const header = entryDiv.querySelector('.verbose-entry-header');
+        header.addEventListener('click', () => {
+            entryDiv.classList.toggle('expanded');
+        });
+
+        // Remove placeholder if exists
+        const placeholder = this.exploreVerboseMessagesContainer.querySelector('.explore-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.exploreVerboseMessagesContainer.appendChild(entryDiv);
+        this.exploreVerboseMessagesContainer.scrollTop = this.exploreVerboseMessagesContainer.scrollHeight;
     }
 
     formatInteractionType(type) {
