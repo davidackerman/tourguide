@@ -336,7 +336,7 @@ class ContainerSandbox:
 
         # Initialize appropriate backend
         if self.runtime in ["apptainer", "singularity"]:
-            from server.apptainer_sandbox import ApptainerBackend
+            from apptainer_sandbox import ApptainerBackend
             self.backend = ApptainerBackend(db_path, timeout, memory_limit, cpu_quota)
             print(f"[CONTAINER_SANDBOX] Using Apptainer backend")
         elif self.runtime == "docker":

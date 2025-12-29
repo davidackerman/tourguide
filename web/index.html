@@ -14,6 +14,7 @@
                 <div class="mode-toggle">
                     <button id="mode-explore" class="mode-btn">🔭 Explore</button>
                     <button id="mode-query" class="mode-btn active">💬 Query</button>
+                    <button id="mode-analysis" class="mode-btn">📊 Analysis</button>
                 </div>
                 <div class="voice-toggle">
                     <button id="voice-toggle" class="voice-btn active" title="Toggle voice narration">
@@ -101,6 +102,46 @@
                 <div class="chat-input-container">
                     <input type="text" id="chat-input" placeholder="Ask a question..." />
                     <button id="chat-send">Send</button>
+                </div>
+            </div>
+
+            <!-- Analysis Panel (for Analysis Mode) -->
+            <div class="analysis-panel" id="analysis-panel" style="display: none;">
+                <h2>Data Analysis</h2>
+
+                <!-- Tab buttons -->
+                <div class="analysis-tabs">
+                    <button class="analysis-tab-btn active" data-tab="results">Results</button>
+                    <button class="analysis-tab-btn" data-tab="code">Generated Code</button>
+                </div>
+
+                <!-- Results tab -->
+                <div class="analysis-tab-content active" id="analysis-tab-results">
+                    <div class="analysis-messages" id="analysis-messages">
+                        <div class="analysis-placeholder">
+                            <p>Ask questions to generate plots and statistics:</p>
+                            <ul>
+                                <li>"Show me a histogram of mitochondria volumes"</li>
+                                <li>"What's the average surface area by organelle type?"</li>
+                                <li>"Create a scatter plot of volume vs surface area"</li>
+                                <li>"Plot a box plot comparing volumes across organelle types"</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Code tab -->
+                <div class="analysis-tab-content" id="analysis-tab-code">
+                    <div class="code-messages" id="code-messages">
+                        <div class="analysis-placeholder">
+                            <p>Generated Python code will appear here...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="analysis-input-container">
+                    <input type="text" id="analysis-input" placeholder="Ask for a plot or statistic..." />
+                    <button id="analysis-send">Analyze</button>
                 </div>
             </div>
         </main>

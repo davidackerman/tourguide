@@ -47,7 +47,7 @@ def create_app(tracker, query_agent=None) -> FastAPI:
             )
             container_sandbox = ContainerSandbox(
                 db_path=os.getenv("ORGANELLE_DB_PATH", "./organelle_data/organelles.db"),
-                timeout=int(os.getenv("DOCKER_TIMEOUT", "60"))
+                timeout=int(os.getenv("CONTAINER_TIMEOUT", os.getenv("DOCKER_TIMEOUT", "60")))
             )
             print("[ANALYSIS] Analysis mode initialized", flush=True)
         except Exception as e:
