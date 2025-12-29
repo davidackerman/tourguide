@@ -1010,6 +1010,19 @@ Provide narration:"""
                                 latest_frame["timestamp"],
                             )
                             if narration:
+                                # Send narration text immediately (before audio generation)
+                                narration_msg = {
+                                    "type": "narration",
+                                    "text": narration,
+                                    "timestamp": time.time(),
+                                    "audio": None,  # Audio will be sent separately
+                                }
+                                try:
+                                    await websocket.send_json(narration_msg)
+                                    print(f"[NARRATOR] Sent narration text", flush=True)
+                                except Exception as e:
+                                    print(f"[NARRATOR] Failed to send narration text (WebSocket error): {e}", flush=True)
+
                                 # Generate audio only if client requested it
                                 audio_data = None
                                 client_wants_audio = latest_frame.get("generate_audio", True)
@@ -1042,22 +1055,18 @@ Provide narration:"""
                                             audio_format=audio_format
                                         )
 
-                                # Send narration message
-                                narration_msg = {
-                                    "type": "narration",
-                                    "text": narration,
-                                    "timestamp": time.time(),
-                                    "audio": audio_data,  # base64 MP3 or WAV or None
-                                }
-                                try:
-                                    await websocket.send_json(narration_msg)
-                                    print(
-                                        f"[NARRATOR] Sent narration with audio: {len(audio_data) if audio_data else 0} bytes",
-                                        flush=True,
-                                    )
-                                except Exception as e:
-                                    print(f"[NARRATOR] Failed to send narration (WebSocket error): {e}", flush=True)
-                                    # Don't break the loop - continue to send frame
+                                # Send audio update if generated
+                                if audio_data:
+                                    audio_msg = {
+                                        "type": "narration_audio",
+                                        "audio": audio_data,
+                                        "timestamp": time.time(),
+                                    }
+                                    try:
+                                        await websocket.send_json(audio_msg)
+                                        print(f"[NARRATOR] Sent audio: {len(audio_data)} bytes", flush=True)
+                                    except Exception as e:
+                                        print(f"[NARRATOR] Failed to send audio (WebSocket error): {e}", flush=True)
 
                                 # Clear manual_capture flag after narration is generated
                                 # to prevent continuous generation on the same screenshot

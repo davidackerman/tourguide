@@ -410,6 +410,8 @@ class NGLiveStream {
             this.handleFrame(data);
         } else if (data.type === 'narration') {
             this.handleNarration(data);
+        } else if (data.type === 'narration_audio') {
+            this.handleNarrationAudio(data);
         } else if (data.type === 'mode_change') {
             this.currentMode = data.mode;
             this.updateModeUI();
@@ -585,18 +587,9 @@ class NGLiveStream {
                 console.log('[NARRATION] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
 
                 // Update verbose log entry with narration completion
-                const steps = [
-                    { icon: '✅', text: 'Narration received from AI', status: 'success' },
-                    { icon: '📝', text: `Text: ${data.text.substring(0, 80)}...`, status: 'success' }
-                ];
-
-                if (data.audio) {
-                    steps.push({ icon: '🔊', text: 'Audio generated', status: 'success' });
-                } else {
-                    steps.push({ icon: '🔇', text: 'No audio (voice disabled)', status: 'info' });
-                }
-
-                this.addExploreVerboseLog(steps, true); // true = update existing entry
+                this.addExploreVerboseLog([
+                    { icon: '✅', text: 'Narration received from AI' }
+                ], true); // true = update existing entry
 
                 // Update the explore panel display
                 this.updateExplorePanel();
@@ -628,7 +621,34 @@ class NGLiveStream {
             console.warn('No audio data in narration message');
         }
     }
-    
+
+    handleNarrationAudio(data) {
+        console.log('Audio received:', data.audio ? data.audio.length : 0, 'bytes');
+
+        // In explore mode, attach audio to the most recent screenshot without audio
+        if (this.currentMode === 'explore' && this.screenshots.length > 0) {
+            const screenshotToUpdate = this.screenshots.find(s => s.narration && !s.audio);
+
+            if (screenshotToUpdate) {
+                screenshotToUpdate.audio = data.audio;
+                console.log('[AUDIO] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
+
+                // Update verbose log entry
+                this.addExploreVerboseLog([
+                    { icon: '🔊', text: 'Audio generated' }
+                ], true);
+            }
+        }
+
+        // Queue audio if available and voice is enabled
+        if (data.audio && this.voiceEnabled) {
+            console.log('Queueing audio for playback');
+            this.queueAudio(data.audio);
+        } else if (data.audio && !this.voiceEnabled) {
+            console.log('Audio available but voice is disabled');
+        }
+    }
+
     queueAudio(base64Audio) {
         // Initialize audio queue if needed
         if (!this.audioQueue) {
