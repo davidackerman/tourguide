@@ -104,6 +104,7 @@ class NGLiveStream {
         this.analysisPanel = document.getElementById('analysis-panel');
         this.analysisMessages = document.getElementById('analysis-messages');
         this.codeMessages = document.getElementById('code-messages');
+        this.analysisVerboseMessages = document.getElementById('analysis-verbose-messages');
         this.analysisInput = document.getElementById('analysis-input');
         this.analysisSend = document.getElementById('analysis-send');
         this.analysisTabBtns = document.querySelectorAll('.analysis-tab-btn');
@@ -2377,24 +2378,55 @@ class NGLiveStream {
         const loadingId = this.addAnalysisMessage('loading', 'Generating and executing code...');
         if (this.analysisSend) this.analysisSend.disabled = true;
 
+        // Create live-updating verbose entry
+        const verboseEntryId = this.createLiveAnalysisVerboseEntry(query);
+
         try {
+            // Update: Query sent to agent
+            this.updateAnalysisVerboseEntry(verboseEntryId, {
+                step: 'query_sent',
+                message: 'Query sent to agent...'
+            });
+
             const response = await fetch('/api/analysis/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ query })
             });
 
+            // Update: Code generation complete
+            this.updateAnalysisVerboseEntry(verboseEntryId, {
+                step: 'code_generated',
+                message: 'Code generated, executing in container...'
+            });
+
             const data = await response.json();
             this.removeAnalysisMessage(loadingId);
 
             if (data.status === 'ok') {
+                // Update: Execution complete
+                this.updateAnalysisVerboseEntry(verboseEntryId, {
+                    step: 'complete',
+                    data: data
+                });
+
                 this.displayAnalysisResults(data);
                 this.displayGeneratedCode(data);
             } else {
+                // Update: Error occurred
+                this.updateAnalysisVerboseEntry(verboseEntryId, {
+                    step: 'error',
+                    data: data
+                });
+
                 this.addAnalysisMessage('error', data.message || data.stderr || 'Analysis failed');
             }
         } catch (e) {
             this.removeAnalysisMessage(loadingId);
+            this.updateAnalysisVerboseEntry(verboseEntryId, {
+                step: 'error',
+                message: 'Request failed: ' + e.message
+            });
             this.addAnalysisMessage('error', 'Request failed: ' + e.message);
         } finally {
             if (this.analysisSend) this.analysisSend.disabled = false;
@@ -2487,6 +2519,265 @@ class NGLiveStream {
         if (this.codeMessages) {
             this.codeMessages.appendChild(codeEntry);
             this.codeMessages.scrollTop = this.codeMessages.scrollHeight;
+        }
+    }
+
+    addAnalysisVerboseEntry(query, result) {
+        if (!this.analysisVerboseMessages) return;
+
+        const entryDiv = document.createElement('div');
+        entryDiv.className = 'verbose-entry';
+
+        // Create header (always visible) with query and toggle arrow
+        let html = `
+            <div class="verbose-entry-header">
+                <div class="verbose-query">📊 ${this.escapeHtml(query)}</div>
+                <div class="verbose-toggle">▶</div>
+            </div>
+            <div class="verbose-entry-content">`;
+
+        // Model info (if available in future)
+        if (result.model) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">AI Model</div>
+                <div><strong>${result.model}</strong></div>
+            </div>`;
+        }
+
+        // Code generation step
+        html += `<div class="verbose-section">
+            <div class="verbose-section-title">🔄 Query Sent to Agent</div>
+            <div>User requested: ${this.escapeHtml(query)}</div>
+        </div>`;
+
+        // Generated code
+        if (result.code) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">💻 Generated Python Code</div>
+                <pre class="verbose-sql">${this.escapeHtml(result.code)}</pre>
+            </div>`;
+        }
+
+        // Code execution step
+        html += `<div class="verbose-section">
+            <div class="verbose-section-title">⚙️ Running Code in Container</div>
+            <div>Execution status: <strong>${result.execution_status || 'unknown'}</strong></div>
+        </div>`;
+
+        // Standard output (statistics/results)
+        if (result.stdout) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">📈 Standard Output</div>
+                <pre class="verbose-sql">${this.escapeHtml(result.stdout)}</pre>
+            </div>`;
+        }
+
+        // Plots generated
+        if (result.plots && result.plots.length > 0) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">📊 Generated Plots</div>
+                <div>Created ${result.plots.length} plot(s): ${result.plots.join(', ')}</div>
+            </div>`;
+        }
+
+        // Error output (if any)
+        if (result.stderr) {
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">⚠️ Error Output</div>
+                <pre class="verbose-sql">${this.escapeHtml(result.stderr)}</pre>
+            </div>`;
+        }
+
+        // Timing information
+        if (result.timing) {
+            let timingInfo = '';
+            if (result.timing.code_generation_seconds !== undefined) {
+                timingInfo += `Code generation: ${result.timing.code_generation_seconds.toFixed(3)}s`;
+            }
+            if (result.timing.execution_seconds !== undefined) {
+                timingInfo += timingInfo ? ', ' : '';
+                timingInfo += `Execution: ${result.timing.execution_seconds.toFixed(3)}s`;
+            }
+            if (result.timing.total_seconds !== undefined) {
+                timingInfo += timingInfo ? ', ' : '';
+                timingInfo += `Total: ${result.timing.total_seconds.toFixed(3)}s`;
+            }
+
+            if (timingInfo) {
+                html += `<div class="verbose-timing">⏱ ${timingInfo}</div>`;
+            }
+        }
+
+        // Close the content wrapper
+        html += `</div>`;
+
+        entryDiv.innerHTML = html;
+
+        // Add click handler to toggle expansion
+        const header = entryDiv.querySelector('.verbose-entry-header');
+        header.addEventListener('click', () => {
+            entryDiv.classList.toggle('expanded');
+        });
+
+        // Remove placeholder if exists
+        const placeholder = this.analysisVerboseMessages.querySelector('.analysis-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.analysisVerboseMessages.appendChild(entryDiv);
+        this.analysisVerboseMessages.scrollTop = this.analysisVerboseMessages.scrollHeight;
+    }
+
+    createLiveAnalysisVerboseEntry(query) {
+        if (!this.analysisVerboseMessages) return null;
+
+        const entryId = `verbose-analysis-${Date.now()}-${Math.random()}`;
+        const entryDiv = document.createElement('div');
+        entryDiv.id = entryId;
+        entryDiv.className = 'verbose-entry expanded';
+
+        // Create header with query
+        const html = `
+            <div class="verbose-entry-header">
+                <div class="verbose-query">📊 ${this.escapeHtml(query)}</div>
+                <div class="verbose-toggle">▼</div>
+            </div>
+            <div class="verbose-entry-content" id="${entryId}-content">
+                <div class="verbose-section">
+                    <div class="verbose-section-title">🔄 Status</div>
+                    <div id="${entryId}-status">Starting analysis...</div>
+                </div>
+            </div>
+        `;
+
+        entryDiv.innerHTML = html;
+
+        // Add click handler to toggle expansion
+        const header = entryDiv.querySelector('.verbose-entry-header');
+        header.addEventListener('click', () => {
+            entryDiv.classList.toggle('expanded');
+        });
+
+        // Remove placeholder if exists
+        const placeholder = this.analysisVerboseMessages.querySelector('.analysis-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        this.analysisVerboseMessages.appendChild(entryDiv);
+        this.analysisVerboseMessages.scrollTop = this.analysisVerboseMessages.scrollHeight;
+
+        return entryId;
+    }
+
+    updateAnalysisVerboseEntry(entryId, update) {
+        if (!entryId) return;
+
+        const contentDiv = document.getElementById(`${entryId}-content`);
+        const statusDiv = document.getElementById(`${entryId}-status`);
+
+        if (!contentDiv) return;
+
+        if (update.step === 'query_sent') {
+            if (statusDiv) {
+                statusDiv.innerHTML = `<span class="loading-spinner"></span> ${this.escapeHtml(update.message)}`;
+            }
+        } else if (update.step === 'code_generated') {
+            if (statusDiv) {
+                statusDiv.innerHTML = `<span class="loading-spinner"></span> ${this.escapeHtml(update.message)}`;
+            }
+        } else if (update.step === 'complete') {
+            // Replace with complete detailed view
+            const result = update.data;
+            let html = '';
+
+            // Model info
+            if (result.model) {
+                html += `<div class="verbose-section">
+                    <div class="verbose-section-title">AI Model</div>
+                    <div><strong>${result.model}</strong></div>
+                </div>`;
+            }
+
+            // Generated code
+            if (result.code) {
+                html += `<div class="verbose-section">
+                    <div class="verbose-section-title">💻 Generated Python Code</div>
+                    <pre class="verbose-sql">${this.escapeHtml(result.code)}</pre>
+                </div>`;
+            }
+
+            // Code execution
+            html += `<div class="verbose-section">
+                <div class="verbose-section-title">⚙️ Code Execution</div>
+                <div>Status: <strong>${result.execution_status || 'unknown'}</strong></div>
+            </div>`;
+
+            // Standard output
+            if (result.stdout) {
+                html += `<div class="verbose-section">
+                    <div class="verbose-section-title">📈 Standard Output</div>
+                    <pre class="verbose-sql">${this.escapeHtml(result.stdout)}</pre>
+                </div>`;
+            }
+
+            // Plots generated
+            if (result.plots && result.plots.length > 0) {
+                html += `<div class="verbose-section">
+                    <div class="verbose-section-title">📊 Generated Plots</div>
+                    <div>Created ${result.plots.length} plot(s): ${result.plots.join(', ')}</div>
+                </div>`;
+            }
+
+            // Error output
+            if (result.stderr) {
+                html += `<div class="verbose-section">
+                    <div class="verbose-section-title">⚠️ Error Output</div>
+                    <pre class="verbose-sql">${this.escapeHtml(result.stderr)}</pre>
+                </div>`;
+            }
+
+            // Timing information
+            if (result.timing) {
+                let timingInfo = '';
+                if (result.timing.code_generation_seconds !== undefined) {
+                    timingInfo += `Code generation: ${result.timing.code_generation_seconds.toFixed(3)}s`;
+                }
+                if (result.timing.execution_seconds !== undefined) {
+                    timingInfo += timingInfo ? ', ' : '';
+                    timingInfo += `Execution: ${result.timing.execution_seconds.toFixed(3)}s`;
+                }
+                if (result.timing.total_seconds !== undefined) {
+                    timingInfo += timingInfo ? ', ' : '';
+                    timingInfo += `Total: ${result.timing.total_seconds.toFixed(3)}s`;
+                }
+
+                if (timingInfo) {
+                    html += `<div class="verbose-timing">⏱ ${timingInfo}</div>`;
+                }
+            }
+
+            contentDiv.innerHTML = html;
+        } else if (update.step === 'error') {
+            let html = `<div class="verbose-section">
+                <div class="verbose-section-title">⚠️ Error</div>
+                <div style="color: #ff6b6b;">${this.escapeHtml(update.message || update.data?.message || update.data?.stderr || 'Unknown error')}</div>
+            </div>`;
+
+            if (update.data?.code) {
+                html += `<div class="verbose-section">
+                    <div class="verbose-section-title">💻 Generated Code (Failed)</div>
+                    <pre class="verbose-sql">${this.escapeHtml(update.data.code)}</pre>
+                </div>`;
+            }
+
+            contentDiv.innerHTML = html;
+        }
+
+        // Auto-scroll to show updates
+        if (this.analysisVerboseMessages) {
+            this.analysisVerboseMessages.scrollTop = this.analysisVerboseMessages.scrollHeight;
         }
     }
 
