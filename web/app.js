@@ -741,12 +741,6 @@ class NGLiveStream {
         // Reading offsetHeight forces the browser to recalculate layout
         void this.exploreContainer.offsetHeight;
 
-        // Visual debug: flash the container to show update
-        this.exploreContainer.style.border = '3px solid red';
-        setTimeout(() => {
-            this.exploreContainer.style.border = '';
-        }, 500);
-
         // Scroll to top to show latest screenshot
         this.exploreContainer.scrollTop = 0;
     }
