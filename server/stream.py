@@ -998,12 +998,16 @@ Provide narration:"""
                                 break
 
                             # Now generate narration (will be sent separately when ready)
+                            # Run in executor to avoid blocking the WebSocket event loop
                             manual_flag = " (manual)" if manual_capture else ""
                             print(f"[NARRATOR] Generating narration{manual_flag}...", flush=True)
-                            narration = ng_tracker.narrator.generate_narration(
+                            loop = asyncio.get_event_loop()
+                            narration = await loop.run_in_executor(
+                                None,  # Use default executor
+                                ng_tracker.narrator.generate_narration,
                                 ng_tracker.current_state_summary,
-                                screenshot_b64=latest_frame["jpeg_b64"],
-                                screenshot_ts=latest_frame["timestamp"],
+                                latest_frame["jpeg_b64"],
+                                latest_frame["timestamp"],
                             )
                             if narration:
                                 # Generate audio only if client requested it

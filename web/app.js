@@ -404,6 +404,7 @@ class NGLiveStream {
     }
 
     handleMessage(data) {
+        console.log(`[WS] Received message type: ${data.type}`);
         if (data.type === 'frame') {
             this.handleFrame(data);
         } else if (data.type === 'narration') {
@@ -412,6 +413,8 @@ class NGLiveStream {
             this.currentMode = data.mode;
             this.updateModeUI();
             console.log(`[MODE] Received mode change: ${data.mode}`);
+        } else {
+            console.warn(`[WS] Unknown message type: ${data.type}`);
         }
     }
 
@@ -440,6 +443,11 @@ class NGLiveStream {
             console.log('[FRAME] Calling updateExplorePanel()...');
             this.updateExplorePanel();
             console.log('[FRAME] updateExplorePanel() completed');
+
+            // Force immediate visual update using requestAnimationFrame
+            requestAnimationFrame(() => {
+                console.log('[FRAME] requestAnimationFrame callback executed');
+            });
 
             // Also update movie screenshots view if the tab is visible
             this.updateMovieScreenshotsViewIfVisible();
@@ -684,7 +692,15 @@ class NGLiveStream {
     }
 
     updateExplorePanel() {
-        if (!this.exploreContainer) return;
+        const timestamp = new Date().toISOString();
+        console.log(`[EXPLORE ${timestamp}] updateExplorePanel() called`);
+
+        if (!this.exploreContainer) {
+            console.warn('[EXPLORE] exploreContainer not found!');
+            return;
+        }
+
+        console.log(`[EXPLORE ${timestamp}] Updating panel with ${this.screenshots.length} screenshots`);
 
         if (this.screenshots.length === 0) {
             this.exploreContainer.innerHTML = '<div class="explore-placeholder"><p>Take screenshots to see them here with AI narration below...</p></div>';
@@ -695,6 +711,8 @@ class NGLiveStream {
             const timeStr = new Date(screenshot.timestamp * 1000).toLocaleTimeString();
             const isLatest = index === 0;
             const hasNarration = !!screenshot.narration;
+
+            console.log(`[EXPLORE] Screenshot ${index}: has_narration=${hasNarration}, timestamp=${timeStr}`);
 
             return `
                 <div class="explore-item ${isLatest ? 'latest' : ''}" data-index="${index}">
@@ -715,7 +733,19 @@ class NGLiveStream {
             `;
         }).join('');
 
+        console.log(`[EXPLORE] Setting innerHTML, HTML length: ${screenshotsHTML.length} chars`);
         this.exploreContainer.innerHTML = screenshotsHTML;
+        console.log(`[EXPLORE] innerHTML set, container has ${this.exploreContainer.children.length} children`);
+
+        // Force browser reflow/repaint to ensure DOM update is visible immediately
+        // Reading offsetHeight forces the browser to recalculate layout
+        void this.exploreContainer.offsetHeight;
+
+        // Visual debug: flash the container to show update
+        this.exploreContainer.style.border = '3px solid red';
+        setTimeout(() => {
+            this.exploreContainer.style.border = '';
+        }, 500);
 
         // Scroll to top to show latest screenshot
         this.exploreContainer.scrollTop = 0;
