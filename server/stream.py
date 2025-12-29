@@ -82,6 +82,10 @@ def create_app(tracker, query_agent=None) -> FastAPI:
     # Narration is controlled by client's voice toggle (generate_audio flag in requests)
     # Server-side narration_enabled kept at True for backward compatibility
     ng_tracker.narration_enabled = True
+
+    # Track if we're currently generating narration (to prevent concurrent generation)
+    is_generating_narration = {"generating": False, "timestamp": None}
+
     print(f"[INIT] Starting in {default_mode} mode (audio generation controlled by client)", flush=True)
 
     async def broadcast_narration(narration_text: str):
@@ -1134,10 +1138,11 @@ Provide narration:"""
                     # narration prompts, not for storing/sending to client.
                     # latest_frame["state"] is already set with full state including layer sources
 
-                    # Check if we should generate narration (pass screenshot timestamp)
-                    # Skip narration if disabled (e.g., during query-based navigation)
-                    # For manual captures, always generate narration (bypass should_narrate check)
+                    # Check if we should generate narration
+                    # - Manual captures: always generate (user explicitly requested)
+                    # - Auto captures: use should_narrate() to check for state changes
                     manual_capture = latest_frame.get("manual_capture", False)
+
                     should_generate_narration = ng_tracker.narration_enabled and (
                         manual_capture or ng_tracker.narrator.should_narrate(
                             ng_tracker.current_state_summary,
@@ -1145,87 +1150,132 @@ Provide narration:"""
                         )
                     )
 
-                    if should_generate_narration:
-                        manual_flag = " (manual)" if manual_capture else ""
-                        print(f"[NARRATOR] Generating narration{manual_flag}...", flush=True)
-                        narration = ng_tracker.narrator.generate_narration(
-                            ng_tracker.current_state_summary,
-                            screenshot_b64=latest_frame["jpeg_b64"],
-                            screenshot_ts=latest_frame["timestamp"],
-                        )
-                        if narration:
-                            # Generate audio only if client requested it
-                            audio_data = None
-                            client_wants_audio = latest_frame.get("generate_audio", True)
-                            if client_wants_audio:
-                                print(f"[NARRATOR] Generating audio (voice enabled)...", flush=True)
-                                audio_data = await ng_tracker.narrator.generate_audio_async(
-                                    narration
-                                )
-                            else:
-                                print(f"[NARRATOR] Skipping audio generation (voice disabled by user)", flush=True)
-
-                            # Save audio to recording if active
-                            if recording_manager.is_recording and audio_data:
-                                # Decode base64 audio to bytes
-                                audio_bytes = base64.b64decode(audio_data)
-
-                                # Determine audio format based on TTS engine
-                                audio_format = "mp3"  # default for edge-tts
-                                if hasattr(ng_tracker.narrator, 'tts_engine'):
-                                    if ng_tracker.narrator.tts_engine in ["coqui", "chatterbox"]:
-                                        audio_format = "wav"
-
-                                # Update the most recent frame with narration
-                                if recording_manager.current_session and recording_manager.current_session.frames:
-                                    frame_number = len(recording_manager.current_session.frames)
-                                    recording_manager.update_frame_narration(
-                                        frame_number=frame_number,
-                                        narration_text=narration,
-                                        audio_bytes=audio_bytes,
-                                        audio_format=audio_format
-                                    )
-
-                            # Send narration message
-                            narration_msg = {
-                                "type": "narration",
-                                "text": narration,
-                                "timestamp": time.time(),
-                                "audio": audio_data,  # base64 MP3 or WAV or None
-                            }
-                            await websocket.send_json(narration_msg)
-                            print(
-                                f"[NARRATOR] Sent narration with audio: {len(audio_data) if audio_data else 0} bytes",
-                                flush=True,
-                            )
-
-                            # Clear manual_capture flag after narration is generated
-                            # to prevent continuous generation on the same screenshot
-                            if manual_capture:
-                                latest_frame["manual_capture"] = False
-                                print(f"[NARRATOR] Cleared manual_capture flag for this screenshot", flush=True)
-
+                    # Only send frame if this is new AND we'll generate narration for it
                     # Only send if this is a new frame
                     if (
                         last_sent_timestamp is None
                         or latest_frame["timestamp"] > last_sent_timestamp
                     ):
-                        # Verify state has layer sources before sending
-                        state_has_sources = False
-                        if latest_frame["state"] and "layers" in latest_frame["state"]:
-                            state_has_sources = any("source" in layer for layer in latest_frame["state"]["layers"])
+                        # Check if we're already generating narration for a previous frame
+                        # If so, skip this frame to avoid overwhelming the narrator
+                        if is_generating_narration["generating"]:
+                            # Skip this frame - still generating narration for previous frame
+                            # DON'T update last_sent_timestamp - we want to check this frame again
+                            # after the current narration completes
+                            print(f"[NARRATOR] Skipping frame (still generating narration for previous frame), ts={latest_frame['timestamp']:.2f}", flush=True)
+                            continue
 
-                        message = {
-                            "type": "frame",
-                            "ts": latest_frame["timestamp"],
-                            "jpeg_b64": latest_frame["jpeg_b64"],
-                            "state": latest_frame["state"],
-                        }
-                        await websocket.send_json(message)
-                        last_sent_timestamp = latest_frame["timestamp"]
-                        print(
-                            f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f}, audio_gen={'yes' if latest_frame.get('generate_audio', True) else 'no'}, state_has_sources={state_has_sources})"
-                        )
+                        # Only send frame to UI if we're going to generate narration for it
+                        # This prevents "Waiting for narration..." for frames that will be skipped
+                        if should_generate_narration:
+                            # Mark that we're generating narration
+                            is_generating_narration["generating"] = True
+                            is_generating_narration["timestamp"] = latest_frame["timestamp"]
+
+                            # Send the frame to UI FIRST (so it appears immediately)
+                            # Verify state has layer sources before sending
+                            state_has_sources = False
+                            if latest_frame["state"] and "layers" in latest_frame["state"]:
+                                state_has_sources = any("source" in layer for layer in latest_frame["state"]["layers"])
+
+                            message = {
+                                "type": "frame",
+                                "ts": latest_frame["timestamp"],
+                                "jpeg_b64": latest_frame["jpeg_b64"],
+                                "state": latest_frame["state"],
+                            }
+                            try:
+                                await websocket.send_json(message)
+                                last_sent_timestamp = latest_frame["timestamp"]
+                                print(
+                                    f"[WS] Sent new frame (ts={latest_frame['timestamp']:.2f}, audio_gen={'yes' if latest_frame.get('generate_audio', True) else 'no'}, state_has_sources={state_has_sources}, img_size={len(latest_frame['jpeg_b64'])} chars)"
+                                )
+                            except Exception as e:
+                                print(f"[WS] Failed to send frame (WebSocket error): {e}", flush=True)
+                                # WebSocket is broken, mark narration as not generating and break
+                                is_generating_narration["generating"] = False
+                                is_generating_narration["timestamp"] = None
+                                break
+
+                            # Now generate narration (will be sent separately when ready)
+                            # Run in executor to avoid blocking the WebSocket event loop
+                            manual_flag = " (manual)" if manual_capture else ""
+                            print(f"[NARRATOR] Generating narration{manual_flag}...", flush=True)
+                            loop = asyncio.get_event_loop()
+                            narration = await loop.run_in_executor(
+                                None,  # Use default executor
+                                ng_tracker.narrator.generate_narration,
+                                ng_tracker.current_state_summary,
+                                latest_frame["jpeg_b64"],
+                                latest_frame["timestamp"],
+                            )
+                            if narration:
+                                # Generate audio only if client requested it
+                                audio_data = None
+                                client_wants_audio = latest_frame.get("generate_audio", True)
+                                if client_wants_audio:
+                                    print(f"[NARRATOR] Generating audio (voice enabled)...", flush=True)
+                                    audio_data = await ng_tracker.narrator.generate_audio_async(
+                                        narration
+                                    )
+                                else:
+                                    print(f"[NARRATOR] Skipping audio generation (voice disabled by user)", flush=True)
+
+                                # Save audio to recording if active
+                                if recording_manager.is_recording and audio_data:
+                                    # Decode base64 audio to bytes
+                                    audio_bytes = base64.b64decode(audio_data)
+
+                                    # Determine audio format based on TTS engine
+                                    audio_format = "mp3"  # default for edge-tts
+                                    if hasattr(ng_tracker.narrator, 'tts_engine'):
+                                        if ng_tracker.narrator.tts_engine in ["coqui", "chatterbox"]:
+                                            audio_format = "wav"
+
+                                    # Update the most recent frame with narration
+                                    if recording_manager.current_session and recording_manager.current_session.frames:
+                                        frame_number = len(recording_manager.current_session.frames)
+                                        recording_manager.update_frame_narration(
+                                            frame_number=frame_number,
+                                            narration_text=narration,
+                                            audio_bytes=audio_bytes,
+                                            audio_format=audio_format
+                                        )
+
+                                # Send narration message
+                                narration_msg = {
+                                    "type": "narration",
+                                    "text": narration,
+                                    "timestamp": time.time(),
+                                    "audio": audio_data,  # base64 MP3 or WAV or None
+                                }
+                                try:
+                                    await websocket.send_json(narration_msg)
+                                    print(
+                                        f"[NARRATOR] Sent narration with audio: {len(audio_data) if audio_data else 0} bytes",
+                                        flush=True,
+                                    )
+                                except Exception as e:
+                                    print(f"[NARRATOR] Failed to send narration (WebSocket error): {e}", flush=True)
+                                    # Don't break the loop - continue to send frame
+
+                                # Clear manual_capture flag after narration is generated
+                                # to prevent continuous generation on the same screenshot
+                                if manual_capture:
+                                    latest_frame["manual_capture"] = False
+                                    print(f"[NARRATOR] Cleared manual_capture flag for this screenshot", flush=True)
+
+                                # Mark narration generation as complete
+                                is_generating_narration["generating"] = False
+                                is_generating_narration["timestamp"] = None
+                            else:
+                                # Narration generation failed, mark as complete anyway
+                                is_generating_narration["generating"] = False
+                                is_generating_narration["timestamp"] = None
+                        else:
+                            # Skip this frame - don't send to UI, but mark as processed to avoid repeated checks
+                            last_sent_timestamp = latest_frame["timestamp"]
+                            print(f"[NARRATOR] Skipping frame (narration not needed), ts={latest_frame['timestamp']:.2f}", flush=True)
 
         except WebSocketDisconnect:
             print(f"[WS] Client disconnected")

@@ -50,9 +50,28 @@
             <div class="side-panels">
                 <div class="explore-panel">
                     <h2>Exploration</h2>
-                    <div class="explore-container" id="explore-container">
-                        <div class="explore-placeholder">
-                            <p>Take screenshots to see them here with AI narration below...</p>
+
+                    <!-- Tab buttons for explore panel -->
+                    <div class="explore-tabs">
+                        <button class="explore-tab-btn active" data-tab="screenshots">Screenshots</button>
+                        <button class="explore-tab-btn" data-tab="verbose">Verbose Log</button>
+                    </div>
+
+                    <!-- Screenshots tab -->
+                    <div class="explore-tab-content active" id="explore-tab-screenshots">
+                        <div class="explore-container" id="explore-container">
+                            <div class="explore-placeholder">
+                                <p>Take screenshots to see them here with AI narration below...</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Verbose log tab -->
+                    <div class="explore-tab-content" id="explore-tab-verbose">
+                        <div class="explore-verbose-log" id="explore-verbose-log">
+                            <div class="explore-placeholder">
+                                <p>Detailed narration processing steps will appear here...</p>
+                            </div>
                         </div>
                     </div>
                 </div>

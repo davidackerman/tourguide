@@ -38,6 +38,11 @@ class NGLiveStream {
         this.moviePollInterval = null;  // For tracking movie compilation polling
         this.isGeneratingNarrations = false;  // Flag to prevent concurrent narration generation
 
+        // State change detection for auto-capture
+        this.lastCapturedState = null;
+        this.positionThreshold = 10;  // Minimum position change (in voxels) to trigger capture
+        this.scaleThreshold = 0.1;  // Minimum scale change ratio to trigger capture
+
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
         this.stateInfo = document.getElementById('state-info');
@@ -159,6 +164,7 @@ class NGLiveStream {
         this.setupChatHandlers();
         this.setupScreenshotControls();
         this.setupAnalysisHandlers();
+        this.setupExploreTabs();
 
         this.loadNeuroglancerURL();
         this.connect();
@@ -177,6 +183,9 @@ class NGLiveStream {
 
             // Start or stop the capture interval based on the checkbox
             if (this.autoScreenshotEnabled) {
+                // Take a screenshot immediately first (force it to ensure initial capture)
+                this.capturePageScreenshot(true);  // Force capture on initial enable
+                // Then start the interval for subsequent captures
                 this.startScreenshotInterval();
             } else {
                 this.stopScreenshotInterval();
@@ -408,6 +417,7 @@ class NGLiveStream {
     }
 
     handleMessage(data) {
+        console.log(`[WS] Received message type: ${data.type}`);
         if (data.type === 'frame') {
             this.handleFrame(data);
         } else if (data.type === 'narration') {
@@ -416,34 +426,33 @@ class NGLiveStream {
             this.currentMode = data.mode;
             this.updateModeUI();
             console.log(`[MODE] Received mode change: ${data.mode}`);
+        } else {
+            console.warn(`[WS] Unknown message type: ${data.type}`);
         }
     }
 
     handleFrame(data) {
+        console.log(`[FRAME] Received frame message, mode=${this.currentMode}, ts=${data.ts}`);
+
         // In explore mode, add screenshot to history
         if (this.currentMode === 'explore') {
-            // Check if this is a server response for a locally captured screenshot
-            // Find any local screenshot (recently captured, not yet confirmed by server)
-            const localScreenshot = this.screenshots.find(s => s.local === true);
+            // Server only sends frames that will receive narration
+            // Add new screenshot to the array
+            this.screenshots.unshift({
+                jpeg_b64: data.jpeg_b64,
+                timestamp: data.ts,
+                state: data.state,
+                narration: null,  // Will be filled when narration arrives
+                audio: null
+            });
+            console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}, img_size=${data.jpeg_b64.length} chars`);
 
-            if (localScreenshot) {
-                // Update the existing local screenshot with server data
-                localScreenshot.state = data.state;
-                localScreenshot.timestamp = data.ts;
-                localScreenshot.jpeg_b64 = data.jpeg_b64;  // Update with server's version
-                localScreenshot.local = false;  // Mark as confirmed by server
-                console.log(`[FRAME] Updated local screenshot with server state at ${new Date(data.ts * 1000).toLocaleTimeString()}`);
-            } else {
-                // This is a new screenshot from server (e.g., from auto-capture)
-                this.screenshots.unshift({
-                    jpeg_b64: data.jpeg_b64,
-                    timestamp: data.ts,
-                    state: data.state,
-                    narration: null,  // Will be filled when narration arrives
-                    audio: null
-                });
-                console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
-            }
+            // Add verbose log entry
+            this.addExploreVerboseLog([
+                { icon: '📸', text: 'Screenshot captured', status: 'success' },
+                { icon: '📤', text: 'Sent to AI for narration', status: 'info' },
+                { icon: '⏳', text: 'Waiting for narration...', status: 'info' }
+            ]);
 
             // Keep only max screenshots
             if (this.screenshots.length > this.maxScreenshots) {
@@ -451,7 +460,14 @@ class NGLiveStream {
             }
 
             // Update the explore panel display
+            console.log('[FRAME] Calling updateExplorePanel()...');
             this.updateExplorePanel();
+            console.log('[FRAME] updateExplorePanel() completed');
+
+            // Force immediate visual update using requestAnimationFrame
+            requestAnimationFrame(() => {
+                console.log('[FRAME] requestAnimationFrame callback executed');
+            });
 
             // Also update movie screenshots view if the tab is visible
             this.updateMovieScreenshotsViewIfVisible();
@@ -580,6 +596,20 @@ class NGLiveStream {
                 screenshotToUpdate.audio = data.audio;
                 console.log('[NARRATION] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
 
+                // Update verbose log entry with narration completion
+                const steps = [
+                    { icon: '✅', text: 'Narration received from AI', status: 'success' },
+                    { icon: '📝', text: `Text: ${data.text.substring(0, 80)}...`, status: 'success' }
+                ];
+
+                if (data.audio) {
+                    steps.push({ icon: '🔊', text: 'Audio generated', status: 'success' });
+                } else {
+                    steps.push({ icon: '🔇', text: 'No audio (voice disabled)', status: 'info' });
+                }
+
+                this.addExploreVerboseLog(steps, true); // true = update existing entry
+
                 // Update the explore panel display
                 this.updateExplorePanel();
 
@@ -696,7 +726,15 @@ class NGLiveStream {
     }
 
     updateExplorePanel() {
-        if (!this.exploreContainer) return;
+        const timestamp = new Date().toISOString();
+        console.log(`[EXPLORE ${timestamp}] updateExplorePanel() called`);
+
+        if (!this.exploreContainer) {
+            console.warn('[EXPLORE] exploreContainer not found!');
+            return;
+        }
+
+        console.log(`[EXPLORE ${timestamp}] Updating panel with ${this.screenshots.length} screenshots`);
 
         if (this.screenshots.length === 0) {
             this.exploreContainer.innerHTML = '<div class="explore-placeholder"><p>Take screenshots to see them here with AI narration below...</p></div>';
@@ -707,6 +745,8 @@ class NGLiveStream {
             const timeStr = new Date(screenshot.timestamp * 1000).toLocaleTimeString();
             const isLatest = index === 0;
             const hasNarration = !!screenshot.narration;
+
+            console.log(`[EXPLORE] Screenshot ${index}: has_narration=${hasNarration}, timestamp=${timeStr}`);
 
             return `
                 <div class="explore-item ${isLatest ? 'latest' : ''}" data-index="${index}">
@@ -727,7 +767,13 @@ class NGLiveStream {
             `;
         }).join('');
 
+        console.log(`[EXPLORE] Setting innerHTML, HTML length: ${screenshotsHTML.length} chars`);
         this.exploreContainer.innerHTML = screenshotsHTML;
+        console.log(`[EXPLORE] innerHTML set, container has ${this.exploreContainer.children.length} children`);
+
+        // Force browser reflow/repaint to ensure DOM update is visible immediately
+        // Reading offsetHeight forces the browser to recalculate layout
+        void this.exploreContainer.offsetHeight;
 
         // Scroll to top to show latest screenshot
         this.exploreContainer.scrollTop = 0;
@@ -867,6 +913,118 @@ class NGLiveStream {
         }
     }
 
+    getCurrentNeuroglancerState() {
+        // Get current Neuroglancer state from iframe
+        try {
+            if (!this.ngIframe || !this.ngIframe.contentWindow) {
+                return null;
+            }
+
+            const iframeDoc = this.ngIframe.contentDocument || this.ngIframe.contentWindow.document;
+            if (!iframeDoc) {
+                return null;
+            }
+
+            // Try to get state from Neuroglancer viewer if available
+            const ngViewer = this.ngIframe.contentWindow.viewer;
+            if (!ngViewer) {
+                return null;
+            }
+
+            // Get the state JSON
+            const stateObj = ngViewer.state.toJSON();
+
+            // Extract relevant fields for comparison
+            return {
+                position: stateObj.position || null,
+                crossSectionScale: stateObj.crossSectionScale || null,
+                selectedSegments: this.getSelectedSegments(stateObj),
+                visibleLayers: this.getVisibleLayers(stateObj)
+            };
+        } catch (e) {
+            // If we can't access the viewer, return null
+            return null;
+        }
+    }
+
+    getSelectedSegments(stateObj) {
+        // Extract selected segments from all layers
+        const segments = [];
+        if (stateObj.layers) {
+            for (const layer of stateObj.layers) {
+                if (layer.segments) {
+                    segments.push(...layer.segments);
+                }
+            }
+        }
+        return segments.sort().join(',');
+    }
+
+    getVisibleLayers(stateObj) {
+        // Get list of visible layers
+        const visible = [];
+        if (stateObj.layers) {
+            for (const layer of stateObj.layers) {
+                if (layer.visible !== false) {  // Default is visible
+                    visible.push(layer.name);
+                }
+            }
+        }
+        return visible.sort().join(',');
+    }
+
+    hasStateChanged(prevState, currState) {
+        // If no previous state, this is the first capture
+        if (!prevState) {
+            return true;
+        }
+
+        // If we can't get current state, skip capture
+        if (!currState) {
+            return false;
+        }
+
+        // Check position change
+        if (prevState.position && currState.position) {
+            const distance = Math.sqrt(
+                prevState.position.reduce((sum, val, i) => {
+                    const diff = val - currState.position[i];
+                    return sum + diff * diff;
+                }, 0)
+            );
+
+            if (distance > this.positionThreshold) {
+                console.log(`[STATE] Position changed by ${distance.toFixed(1)} voxels`);
+                return true;
+            }
+        }
+
+        // Check scale change
+        if (prevState.crossSectionScale !== null && currState.crossSectionScale !== null) {
+            const scaleRatio = Math.abs(currState.crossSectionScale - prevState.crossSectionScale) /
+                              (prevState.crossSectionScale + 1e-10);
+
+            if (scaleRatio > this.scaleThreshold) {
+                console.log(`[STATE] Scale changed by ${(scaleRatio * 100).toFixed(1)}%`);
+                return true;
+            }
+        }
+
+        // Check selected segments change
+        if (prevState.selectedSegments !== currState.selectedSegments) {
+            console.log(`[STATE] Selected segments changed`);
+            return true;
+        }
+
+        // Check visible layers change
+        if (prevState.visibleLayers !== currState.visibleLayers) {
+            console.log(`[STATE] Visible layers changed`);
+            return true;
+        }
+
+        return false;
+    }
+
     capturePageScreenshot(forceCapture = false) {
         try {
             // Skip screenshot capture in query mode (screenshots only needed for AI narration in explore mode)
@@ -877,6 +1035,17 @@ class NGLiveStream {
             // Skip if auto-capture is disabled and not forced
             if (!this.autoScreenshotEnabled && !forceCapture) {
                 return;
+            }
+
+            // For auto-capture (not manual), check if state has changed
+            if (!forceCapture) {
+                const currentState = this.getCurrentNeuroglancerState();
+                if (!this.hasStateChanged(this.lastCapturedState, currentState)) {
+                    // State hasn't changed meaningfully, skip capture
+                    return;
+                }
+                // Update last captured state
+                this.lastCapturedState = currentState;
             }
 
             // Create a canvas the size of the Neuroglancer viewer area
@@ -914,24 +1083,9 @@ class NGLiveStream {
 
             console.log(`[SCREENSHOT] Captured ${jpegBase64.length} chars${forceCapture ? ' (manual)' : ''}`);
 
-            // Add screenshot to local array immediately for instant UI feedback
-            this.screenshots.unshift({
-                jpeg_b64: jpegBase64,
-                timestamp: Date.now() / 1000,
-                state: null,  // State will be filled when server responds
-                narration: null,  // Will be filled when narration arrives
-                audio: null,
-                local: true  // Mark as locally captured (not yet confirmed by server)
-            });
-
-            // Keep only max screenshots
-            if (this.screenshots.length > this.maxScreenshots) {
-                this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
-            }
-
-            // Update UI immediately
-            this.updateExplorePanel();
-            this.updateMovieScreenshotsViewIfVisible();
+            // Don't add to local array yet - wait for server to send frame message
+            // This prevents showing screenshots that won't get narration
+            // The server will only send a frame message if it will generate narration
 
             // Send to server for processing and narration
             // Pass forceCapture flag to indicate manual capture
@@ -2161,6 +2315,74 @@ class NGLiveStream {
         if (message) {
             message.remove();
         }
+    }
+
+    setupExploreTabs() {
+        const exploreTabBtns = document.querySelectorAll('.explore-tab-btn');
+        const exploreTabContents = document.querySelectorAll('.explore-tab-content');
+
+        exploreTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+
+                // Update button states
+                exploreTabBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+
+                // Update content visibility
+                exploreTabContents.forEach(content => {
+                    content.classList.remove('active');
+                });
+                const targetContent = document.getElementById(`explore-tab-${tabName}`);
+                if (targetContent) {
+                    targetContent.classList.add('active');
+                }
+
+                console.log(`[EXPLORE] Switched to ${tabName} tab`);
+            });
+        });
+
+        // Store reference to verbose log container
+        this.exploreVerboseLog = document.getElementById('explore-verbose-log');
+        this.currentVerboseEntry = null; // Track current entry being updated
+    }
+
+    addExploreVerboseLog(steps, isUpdate = false) {
+        if (!this.exploreVerboseLog) return;
+
+        // Remove placeholder if exists
+        const placeholder = this.exploreVerboseLog.querySelector('.explore-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        // If this is an update and we have a current entry, update it
+        if (isUpdate && this.currentVerboseEntry) {
+            // Append new steps to existing entry
+            steps.forEach(step => {
+                const stepDiv = document.createElement('div');
+                stepDiv.className = `step ${step.status || 'info'}`;
+                stepDiv.innerHTML = `<span class="icon">${step.icon}</span>${step.text}`;
+                this.currentVerboseEntry.appendChild(stepDiv);
+            });
+        } else {
+            // Create new entry
+            const entryDiv = document.createElement('div');
+            entryDiv.className = 'explore-verbose-entry';
+
+            const timestamp = new Date().toLocaleTimeString();
+            let html = `<div class="timestamp">${timestamp}</div>`;
+
+            steps.forEach(step => {
+                html += `<div class="step ${step.status || 'info'}"><span class="icon">${step.icon}</span>${step.text}</div>`;
+            });
+
+            entryDiv.innerHTML = html;
+            this.exploreVerboseLog.appendChild(entryDiv);
+            this.currentVerboseEntry = entryDiv; // Store for updates
+        }
+
+        this.exploreVerboseLog.scrollTop = this.exploreVerboseLog.scrollHeight;
     }
 
     addVerboseLogEntry(query, result) {

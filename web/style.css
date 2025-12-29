@@ -1079,12 +1079,83 @@ button:disabled {
     padding: 20px;
 }
 
+/* Explore tabs */
+.explore-tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+    border-bottom: 2px solid #333;
+}
+
+.explore-tab-btn {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s, border-color 0.2s;
+}
+
+.explore-tab-btn:hover {
+    color: #ccc;
+}
+
+.explore-tab-btn.active {
+    color: #4caf50;
+    border-bottom-color: #4caf50;
+}
+
+.explore-tab-content {
+    display: none;
+}
+
+.explore-tab-content.active {
+    display: block;
+}
+
 .explore-container {
     max-height: 700px;
     overflow-y: auto;
     background: #1a1a1a;
     border-radius: 4px;
     padding: 15px;
+}
+
+.explore-verbose-log {
+    max-height: 700px;
+    overflow-y: auto;
+    background: #1a1a1a;
+    border-radius: 4px;
+    padding: 15px;
+}
+
+.explore-verbose-entry {
+    background: #2a2a2a;
+    border-left: 3px solid #4caf50;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.explore-verbose-entry .timestamp {
+    color: #888;
+    font-size: 11px;
+    margin-bottom: 5px;
+}
+
+.explore-verbose-entry .step {
+    color: #ccc;
+    margin: 3px 0;
+}
+
+.explore-verbose-entry .step .icon {
+    margin-right: 5px;
 }
 
 .explore-placeholder {
@@ -1100,7 +1171,6 @@ button:disabled {
     padding: 15px;
     margin-bottom: 20px;
     border: 2px solid #333;
-    transition: all 0.3s ease;
 }
 
 .explore-item.latest {

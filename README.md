@@ -15,6 +15,7 @@ A sidecar service that streams live screenshots and viewer state from Neuroglanc
 - **Movie Recording**: Record navigation sessions with synchronized narration
 - **Multiple Transition Modes**: Direct cuts, crossfade, or smooth state interpolation
 - **Responsive UI**: Clean dark theme with status indicators and narration history
+- **Explore Mode with Verbose Logging**: Real-time progress tracking shows screenshot capture, AI narration generation, and audio synthesis status
 
 ## Quick Start
 
@@ -51,10 +52,12 @@ python server/main.py
 
 The web panel now includes:
 - **Embedded Neuroglancer viewer** (left) with sample EM data pre-loaded
-- **Live screenshots** (right top) updating as you navigate
-- **AI narration panel** (right middle) with real-time descriptions
-- **State tracking** (right bottom) showing position, zoom, layers, selections
-- **Recording controls** (bottom) to capture and compile narrated tours
+- **Explore Mode** (default, right panel):
+  - **Screenshots tab**: Live screenshots with AI narrations as you navigate
+  - **Verbose Log tab**: Real-time progress tracking (📸 Screenshot captured → 📤 Sent to AI → ⏳ Waiting → ✅ Narration received → 🔊 Audio generated)
+- **Query Mode**: Natural language questions about organelles with AI-driven visualization
+- **State tracking**: Position, zoom, layers, selections
+- **Recording controls**: Capture and compile narrated tours with multiple transition modes
 
 Navigate in the embedded viewer and watch the live stream update automatically!
 
