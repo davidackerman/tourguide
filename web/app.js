@@ -30,19 +30,30 @@ class NGLiveStream {
         this.voiceEnabled = true;  // Voice narration enabled by default
         this.chatHistory = [];
 
+        // Screenshot management
+        this.screenshots = [];  // Array of {jpeg_b64, timestamp, narration, state} objects
+        this.maxScreenshots = 20;  // Maximum screenshots to keep in history
+        this.autoScreenshotEnabled = false;  // Auto-capture disabled by default
+        this.draggedScreenshotIndex = null;  // For drag and drop
+        this.moviePollInterval = null;  // For tracking movie compilation polling
+        this.isGeneratingNarrations = false;  // Flag to prevent concurrent narration generation
+
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
-        this.frameImg = document.getElementById('frame');
-        this.frameOverlay = document.getElementById('frame-overlay');
         this.stateInfo = document.getElementById('state-info');
         this.statusText = document.getElementById('status-text');
         this.statusIndicator = document.querySelector('.status-indicator');
         this.frameCountEl = document.getElementById('frame-count');
         this.lastUpdateEl = document.getElementById('last-update');
         this.fpsEl = document.getElementById('fps');
-        this.narrationContainer = document.getElementById('narration-container');
+        this.exploreContainer = document.getElementById('explore-container');
         this.screenshotFpsInput = document.getElementById('screenshot-fps');
         this.enableAudioBtn = document.getElementById('enable-audio-btn');
+
+        // Screenshot controls
+        this.screenshotControls = document.getElementById('screenshot-controls');
+        this.autoScreenshotCheckbox = document.getElementById('auto-screenshot');
+        this.manualScreenshotBtn = document.getElementById('manual-screenshot');
 
         // Recording UI elements
         this.transitionTypeSelect = document.getElementById('transition-type');
@@ -55,6 +66,23 @@ class NGLiveStream {
         this.compilationProgress = document.getElementById('compilation-progress');
         this.progressFill = document.getElementById('progress-fill');
         this.progressText = document.getElementById('progress-text');
+
+        // Screenshot movie UI elements
+        this.movieTabs = document.getElementById('movie-tabs');
+        this.movieTabBtns = document.querySelectorAll('.movie-tab-btn');
+        this.movieTabContents = document.querySelectorAll('.movie-tab-content');
+        this.movieScreenshotsContainer = document.getElementById('movie-screenshots-container');
+        this.selectAllBtn = document.getElementById('select-all-screenshots');
+        this.clearSelectionBtn = document.getElementById('clear-selection-screenshots');
+        this.createSelectedMovieBtn = document.getElementById('create-selected-movie');
+        this.selectedCountSpan = document.getElementById('selected-count');
+        this.movieTransitionType = document.getElementById('movie-transition-type');
+
+        // Progress tab elements
+        this.progressStatus = document.getElementById('progress-status');
+        this.progressStatusText = document.getElementById('progress-status-text');
+        this.progressLog = document.getElementById('progress-log');
+        this.clearProgressLogBtn = document.getElementById('clear-progress-log');
 
         // Query mode UI elements
         this.modeExploreBtn = document.getElementById('mode-explore');
@@ -111,17 +139,58 @@ class NGLiveStream {
 
         // Setup recording controls
         this.setupRecordingControls();
+        this.setupScreenshotMovieControls();
+        this.setupProgressTab();
 
         // Setup query mode controls
         this.setupModeToggle();
         this.setupVoiceToggle();
         this.setupChatHandlers();
+        this.setupScreenshotControls();
 
         this.loadNeuroglancerURL();
         this.connect();
         this.syncMode();
         // Re-enable client-side screenshot capture (no cross-origin data now)
         this.setupPageScreenshotCapture();
+    }
+
+    setupScreenshotControls() {
+        if (!this.autoScreenshotCheckbox || !this.manualScreenshotBtn) return;
+
+        // Auto screenshot toggle
+        this.autoScreenshotCheckbox.addEventListener('change', () => {
+            this.autoScreenshotEnabled = this.autoScreenshotCheckbox.checked;
+            console.log(`[SCREENSHOT] Auto-capture ${this.autoScreenshotEnabled ? 'enabled' : 'disabled'}`);
+
+            // Start or stop the capture interval based on the checkbox
+            if (this.autoScreenshotEnabled) {
+                this.startScreenshotInterval();
+            } else {
+                this.stopScreenshotInterval();
+            }
+        });
+
+        // Manual screenshot button
+        this.manualScreenshotBtn.addEventListener('click', () => {
+            this.captureManualScreenshot();
+        });
+
+        // Keyboard shortcut (s key)
+        document.addEventListener('keydown', (e) => {
+            // Only trigger if not in an input field and in explore mode
+            if (e.key === 's' && this.currentMode === 'explore' &&
+                !e.target.matches('input, textarea') && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                this.captureManualScreenshot();
+            }
+        });
+    }
+
+    captureManualScreenshot() {
+        console.log('[SCREENSHOT] Manual capture triggered');
+        // Force a screenshot capture regardless of auto mode
+        this.capturePageScreenshot(true);  // Pass true to force capture and narration
     }
 
     setupMessageListener() {
@@ -131,7 +200,7 @@ class NGLiveStream {
 
             if (event.data && event.data.type === 'screenshot') {
                 console.log('Received screenshot from iframe:', event.data.jpeg_b64?.substring(0, 50) + '...');
-                this.handleScreenshotFromIframe(event.data.jpeg_b64);
+                this.handleScreenshotFromIframe(event.data.jpeg_b64, event.data.timestamp);
             } else if (event.data && event.data.type === 'ready') {
                 console.log('Neuroglancer iframe is ready');
                 this.iframeReady = true;
@@ -139,11 +208,14 @@ class NGLiveStream {
         });
     }
 
-    handleScreenshotFromIframe(jpeg_b64) {
+    handleScreenshotFromIframe(jpeg_b64, timestamp) {
         if (!jpeg_b64) {
             console.error('No screenshot data received');
             return;
         }
+
+        // Use timestamp from iframe if provided, otherwise use current time
+        const now = timestamp || Date.now();
 
         // Display the screenshot
         this.frameImg.src = `data:image/jpeg;base64,${jpeg_b64}`;
@@ -154,9 +226,8 @@ class NGLiveStream {
         this.frameCountEl.textContent = this.frameCount;
 
         // Update timestamp
-        const now = Date.now();
         this.lastFrameTime = now;
-        this.lastUpdateEl.textContent = new Date().toLocaleTimeString();
+        this.lastUpdateEl.textContent = new Date(now).toLocaleTimeString();
 
         // Calculate FPS
         this.frameTimestamps.push(now);
@@ -165,18 +236,20 @@ class NGLiveStream {
         }
         this.updateFPS();
 
-        // Send to server for processing
-        this.sendScreenshotToServer(jpeg_b64);
+        // Send to server for processing (convert ms to seconds)
+        this.sendScreenshotToServer(jpeg_b64, now / 1000);
     }
 
-    async sendScreenshotToServer(jpeg_b64) {
+    async sendScreenshotToServer(jpeg_b64, timestamp) {
         try {
             await fetch('/api/screenshot', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     jpeg_b64: jpeg_b64,
-                    timestamp: Date.now() / 1000
+                    timestamp: timestamp,  // already in seconds
+                    generate_audio: this.voiceEnabled,  // Respect user's voice toggle
+                    manual_capture: false
                 })
             });
         } catch (e) {
@@ -335,12 +408,41 @@ class NGLiveStream {
     }
 
     handleFrame(data) {
-        // Update frame image (if element exists)
-        if (this.frameImg) {
-            this.frameImg.src = `data:image/jpeg;base64,${data.jpeg_b64}`;
-        }
-        if (this.frameOverlay) {
-            this.frameOverlay.style.display = 'none';
+        // In explore mode, add screenshot to history
+        if (this.currentMode === 'explore') {
+            // Check if this is a server response for a locally captured screenshot
+            // Find any local screenshot (recently captured, not yet confirmed by server)
+            const localScreenshot = this.screenshots.find(s => s.local === true);
+
+            if (localScreenshot) {
+                // Update the existing local screenshot with server data
+                localScreenshot.state = data.state;
+                localScreenshot.timestamp = data.ts;
+                localScreenshot.jpeg_b64 = data.jpeg_b64;  // Update with server's version
+                localScreenshot.local = false;  // Mark as confirmed by server
+                console.log(`[FRAME] Updated local screenshot with server state at ${new Date(data.ts * 1000).toLocaleTimeString()}`);
+            } else {
+                // This is a new screenshot from server (e.g., from auto-capture)
+                this.screenshots.unshift({
+                    jpeg_b64: data.jpeg_b64,
+                    timestamp: data.ts,
+                    state: data.state,
+                    narration: null,  // Will be filled when narration arrives
+                    audio: null
+                });
+                console.log(`[FRAME] Added screenshot at ${new Date(data.ts * 1000).toLocaleTimeString()}, total: ${this.screenshots.length}`);
+            }
+
+            // Keep only max screenshots
+            if (this.screenshots.length > this.maxScreenshots) {
+                this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
+            }
+
+            // Update the explore panel display
+            this.updateExplorePanel();
+
+            // Also update movie screenshots view if the tab is visible
+            this.updateMovieScreenshotsViewIfVisible();
         }
 
         // Update frame count
@@ -455,19 +557,36 @@ class NGLiveStream {
             console.log('Audio data length:', data.audio.length);
         }
 
-        // Add to narrations list (most recent first)
+        // In explore mode, attach narration to the most recent screenshot without narration
+        if (this.currentMode === 'explore' && this.screenshots.length > 0) {
+            // Find screenshots without narration (search from most recent)
+            // The narration should correspond to the most recent screenshot that doesn't have one yet
+            const screenshotToUpdate = this.screenshots.find(s => !s.narration);
+
+            if (screenshotToUpdate) {
+                screenshotToUpdate.narration = data.text;
+                screenshotToUpdate.audio = data.audio;
+                console.log('[NARRATION] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
+
+                // Update the explore panel display
+                this.updateExplorePanel();
+
+                // Also update movie screenshots view if the tab is visible
+                this.updateMovieScreenshotsViewIfVisible();
+            } else {
+                console.log('[NARRATION] No screenshot found without narration');
+            }
+        }
+
+        // Keep old narrations list for backward compatibility
         this.narrations.unshift({
             text: data.text,
             timestamp: data.timestamp || Date.now() / 1000
         });
 
-        // Keep only the most recent narrations
         if (this.narrations.length > this.maxNarrations) {
             this.narrations = this.narrations.slice(0, this.maxNarrations);
         }
-
-        // Update the narration display
-        this.updateNarrationDisplay();
 
         // Queue audio if available and voice is enabled
         if (data.audio && this.voiceEnabled) {
@@ -564,27 +683,42 @@ class NGLiveStream {
         }
     }
 
-    updateNarrationDisplay() {
-        if (this.narrations.length === 0) {
-            this.narrationContainer.innerHTML = '<div class="narration-placeholder">Navigate around to trigger AI narration...</div>';
+    updateExplorePanel() {
+        if (!this.exploreContainer) return;
+
+        if (this.screenshots.length === 0) {
+            this.exploreContainer.innerHTML = '<div class="explore-placeholder"><p>Take screenshots to see them here with AI narration below...</p></div>';
             return;
         }
 
-        const narrationHTML = this.narrations.map((narration, index) => {
-            const timeStr = new Date(narration.timestamp * 1000).toLocaleTimeString();
+        const screenshotsHTML = this.screenshots.map((screenshot, index) => {
+            const timeStr = new Date(screenshot.timestamp * 1000).toLocaleTimeString();
             const isLatest = index === 0;
+            const hasNarration = !!screenshot.narration;
+
             return `
-                <div class="narration-item ${isLatest ? 'latest' : ''}">
-                    <div class="narration-time">${timeStr}</div>
-                    <div class="narration-text">${this.escapeHtml(narration.text)}</div>
+                <div class="explore-item ${isLatest ? 'latest' : ''}" data-index="${index}">
+                    <div class="explore-screenshot">
+                        <img src="data:image/jpeg;base64,${screenshot.jpeg_b64}" alt="Screenshot at ${timeStr}">
+                        <div class="explore-timestamp">${timeStr}</div>
+                    </div>
+                    ${hasNarration ? `
+                        <div class="explore-narration">
+                            <div class="explore-narration-text">${this.escapeHtml(screenshot.narration)}</div>
+                        </div>
+                    ` : `
+                        <div class="explore-narration-pending">
+                            <span class="narration-pending-icon">⏳</span> Waiting for narration...
+                        </div>
+                    `}
                 </div>
             `;
         }).join('');
 
-        this.narrationContainer.innerHTML = narrationHTML;
+        this.exploreContainer.innerHTML = screenshotsHTML;
 
-        // Scroll to top to show latest narration
-        this.narrationContainer.scrollTop = 0;
+        // Scroll to top to show latest screenshot
+        this.exploreContainer.scrollTop = 0;
     }
 
     escapeHtml(text) {
@@ -690,28 +824,46 @@ class NGLiveStream {
     }
 
     setupPageScreenshotCapture() {
-        setTimeout(() => {
-            this.screenshotInterval = setInterval(() => {
-                this.capturePageScreenshot();
-            }, 1000 / this.screenshotFps);
-            console.log(`Started page screenshot capture at ${this.screenshotFps} fps`);
-        }, 3000);
+        // Don't auto-start the interval - it will be started when user enables "Live Capture"
+        console.log('[SCREENSHOT] Screenshot capture initialized (not started)');
     }
 
-    restartScreenshotCapture() {
-        if (this.screenshotInterval) {
-            clearInterval(this.screenshotInterval);
-        }
+    startScreenshotInterval() {
+        // Stop any existing interval first
+        this.stopScreenshotInterval();
+
+        // Start new interval
         this.screenshotInterval = setInterval(() => {
             this.capturePageScreenshot();
         }, 1000 / this.screenshotFps);
-        console.log(`Restarted screenshot capture at ${this.screenshotFps} fps`);
+        console.log(`[SCREENSHOT] Started auto-capture at ${this.screenshotFps} fps`);
     }
 
-    capturePageScreenshot() {
+    stopScreenshotInterval() {
+        if (this.screenshotInterval) {
+            clearInterval(this.screenshotInterval);
+            this.screenshotInterval = null;
+            console.log('[SCREENSHOT] Stopped auto-capture');
+        }
+    }
+
+    restartScreenshotCapture() {
+        // Only restart if auto-capture is enabled
+        if (this.autoScreenshotEnabled) {
+            this.startScreenshotInterval();
+            console.log(`Restarted screenshot capture at ${this.screenshotFps} fps`);
+        }
+    }
+
+    capturePageScreenshot(forceCapture = false) {
         try {
             // Skip screenshot capture in query mode (screenshots only needed for AI narration in explore mode)
             if (this.currentMode === 'query') {
+                return;
+            }
+
+            // Skip if auto-capture is disabled and not forced
+            if (!this.autoScreenshotEnabled && !forceCapture) {
                 return;
             }
 
@@ -747,9 +899,31 @@ class NGLiveStream {
             // Convert to JPEG
             const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.8);
             const jpegBase64 = jpegDataUrl.split(',')[1];
-            
-            console.log(`[SCREENSHOT] Captured ${jpegBase64.length} chars`);
-            this.sendScreenshotToServer(jpegBase64);
+
+            console.log(`[SCREENSHOT] Captured ${jpegBase64.length} chars${forceCapture ? ' (manual)' : ''}`);
+
+            // Add screenshot to local array immediately for instant UI feedback
+            this.screenshots.unshift({
+                jpeg_b64: jpegBase64,
+                timestamp: Date.now() / 1000,
+                state: null,  // State will be filled when server responds
+                narration: null,  // Will be filled when narration arrives
+                audio: null,
+                local: true  // Mark as locally captured (not yet confirmed by server)
+            });
+
+            // Keep only max screenshots
+            if (this.screenshots.length > this.maxScreenshots) {
+                this.screenshots = this.screenshots.slice(0, this.maxScreenshots);
+            }
+
+            // Update UI immediately
+            this.updateExplorePanel();
+            this.updateMovieScreenshotsViewIfVisible();
+
+            // Send to server for processing and narration
+            // Pass forceCapture flag to indicate manual capture
+            this.sendManualScreenshotToServer(jpegBase64, forceCapture);
 
         } catch (e) {
             console.error('[SCREENSHOT] Page capture failed:', e);
@@ -833,15 +1007,15 @@ class NGLiveStream {
 
             console.log(`[SCREENSHOT] Captured ${jpegBase64.length} bytes`);
 
-            // Send to server
-            this.sendScreenshotToServer(jpegBase64);
+            // Send to server with current timestamp
+            this.sendManualScreenshotToServer(jpegBase64);
 
         } catch (e) {
             console.error('[SCREENSHOT] Failed to capture canvas:', e);
         }
     }
 
-    async sendScreenshotToServer(jpegBase64) {
+    async sendManualScreenshotToServer(jpegBase64, manualCapture = false) {
         try {
             const response = await fetch('/api/screenshot', {
                 method: 'POST',
@@ -850,7 +1024,9 @@ class NGLiveStream {
                 },
                 body: JSON.stringify({
                     jpeg_b64: jpegBase64,
-                    timestamp: Date.now()
+                    timestamp: Date.now() / 1000,  // Convert to seconds
+                    generate_audio: this.voiceEnabled,  // Only generate audio if voice is enabled
+                    manual_capture: manualCapture  // Flag to force narration generation
                 })
             });
 
@@ -919,6 +1095,627 @@ class NGLiveStream {
         }
 
         console.log('[RECORDING] Controls initialized');
+    }
+
+    setupScreenshotMovieControls() {
+        if (!this.selectAllBtn || !this.clearSelectionBtn) {
+            console.warn('[SCREENSHOT-MOVIE] Controls not found');
+            return;
+        }
+
+        // Setup movie tab switching
+        this.movieTabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                this.switchMovieTab(tabName);
+            });
+        });
+
+        // Select all screenshots
+        this.selectAllBtn.addEventListener('click', () => {
+            document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(cb => {
+                cb.checked = true;
+            });
+            this.updateMovieSelectedCount();
+        });
+
+        // Clear selection
+        this.clearSelectionBtn.addEventListener('click', () => {
+            document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            this.updateMovieSelectedCount();
+        });
+
+        // Create movie from selected (will auto-generate missing narrations)
+        if (this.createSelectedMovieBtn) {
+            this.createSelectedMovieBtn.addEventListener('click', () => {
+                this.createMovieFromSelected();
+            });
+        }
+
+        console.log('[SCREENSHOT-MOVIE] Controls initialized');
+    }
+
+    switchMovieTab(tabName) {
+        // Update button states
+        this.movieTabBtns.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update tab content visibility
+        this.movieTabContents.forEach(content => {
+            if (content.id === `movie-tab-${tabName}`) {
+                content.classList.add('active');
+                content.style.display = 'block';
+            } else {
+                content.classList.remove('active');
+                content.style.display = 'none';
+            }
+        });
+
+        // If switching to "from-screenshots" tab, update the movie screenshots view
+        if (tabName === 'from-screenshots') {
+            this.updateMovieScreenshotsView();
+        }
+    }
+
+    updateMovieScreenshotsView() {
+        if (!this.movieScreenshotsContainer) return;
+
+        if (this.screenshots.length === 0) {
+            this.movieScreenshotsContainer.innerHTML = '<div class="movie-screenshots-placeholder">No screenshots available. Switch to Explore mode and capture some screenshots first.</div>';
+            return;
+        }
+
+        // Save current selection state before updating
+        const selectedIndices = new Set();
+        document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked').forEach(cb => {
+            selectedIndices.add(parseInt(cb.dataset.index));
+        });
+
+        // Display in reverse chronological order (oldest first) for movie creation
+        // but keep original indices for reference
+        const reversedScreenshots = [...this.screenshots].reverse();
+        const screenshotsHTML = reversedScreenshots.map((screenshot, reverseIndex) => {
+            // Calculate original index
+            const index = this.screenshots.length - 1 - reverseIndex;
+            const timeStr = new Date(screenshot.timestamp * 1000).toLocaleTimeString();
+            const hasText = !!screenshot.narration;
+            const hasAudio = screenshot.audio && screenshot.audio.length > 0;
+
+            // Determine status indicator
+            let statusHTML;
+            if (hasText && hasAudio) {
+                statusHTML = `
+                    <div class="screenshot-narration-preview">
+                        <span class="narration-indicator" title="Has text and audio">📝 🔊</span>
+                        <span class="narration-text">${this.escapeHtml(screenshot.narration.substring(0, 100))}${screenshot.narration.length > 100 ? '...' : ''}</span>
+                    </div>
+                `;
+            } else if (hasText) {
+                statusHTML = `
+                    <div class="screenshot-narration-preview">
+                        <span class="narration-indicator" title="Has text only (no audio)">📝</span>
+                        <span class="narration-text">${this.escapeHtml(screenshot.narration.substring(0, 100))}${screenshot.narration.length > 100 ? '...' : ''}</span>
+                    </div>
+                `;
+            } else if (hasAudio) {
+                statusHTML = `
+                    <div class="screenshot-narration-preview">
+                        <span class="narration-indicator" title="Has audio only (no text)">🔊</span>
+                        <span class="narration-text">Audio only</span>
+                    </div>
+                `;
+            } else {
+                statusHTML = `
+                    <div class="screenshot-no-narration">
+                        <span class="no-narration-indicator">⏳</span> No narration
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="movie-screenshot-item" draggable="true" data-index="${index}">
+                    <div class="drag-handle">⋮⋮</div>
+                    <div class="screenshot-checkbox-container">
+                        <input type="checkbox" class="screenshot-checkbox" data-index="${index}">
+                    </div>
+                    <div class="screenshot-preview">
+                        <img src="data:image/jpeg;base64,${screenshot.jpeg_b64}" alt="Screenshot ${reverseIndex + 1}">
+                        <div class="screenshot-time">${timeStr}</div>
+                    </div>
+                    <div class="screenshot-info">
+                        <div class="screenshot-number">#${reverseIndex + 1}</div>
+                        ${statusHTML}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        this.movieScreenshotsContainer.innerHTML = screenshotsHTML;
+
+        // Add drag and drop event listeners
+        const items = this.movieScreenshotsContainer.querySelectorAll('.movie-screenshot-item');
+        items.forEach(item => {
+            item.addEventListener('dragstart', (e) => this.handleDragStart(e));
+            item.addEventListener('dragover', (e) => this.handleDragOver(e));
+            item.addEventListener('drop', (e) => this.handleDrop(e));
+            item.addEventListener('dragend', (e) => this.handleDragEnd(e));
+        });
+
+        // Restore selection state
+        document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(checkbox => {
+            const index = parseInt(checkbox.dataset.index);
+            if (selectedIndices.has(index)) {
+                checkbox.checked = true;
+            }
+        });
+
+        // Add checkbox event listeners
+        document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                this.updateMovieSelectedCount();
+            });
+        });
+
+        // Initialize button states
+        this.updateMovieSelectedCount();
+    }
+
+    updateMovieScreenshotsViewIfVisible() {
+        // Check if the movie "from-screenshots" tab is currently visible
+        const fromScreenshotsTab = document.getElementById('movie-tab-from-screenshots');
+        if (fromScreenshotsTab && fromScreenshotsTab.classList.contains('active')) {
+            this.updateMovieScreenshotsView();
+        }
+    }
+
+    handleDragStart(e) {
+        const item = e.target.closest('.movie-screenshot-item');
+        if (!item) return;
+        this.draggedScreenshotIndex = parseInt(item.dataset.index);
+        item.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+    }
+
+    handleDragOver(e) {
+        if (e.preventDefault) {
+            e.preventDefault();
+        }
+        e.dataTransfer.dropEffect = 'move';
+
+        const item = e.target.closest('.movie-screenshot-item');
+        if (item && !item.classList.contains('dragging')) {
+            item.classList.add('drag-over');
+        }
+        return false;
+    }
+
+    handleDrop(e) {
+        if (e.stopPropagation) {
+            e.stopPropagation();
+        }
+
+        const targetItem = e.target.closest('.movie-screenshot-item');
+        if (!targetItem) return;
+
+        const targetIndex = parseInt(targetItem.dataset.index);
+
+        if (this.draggedScreenshotIndex !== null && this.draggedScreenshotIndex !== targetIndex) {
+            // Reorder screenshots array
+            const draggedItem = this.screenshots[this.draggedScreenshotIndex];
+            this.screenshots.splice(this.draggedScreenshotIndex, 1);
+            this.screenshots.splice(targetIndex, 0, draggedItem);
+
+            // Update both the movie view and explore panel
+            this.updateMovieScreenshotsView();
+            this.updateExplorePanel();
+
+            console.log(`[MOVIE] Moved screenshot from ${this.draggedScreenshotIndex} to ${targetIndex}`);
+        }
+
+        return false;
+    }
+
+    handleDragEnd(e) {
+        const item = e.target.closest('.movie-screenshot-item');
+        if (item) {
+            item.classList.remove('dragging');
+        }
+
+        // Remove drag-over class from all items
+        document.querySelectorAll('.movie-screenshot-item').forEach(item => {
+            item.classList.remove('drag-over');
+        });
+
+        this.draggedScreenshotIndex = null;
+    }
+
+    updateMovieSelectedCount() {
+        const selectedCheckboxes = document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked');
+        const count = selectedCheckboxes.length;
+
+        if (this.selectedCountSpan) {
+            this.selectedCountSpan.textContent = `${count} screenshot${count !== 1 ? 's' : ''} selected`;
+        }
+
+        // Enable/disable button based on selection
+        const hasSelection = count > 0;
+        if (this.createSelectedMovieBtn) {
+            this.createSelectedMovieBtn.disabled = !hasSelection;
+        }
+    }
+
+    setupProgressTab() {
+        if (!this.clearProgressLogBtn) return;
+
+        this.clearProgressLogBtn.addEventListener('click', () => {
+            this.clearProgressLog();
+        });
+    }
+
+    addProgressLog(message, type = 'info') {
+        if (!this.progressLog) return;
+
+        // Remove placeholder if exists
+        const placeholder = this.progressLog.querySelector('.progress-log-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        // Create log entry
+        const entry = document.createElement('div');
+        entry.className = `progress-log-entry ${type}`;
+
+        const timestamp = new Date().toLocaleTimeString();
+        entry.innerHTML = `<span class="progress-log-timestamp">[${timestamp}]</span>${this.escapeHtml(message)}`;
+
+        this.progressLog.appendChild(entry);
+        this.progressLog.scrollTop = this.progressLog.scrollHeight;
+    }
+
+    clearProgressLog() {
+        if (!this.progressLog) return;
+
+        this.progressLog.innerHTML = '<div class="progress-log-placeholder">Compilation logs will appear here...</div>';
+    }
+
+    setProgressStatus(status, indicator = '⏸️') {
+        if (!this.progressStatus || !this.progressStatusText) return;
+
+        this.progressStatusText.textContent = status;
+        this.progressStatus.querySelector('.progress-indicator').textContent = indicator;
+
+        // Add/remove compiling class for animation
+        if (status.includes('Compiling') || status.includes('Generating')) {
+            this.progressStatus.classList.add('compiling');
+        } else {
+            this.progressStatus.classList.remove('compiling');
+        }
+    }
+
+    async generateNarrationsForSelected() {
+        const selectedCheckboxes = document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked');
+        if (selectedCheckboxes.length === 0) return;
+
+        // Prevent multiple simultaneous generations
+        if (this.isGeneratingNarrations) {
+            console.log('[NARRATION] Already generating narrations, skipping');
+            return;
+        }
+        this.isGeneratingNarrations = true;
+
+        const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+
+        // Find screenshots that need any work (missing text or missing audio when voice enabled)
+        const screenshotsToProcess = selectedIndices
+            .map(idx => ({ index: idx, screenshot: this.screenshots[idx] }))
+            .filter(({ screenshot }) => {
+                if (!screenshot) return false;  // Skip if screenshot doesn't exist
+                const needsText = !screenshot.narration;
+                // Check for missing audio more carefully - could be null, undefined, or empty string
+                const hasAudio = screenshot.audio && screenshot.audio.length > 0;
+                const needsAudio = !hasAudio;  // Always require audio for complete narrations
+                return needsText || needsAudio;
+            });
+
+        if (screenshotsToProcess.length === 0) {
+            this.isGeneratingNarrations = false;
+            alert('All selected screenshots already have complete narrations!');
+            return;
+        }
+
+        // Disable button and show progress
+        this.generateNarrationsBtn.disabled = true;
+        this.generateNarrationsBtn.textContent = `🎤 Generating... (0/${screenshotsToProcess.length})`;
+
+        try {
+            for (let i = 0; i < screenshotsToProcess.length; i++) {
+                const { index, screenshot } = screenshotsToProcess[i];
+
+                this.generateNarrationsBtn.textContent = `🎤 Generating... (${i + 1}/${screenshotsToProcess.length})`;
+
+                const needsText = !screenshot.narration;
+                const hasAudio = screenshot.audio && screenshot.audio.length > 0;
+                const existingNarration = screenshot.narration;
+
+                // Log what we're doing for this screenshot
+                console.log(`[NARRATION] Screenshot ${i + 1}: needsText=${needsText}, hasAudio=${hasAudio}`);
+
+                const response = await fetch('/api/narration/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jpeg_b64: screenshot.jpeg_b64,
+                        state: screenshot.state,
+                        generate_audio: true,  // Always generate audio for movie creation
+                        movie_mode: true,
+                        duration_seconds: 25,
+                        existing_narration: needsText ? null : existingNarration  // Use existing text if available
+                    })
+                });
+
+                const data = await response.json();
+                if (data.status === 'ok') {
+                    // Update text if it was generated
+                    if (needsText && data.narration) {
+                        this.screenshots[index].narration = data.narration;
+                        console.log(`[NARRATION] Updated narration text for screenshot ${i + 1}`);
+                    }
+                    // Update audio (always store it for movie creation)
+                    // IMPORTANT: Store audio but DON'T queue it for playback during generation
+                    if (data.audio) {
+                        this.screenshots[index].audio = data.audio;
+                        console.log(`[NARRATION] Updated audio for screenshot ${i + 1}`);
+                        // Don't play audio during batch generation - only store it for movie creation
+                    }
+                    this.updateExplorePanel();
+                    this.updateMovieScreenshotsView();
+                }
+            }
+
+            alert(`Generated narrations for ${screenshotsToProcess.length} screenshot${screenshotsToProcess.length !== 1 ? 's' : ''}!`);
+        } catch (e) {
+            console.error('[NARRATION] Generation failed:', e);
+            alert('Failed to generate narrations: ' + e.message);
+        } finally {
+            this.generateNarrationsBtn.textContent = '🎤 Generate Narrations for Selected';
+            this.updateMovieSelectedCount();
+            this.isGeneratingNarrations = false;  // Reset flag
+        }
+    }
+
+    async createMovieFromSelected() {
+        const selectedCheckboxes = document.querySelectorAll('.movie-screenshot-item .screenshot-checkbox:checked');
+        if (selectedCheckboxes.length === 0) return;
+
+        const selectedIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+
+        // Disable button and show progress
+        this.createSelectedMovieBtn.disabled = true;
+        this.createSelectedMovieBtn.textContent = '🎬 Preparing...';
+
+        // Clear previous progress
+        if (this.progressFill) this.progressFill.style.width = '0%';
+        if (this.progressText) this.progressText.textContent = '0%';
+        if (this.compilationProgress) {
+            this.compilationProgress.style.display = 'none';
+        }
+
+        // Initialize progress logging
+        this.setProgressStatus('Preparing movie...', '🎬');
+        this.addProgressLog(`Starting movie creation with ${selectedIndices.length} screenshots`, 'info');
+
+        try {
+            // Log current state of all selected screenshots
+            console.log(`[MOVIE] Selected ${selectedIndices.length} screenshots for movie creation`);
+            selectedIndices.forEach((idx, i) => {
+                const s = this.screenshots[idx];
+                console.log(`[MOVIE] Screenshot ${i + 1}: narration=${!!s.narration}, audio=${!!s.audio && s.audio.length > 0}`);
+            });
+
+            // First, generate any missing narrations/audio
+            const screenshotsToProcess = selectedIndices
+                .map(idx => ({ index: idx, screenshot: this.screenshots[idx] }))
+                .filter(({ screenshot }) => {
+                    if (!screenshot) return false;
+                    const needsText = !screenshot.narration;
+                    const hasAudio = screenshot.audio && screenshot.audio.length > 0;
+                    const needsAudio = !hasAudio;
+                    const process = needsText || needsAudio;
+                    console.log(`[MOVIE] Filter: narration=${!!screenshot.narration}, audio=${hasAudio}, willProcess=${process}`);
+                    return process;
+                });
+
+            console.log(`[MOVIE] Need to process ${screenshotsToProcess.length} out of ${selectedIndices.length} screenshots`);
+
+            if (screenshotsToProcess.length > 0) {
+                console.log(`[MOVIE] Generating narrations for ${screenshotsToProcess.length} screenshots...`);
+                this.createSelectedMovieBtn.textContent = `🎤 Generating narrations... (0/${screenshotsToProcess.length})`;
+                this.setProgressStatus(`Generating narrations (0/${screenshotsToProcess.length})...`, '🎤');
+                this.addProgressLog(`Generating narrations for ${screenshotsToProcess.length} screenshots`, 'info');
+
+                for (let i = 0; i < screenshotsToProcess.length; i++) {
+                    const { index, screenshot } = screenshotsToProcess[i];
+                    this.createSelectedMovieBtn.textContent = `🎤 Generating narrations... (${i + 1}/${screenshotsToProcess.length})`;
+                    this.setProgressStatus(`Generating narrations (${i + 1}/${screenshotsToProcess.length})...`, '🎤');
+
+                    const needsText = !screenshot.narration;
+                    const existingNarration = screenshot.narration;
+
+                    console.log(`[MOVIE] Screenshot ${i + 1}: needsText=${needsText}, hasAudio=${screenshot.audio && screenshot.audio.length > 0}`);
+                    this.addProgressLog(`Processing screenshot ${i + 1}: ${needsText ? 'generating text and audio' : 'generating audio only'}`, 'info');
+
+                    const requestBody = {
+                        jpeg_b64: screenshot.jpeg_b64,
+                        state: screenshot.state,
+                        generate_audio: true,  // ALWAYS generate audio for movies
+                        movie_mode: true,      // Flag that this is for movie creation
+                        duration_seconds: 25,
+                        existing_narration: needsText ? null : existingNarration
+                    };
+                    console.log(`[MOVIE] Request ${i + 1}: generate_audio=${requestBody.generate_audio}, movie_mode=${requestBody.movie_mode}, has_existing_narration=${!!existingNarration}`);
+
+                    const response = await fetch('/api/narration/generate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    const data = await response.json();
+                    if (data.status === 'ok') {
+                        // Update the screenshot object directly (safer than using index which might be stale)
+                        if (needsText && data.narration) {
+                            screenshot.narration = data.narration;
+                        }
+                        if (data.audio) {
+                            screenshot.audio = data.audio;
+                        }
+                        this.addProgressLog(`Screenshot ${i + 1}: narration generated successfully`, 'success');
+                        this.updateExplorePanel();
+                        this.updateMovieScreenshotsView();
+                    } else {
+                        this.addProgressLog(`Screenshot ${i + 1}: narration generation failed`, 'error');
+                    }
+                }
+            }
+
+            // Now all selected screenshots should have narrations
+            this.createSelectedMovieBtn.textContent = '🎬 Creating Movie...';
+            this.setProgressStatus('Compiling movie...', '🎬');
+
+            // Send selected screenshots to server
+            // Filter out any undefined entries in case screenshots array changed
+            const selectedScreenshots = selectedIndices
+                .map(idx => this.screenshots[idx])
+                .filter(s => s !== undefined);
+
+            // Check if we lost screenshots
+            if (selectedScreenshots.length === 0) {
+                throw new Error('No valid screenshots found. The screenshot list may have changed during processing.');
+            }
+            if (selectedScreenshots.length < selectedIndices.length) {
+                console.warn(`[MOVIE] Warning: ${selectedIndices.length - selectedScreenshots.length} screenshots became unavailable during processing`);
+            }
+
+            // Use movie transition type if available, otherwise fall back to recording transition type
+            const transitionType = this.movieTransitionType ? this.movieTransitionType.value : this.transitionTypeSelect.value;
+
+            // Check if interpolation is selected but some screenshots don't have state
+            if (transitionType === 'interpolate') {
+                const screenshotsWithoutState = selectedScreenshots.filter(s => !s.state || Object.keys(s.state).length === 0);
+                if (screenshotsWithoutState.length > 0) {
+                    const proceed = confirm(
+                        `Warning: ${screenshotsWithoutState.length} of ${selectedScreenshots.length} screenshots don't have Neuroglancer state data.\n\n` +
+                        `State interpolation requires state data for all frames. ` +
+                        `The system will fall back to "Direct Cuts" if interpolation fails.\n\n` +
+                        `Tip: Use "Direct Cuts" or "Crossfade" for screenshots without state.\n\n` +
+                        `Continue anyway?`
+                    );
+                    if (!proceed) {
+                        this.createSelectedMovieBtn.textContent = '🎬 Create Movie from Selected';
+                        this.createSelectedMovieBtn.disabled = false;
+                        return;
+                    }
+                }
+            }
+
+            const response = await fetch('/api/movie/create-from-screenshots', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    screenshots: selectedScreenshots,
+                    transition_type: transitionType,
+                    transition_duration: 2.0
+                })
+            });
+
+            const data = await response.json();
+            if (data.status === 'ok') {
+                this.addProgressLog(`Movie compilation started (session: ${data.session_id})`, 'info');
+                this.addProgressLog(`Using transition type: ${transitionType}`, 'info');
+                // Poll for completion
+                await this.pollMovieCreation(data.session_id);
+            } else {
+                this.addProgressLog(`Failed to create movie: ${data.message}`, 'error');
+                this.setProgressStatus('Movie creation failed', '❌');
+                alert('Failed to create movie: ' + data.message);
+            }
+        } catch (e) {
+            console.error('[MOVIE] Creation failed:', e);
+            this.addProgressLog(`Error: ${e.message}`, 'error');
+            this.setProgressStatus('Movie creation failed', '❌');
+            alert('Failed to create movie: ' + e.message);
+        } finally {
+            this.createSelectedMovieBtn.textContent = '🎬 Create Movie from Selected';
+            this.updateMovieSelectedCount();
+        }
+    }
+
+    async pollMovieCreation(sessionId) {
+        // Show compilation progress
+        if (this.compilationProgress) {
+            this.compilationProgress.style.display = 'block';
+        }
+
+        // Clear any existing polling interval
+        if (this.moviePollInterval) {
+            clearInterval(this.moviePollInterval);
+            this.moviePollInterval = null;
+        }
+
+        this.moviePollInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/recording/compile/status/${sessionId}`);
+                const data = await response.json();
+
+                // Update progress indicator
+                if (data.progress !== undefined && this.progressFill && this.progressText) {
+                    const percentage = Math.round(data.progress * 100);
+                    this.progressFill.style.width = `${percentage}%`;
+                    this.progressText.textContent = `${percentage}%`;
+                }
+
+                if (data.status === 'completed') {
+                    clearInterval(this.moviePollInterval);
+                    this.moviePollInterval = null;
+                    if (this.compilationProgress) {
+                        this.compilationProgress.style.display = 'none';
+                    }
+                    // Reset progress
+                    if (this.progressFill) this.progressFill.style.width = '0%';
+                    if (this.progressText) this.progressText.textContent = '0%';
+                    this.addProgressLog('Movie created successfully!', 'success');
+                    this.addProgressLog(`Output location: ${sessionId}/output/movie.mp4`, 'info');
+                    this.setProgressStatus('Movie completed successfully', '✅');
+                    alert('Movie created successfully! Check the recordings directory.');
+                } else if (data.status === 'error') {
+                    clearInterval(this.moviePollInterval);
+                    this.moviePollInterval = null;
+                    if (this.compilationProgress) {
+                        this.compilationProgress.style.display = 'none';
+                    }
+                    // Reset progress
+                    if (this.progressFill) this.progressFill.style.width = '0%';
+                    if (this.progressText) this.progressText.textContent = '0%';
+                    this.addProgressLog('Movie compilation failed', 'error');
+                    if (data.error_message) {
+                        this.addProgressLog(`Error: ${data.error_message}`, 'error');
+                    }
+                    this.setProgressStatus('Movie compilation failed', '❌');
+                    alert(`Movie creation failed! ${data.error_message || ''}`);
+                } else if (data.status === 'compiling') {
+                    this.setProgressStatus('Compiling movie...', '⚙️');
+                }
+            } catch (e) {
+                console.error('[MOVIE] Poll error:', e);
+            }
+        }, 2000);
     }
 
     async startRecording() {
@@ -995,6 +1792,11 @@ class NGLiveStream {
     async createMovie() {
         try {
             this.createMovieBtn.disabled = true;
+
+            // Clear previous progress
+            if (this.progressFill) this.progressFill.style.width = '0%';
+            if (this.progressText) this.progressText.textContent = '0%';
+
             this.compilationProgress.style.display = 'block';
 
             // Get current transition type from dropdown
@@ -1069,7 +1871,7 @@ class NGLiveStream {
                     clearInterval(this.compilationStatusInterval);
                     this.compilationProgress.style.display = 'none';
                     this.createMovieBtn.disabled = false;
-                    alert('Movie compilation failed');
+                    alert(`Movie compilation failed! ${data.error_message || ''}`);
                 }
                 // Spinner is already visible while polling, no need to update anything
             } catch (e) {
@@ -1161,6 +1963,12 @@ class NGLiveStream {
             // Show explore panels
             if (this.sidePanels) this.sidePanels.style.display = 'flex';
             if (this.chatPanel) this.chatPanel.style.display = 'none';
+            if (this.screenshotControls) this.screenshotControls.style.display = 'flex';
+            if (this.movieTabs) this.movieTabs.style.display = 'flex';
+
+            // Show the active movie tab content
+            const activeMovieTab = document.querySelector('.movie-tab-content.active');
+            if (activeMovieTab) activeMovieTab.style.display = 'block';
 
             // Update button states
             if (this.modeExploreBtn) this.modeExploreBtn.classList.add('active');
@@ -1169,6 +1977,13 @@ class NGLiveStream {
             // Show chat panel
             if (this.sidePanels) this.sidePanels.style.display = 'none';
             if (this.chatPanel) this.chatPanel.style.display = 'block';
+            if (this.screenshotControls) this.screenshotControls.style.display = 'none';
+            if (this.movieTabs) this.movieTabs.style.display = 'none';
+
+            // Hide all movie tab contents
+            this.movieTabContents.forEach(content => {
+                content.style.display = 'none';
+            });
 
             // Update button states
             if (this.modeExploreBtn) this.modeExploreBtn.classList.remove('active');
