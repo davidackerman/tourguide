@@ -61,3 +61,6 @@ organelle_data/
 
 # Analysis results
 analysis_results/
+
+# Container images
+containers/
