@@ -317,13 +317,8 @@ class Narrator:
             return False
 
         # Don't start new narration if one is already being generated
+        # This prevents processing frames too quickly - we wait for each narration to complete
         if self.generating_narration:
-            return False
-
-        current_time = time.time()
-
-        # Don't narrate too frequently
-        if current_time - self.last_narration_time < self.min_narration_interval:
             return False
 
         # Only narrate if we have a NEW screenshot (not already narrated)
