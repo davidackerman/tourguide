@@ -10,6 +10,7 @@ A sidecar service that streams live screenshots and viewer state from Neuroglanc
 - **AI Narration**: Context-aware descriptions using cloud (Gemini/Claude) or local (Ollama) AI
 - **Natural Language Query**: Ask questions about organelles in plain English
 - **Agent-Driven Visualization**: AI interprets queries to show/hide segments intelligently
+- **AI-Powered Analysis Mode**: Generate and execute Python code for data analysis via natural language
 - **Voice Synthesis**: Browser-based TTS or edge-tts with multiple voices
 - **Movie Recording**: Record navigation sessions with synchronized narration
 - **Multiple Transition Modes**: Direct cuts, crossfade, or smooth state interpolation
@@ -77,6 +78,27 @@ The AI agent:
 5. Provides a natural language answer with voice narration
 
 See [AGENT_DRIVEN_VISUALIZATION.md](AGENT_DRIVEN_VISUALIZATION.md) for technical details.
+
+### Analysis Mode
+
+Switch to **Analysis Mode** to generate and execute Python code for data analysis using natural language:
+
+**Examples:**
+- "Plot the volume distribution of mitochondria"
+- "Show me a histogram of nucleus sizes"
+- "Create a scatter plot comparing mitochondria volume vs surface area"
+
+The AI analysis agent:
+1. Converts your question to Python code
+2. Executes the code in a sandboxed container (Docker or Apptainer)
+3. Displays generated plots and statistics
+4. Tracks session metadata and timing information
+
+**Container Support:**
+- **Docker**: Default for most systems
+- **Apptainer**: Automatic fallback for HPC/cluster environments
+
+See [ANALYSIS_MODE.md](ANALYSIS_MODE.md) for technical details and API documentation.
 
 ### Recording Tours
 
@@ -150,28 +172,44 @@ See [QUICKSTART.md](QUICKSTART.md) for detailed usage guide.
 - Semantic understanding: "show X" vs "also show X" vs "hide X"
 - Context-aware command generation using current viewer state
 
+### Stage 8: Analysis Mode ✅
+
+- Natural language to Python code generation
+- Sandboxed code execution (Docker/Apptainer)
+- Interactive plot generation and visualization
+- Session metadata tracking with timing breakdown
+- Comprehensive results management with REST API
+- Automatic container detection for HPC environments
+
 ## Project Structure
 
 ```
 tourguide/
 ├── server/
-│   ├── main.py          # Entry point
-│   ├── ng.py            # Neuroglancer viewer + state tracking
-│   ├── stream.py        # FastAPI WebSocket server + query endpoint
-│   ├── narrator.py      # AI narration engine
-│   ├── query_agent.py   # Natural language query agent
-│   ├── organelle_db.py  # SQLite database for organelle metadata
-│   ├── recording.py     # Movie recording and compilation
-│   └── requirements.txt # Legacy pip requirements
+│   ├── main.py             # Entry point
+│   ├── ng.py               # Neuroglancer viewer + state tracking
+│   ├── stream.py           # FastAPI WebSocket server + query/analysis endpoints
+│   ├── narrator.py         # AI narration engine
+│   ├── query_agent.py      # Natural language query agent
+│   ├── analysis_agent.py   # Natural language to Python code agent
+│   ├── docker_sandbox.py   # Docker container sandbox
+│   ├── apptainer_sandbox.py # Apptainer container sandbox
+│   ├── analysis_results.py # Analysis session metadata manager
+│   ├── organelle_db.py     # SQLite database for organelle metadata
+│   ├── recording.py        # Movie recording and compilation
+│   └── requirements.txt    # Legacy pip requirements
 ├── web/
-│   ├── index.html      # Web UI with recording controls
-│   ├── app.js          # WebSocket client + recording logic
+│   ├── index.html      # Web UI with recording and analysis controls
+│   ├── app.js          # WebSocket client + recording + analysis logic
 │   ├── style.css       # Styling with spinner animations
 │   └── ng-screenshot-handler.js  # Neuroglancer screenshot capture
 ├── organelle_data/     # Organelle CSV files and database (gitignored)
+├── analysis_results/   # Analysis session outputs (gitignored)
+├── containers/         # Container images (gitignored)
 ├── recordings/         # Recorded sessions (auto-created)
 ├── pixi.toml           # Pixi environment config
 ├── AGENT_DRIVEN_VISUALIZATION.md  # Agent visualization docs
+├── ANALYSIS_MODE.md    # Analysis mode documentation
 └── README.md
 ```
 
@@ -197,7 +235,8 @@ tourguide/
 - [x] **Stage 5**: Voice/TTS
 - [x] **Stage 6**: Movie recording and compilation
 - [x] **Stage 7**: Natural language query system with agent-driven visualization
-- [ ] **Stage 8**: Quality upgrades (ROI crop, advanced UI controls)
+- [x] **Stage 8**: Analysis mode with AI code generation and sandboxed execution
+- [ ] **Stage 9**: Quality upgrades (ROI crop, advanced UI controls)
 
 ## Using AI Narration
 
