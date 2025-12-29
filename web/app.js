@@ -584,7 +584,7 @@ class NGLiveStream {
                 screenshotToUpdate.audio = data.audio;
                 console.log('[NARRATION] Attached to screenshot at', new Date(screenshotToUpdate.timestamp * 1000).toLocaleTimeString());
 
-                // Add verbose log entry
+                // Update verbose log entry with narration completion
                 const steps = [
                     { icon: '✅', text: 'Narration received from AI', status: 'success' },
                     { icon: '📝', text: `Text: ${data.text.substring(0, 80)}...`, status: 'success' }
@@ -596,7 +596,7 @@ class NGLiveStream {
                     steps.push({ icon: '🔇', text: 'No audio (voice disabled)', status: 'info' });
                 }
 
-                this.addExploreVerboseLog(steps);
+                this.addExploreVerboseLog(steps, true); // true = update existing entry
 
                 // Update the explore panel display
                 this.updateExplorePanel();
@@ -2302,9 +2302,10 @@ class NGLiveStream {
 
         // Store reference to verbose log container
         this.exploreVerboseLog = document.getElementById('explore-verbose-log');
+        this.currentVerboseEntry = null; // Track current entry being updated
     }
 
-    addExploreVerboseLog(steps) {
+    addExploreVerboseLog(steps, isUpdate = false) {
         if (!this.exploreVerboseLog) return;
 
         // Remove placeholder if exists
@@ -2313,19 +2314,32 @@ class NGLiveStream {
             placeholder.remove();
         }
 
-        const entryDiv = document.createElement('div');
-        entryDiv.className = 'explore-verbose-entry';
+        // If this is an update and we have a current entry, update it
+        if (isUpdate && this.currentVerboseEntry) {
+            // Append new steps to existing entry
+            steps.forEach(step => {
+                const stepDiv = document.createElement('div');
+                stepDiv.className = `step ${step.status || 'info'}`;
+                stepDiv.innerHTML = `<span class="icon">${step.icon}</span>${step.text}`;
+                this.currentVerboseEntry.appendChild(stepDiv);
+            });
+        } else {
+            // Create new entry
+            const entryDiv = document.createElement('div');
+            entryDiv.className = 'explore-verbose-entry';
 
-        const timestamp = new Date().toLocaleTimeString();
-        let html = `<div class="timestamp">${timestamp}</div>`;
+            const timestamp = new Date().toLocaleTimeString();
+            let html = `<div class="timestamp">${timestamp}</div>`;
 
-        steps.forEach(step => {
-            const statusClass = step.status || 'info';
-            html += `<div class="step ${statusClass}"><span class="icon">${step.icon}</span>${step.text}</div>`;
-        });
+            steps.forEach(step => {
+                html += `<div class="step ${step.status || 'info'}"><span class="icon">${step.icon}</span>${step.text}</div>`;
+            });
 
-        entryDiv.innerHTML = html;
-        this.exploreVerboseLog.appendChild(entryDiv);
+            entryDiv.innerHTML = html;
+            this.exploreVerboseLog.appendChild(entryDiv);
+            this.currentVerboseEntry = entryDiv; // Store for updates
+        }
+
         this.exploreVerboseLog.scrollTop = this.exploreVerboseLog.scrollHeight;
     }
 

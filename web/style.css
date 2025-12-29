@@ -1158,18 +1158,6 @@ button:disabled {
     margin-right: 5px;
 }
 
-.explore-verbose-entry .step.success {
-    color: #4caf50;
-}
-
-.explore-verbose-entry .step.error {
-    color: #f44336;
-}
-
-.explore-verbose-entry .step.info {
-    color: #2196f3;
-}
-
 .explore-placeholder {
     color: #666;
     font-style: italic;
