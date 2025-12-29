@@ -9,8 +9,9 @@ import os
 import time
 import tempfile
 import subprocess
+import atexit
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 
 class ApptainerBackend:
@@ -23,7 +24,8 @@ class ApptainerBackend:
         db_path: str,
         timeout: int = 60,
         memory_limit: str = "512m",
-        cpu_quota: int = 50000
+        cpu_quota: int = 50000,
+        use_persistent_instance: bool = False
     ):
         """
         Initialize Apptainer backend.
@@ -33,6 +35,9 @@ class ApptainerBackend:
             timeout: Execution timeout in seconds (default: 60)
             memory_limit: Container memory limit (default: 512m)
             cpu_quota: CPU quota (not directly used in Apptainer, LSF handles this)
+            use_persistent_instance: Use persistent instance (default: False, not needed for Apptainer)
+                Note: Apptainer exec is already very fast compared to Docker. Persistent instances
+                would require overlay filesystems for dynamic bind mounts, adding complexity.
         """
         self.db_path = Path(db_path).resolve()
         self.timeout = timeout
@@ -40,6 +45,8 @@ class ApptainerBackend:
         self.cpu_quota = cpu_quota
         self.results_base_dir = Path("analysis_results")
         self.containers_dir = Path("containers")
+        self.use_persistent_instance = use_persistent_instance
+        self.instance_name: Optional[str] = None
 
         # Ensure directories exist
         self.results_base_dir.mkdir(exist_ok=True)
@@ -59,8 +66,15 @@ class ApptainerBackend:
         # Build image if needed
         self._ensure_image()
 
+        # Start persistent instance if enabled (typically not needed for Apptainer)
+        if self.use_persistent_instance:
+            self._start_instance()
+            # Register cleanup on exit
+            atexit.register(self.cleanup)
+
         print(f"[APPTAINER_BACKEND] Initialized (timeout={timeout}s, mem={memory_limit})")
         print(f"[APPTAINER_BACKEND] Using image: {self.image_path}")
+        print(f"[APPTAINER_BACKEND] Mode: {'persistent instance' if self.instance_name else 'direct exec (fast)'}")
 
     def _check_apptainer(self) -> bool:
         """
@@ -154,6 +168,43 @@ class ApptainerBackend:
             print(f"STDERR: {e.stderr}")
             raise RuntimeError(f"Failed to build Apptainer image: {e.stderr}")
 
+    def _start_instance(self):
+        """
+        Start a persistent Apptainer instance.
+
+        Note: We don't actually start a long-running instance because:
+        1. Apptainer instances can't have dynamic bind mounts added per execution
+        2. Each execution needs unique /code and /output bind mounts
+        3. Apptainer exec is already very fast (much faster than Docker)
+
+        We'll keep the flag for potential future optimization but not use instances.
+        """
+        # Don't actually start an instance - see note above
+        self.instance_name = None
+        print("[APPTAINER_BACKEND] Using direct exec mode (no persistent instance needed)")
+
+    def _stop_instance(self):
+        """Stop the persistent Apptainer instance."""
+        if not self.instance_name:
+            return
+
+        cmd = self._get_command()
+
+        try:
+            subprocess.run(
+                [cmd, "instance", "stop", self.instance_name],
+                capture_output=True,
+                timeout=10
+            )
+            print(f"[APPTAINER_BACKEND] Stopped instance: {self.instance_name}")
+        except Exception as e:
+            print(f"[APPTAINER_BACKEND] Error stopping instance: {e}")
+
+    def cleanup(self):
+        """Cleanup method called on exit."""
+        if self.use_persistent_instance:
+            self._stop_instance()
+
     def execute(self, code: str, session_id: str) -> Dict[str, Any]:
         """
         Execute Python code in isolated Apptainer container.
@@ -229,26 +280,29 @@ class ApptainerBackend:
         """
         cmd = self._get_command()
 
-        # Build apptainer exec command
-        apptainer_cmd = [
-            cmd, "exec",
-            "--contain",                            # Minimal isolation
-            "--no-home",                            # Don't auto-mount home
-            "--bind", f"{self.db_path.parent}:/data:ro",  # Database (read-only)
-            "--bind", f"{session_dir}:/code:ro",    # Code (read-only)
-            "--bind", f"{session_dir}:/output:rw",  # Output (read-write)
-            "--pwd", "/code",                       # Working directory
-        ]
-
-        # Add memory limit if supported (optional, LSF may handle this)
-        # Note: --memory flag might not be available in all Apptainer versions
-        # We'll skip it for now and rely on LSF scheduler for cluster
-
-        # Add image and command
-        apptainer_cmd.extend([
-            str(self.image_path),
-            "python", "/code/analysis.py"
-        ])
+        if self.use_persistent_instance and self.instance_name:
+            # Use persistent instance
+            apptainer_cmd = [
+                cmd, "exec",
+                "--bind", f"{session_dir}:/code:ro",    # Code (read-only)
+                "--bind", f"{session_dir}:/output:rw",  # Output (read-write)
+                "--pwd", "/code",                       # Working directory
+                f"instance://{self.instance_name}",
+                "python", "/code/analysis.py"
+            ]
+        else:
+            # One-off execution
+            apptainer_cmd = [
+                cmd, "exec",
+                "--contain",                            # Minimal isolation
+                "--no-home",                            # Don't auto-mount home
+                "--bind", f"{self.db_path}:/data/organelles.db:ro",  # Database file (read-only)
+                "--bind", f"{session_dir}:/code:ro",    # Code (read-only)
+                "--bind", f"{session_dir}:/output:rw",  # Output (read-write)
+                "--pwd", "/code",                       # Working directory
+                str(self.image_path),
+                "python", "/code/analysis.py"
+            ]
 
         print(f"[APPTAINER_BACKEND] Running container with timeout={self.timeout}s")
 

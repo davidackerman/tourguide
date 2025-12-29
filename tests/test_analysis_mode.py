@@ -21,6 +21,62 @@ if env_path.exists():
     load_dotenv(env_path)
     print(f"[SETUP] Loaded environment from {env_path}")
 
+# Check if we need to start Ollama (for cluster nodes)
+def ensure_ollama_if_needed():
+    """Start Ollama if using local mode and it's not running."""
+    use_local = os.getenv("USE_LOCAL", "false").lower() == "true"
+    analysis_model = os.getenv("ANALYSIS_AI_MODEL", "")
+    query_model = os.getenv("QUERY_AI_MODEL", "")
+
+    has_google_key = bool(os.getenv("GOOGLE_API_KEY"))
+    has_anthropic_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+
+    # Check if we're using Ollama (any local model name in environment)
+    ollama_models = ["qwen", "nemotron", "llama", "codellama", "deepseek", "mistral", "phi"]
+    is_ollama_model = any(model in analysis_model.lower() for model in ollama_models) or \
+                      any(model in query_model.lower() for model in ollama_models)
+
+    # We need Ollama if:
+    # 1. USE_LOCAL=true, OR
+    # 2. An Ollama model is specified in ANALYSIS_AI_MODEL or QUERY_AI_MODEL, OR
+    # 3. No API keys are configured (default to local)
+    needs_ollama = use_local or is_ollama_model or (not has_google_key and not has_anthropic_key)
+
+    if needs_ollama:
+        print("[SETUP] Detected Ollama mode, ensuring Ollama is running...")
+        print(f"[SETUP]   USE_LOCAL={use_local}")
+        print(f"[SETUP]   ANALYSIS_AI_MODEL={analysis_model}")
+        print(f"[SETUP]   Has API keys: Google={has_google_key}, Anthropic={has_anthropic_key}")
+
+        try:
+            from ollama_manager import ensure_ollama_running, preload_model
+
+            if ensure_ollama_running():
+                print("[SETUP] ✓ Ollama is available")
+                # Preload the model to avoid cold-start issues
+                model_name = analysis_model or query_model or "nemotron-3-nano"
+                print(f"[SETUP] Preloading model: {model_name}")
+                preload_model(model_name)
+                return True
+            else:
+                print("[SETUP] ✗ Failed to start Ollama")
+                return False
+        except Exception as e:
+            print(f"[SETUP] ✗ Error managing Ollama: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    else:
+        print("[SETUP] Using API-based AI provider (Gemini or Claude)")
+        print(f"[SETUP]   Has Google API key: {has_google_key}")
+        print(f"[SETUP]   Has Anthropic API key: {has_anthropic_key}")
+        return True
+
+# Ensure Ollama before running tests
+print()
+ensure_ollama_if_needed()
+print()
+
 def test_analysis_agent():
     """Test the AnalysisAgent code generation."""
     print("\n" + "="*80)
@@ -291,44 +347,38 @@ def test_full_pipeline():
     print("="*80)
 
     try:
+        import time as time_module
         from analysis_agent import AnalysisAgent
         from container_sandbox import ContainerSandbox
         from organelle_db import OrganelleDatabase
 
-        # Create test database
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
-            db_path = tmp.name
+        # Use the existing real database instead of creating test data
+        db_path = Path(__file__).parent.parent / "organelle_data" / "organelles.db"
+
+        if not db_path.exists():
+            print(f"✗ SKIPPED: Real database not found at {db_path}")
+            print("  Please ensure organelle_data/organelles.db exists")
+            return None
 
         try:
-            # Setup database with realistic test data
-            db = OrganelleDatabase(db_path, csv_paths=[])
+            # Track total timing
+            pipeline_start = time_module.time()
 
-            # Add test data directly using SQL
-            import random
+            # Open the existing database
+            db = OrganelleDatabase(str(db_path), csv_paths=[])
+
+            # Check what data we have
             conn = db._get_connection()
             cursor = conn.cursor()
-
-            test_data = []
-            for i in range(20):
-                test_data.append((
-                    str(i),
-                    'mitochondria' if i < 15 else 'nucleus',
-                    random.uniform(500, 5000),
-                    random.uniform(200, 2000),
-                    random.uniform(0, 1000),
-                    random.uniform(0, 1000),
-                    random.uniform(0, 1000)
-                ))
-
-            cursor.executemany('''
-                INSERT INTO organelles (object_id, organelle_type, volume, surface_area,
-                                       position_x, position_y, position_z)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', test_data)
-            conn.commit()
+            cursor.execute('SELECT COUNT(*) as total, organelle_type FROM organelles GROUP BY organelle_type ORDER BY total DESC LIMIT 5')
+            counts = cursor.fetchall()
+            cursor.execute('SELECT COUNT(*) FROM organelles')
+            total_count = cursor.fetchone()[0]
             conn.close()
 
-            print(f"✓ Created test database with 20 organelles (15 mito, 5 nucleus)")
+            print(f"✓ Using real database with {total_count} organelles:")
+            for count, org_type in counts:
+                print(f"    {org_type}: {count}")
 
             # Initialize components
             agent = AnalysisAgent(db=db, provider=None)
@@ -336,24 +386,28 @@ def test_full_pipeline():
                 print("⚠ WARNING: Analysis agent not enabled - skipping full pipeline test")
                 return None  # Skip test
 
-            sandbox = ContainerSandbox(db_path=db_path, timeout=30)
+            sandbox = ContainerSandbox(db_path=str(db_path), timeout=30)
             print(f"✓ Initialized components (agent provider: {agent.provider})")
 
             # Test query
-            query = "Create a scatter plot of volume vs surface area and show statistics"
+            query = "Create a scatter plot of volume vs surface area for mitochondria and show statistics"
             print(f"\n  Query: '{query}'")
 
-            # Generate code
+            # Generate code with timing
+            print("\n  [TIMING] Code Generation...")
+            code_gen_start = time_module.time()
             code_result = agent.generate_analysis_code(query)
+            code_gen_time = time_module.time() - code_gen_start
 
             if "error" in code_result:
                 print(f"✗ FAILED: Code generation error: {code_result['error']}")
                 return False
 
-            print(f"✓ Generated code ({len(code_result['code'])} chars)")
+            print(f"✓ Generated code ({len(code_result['code'])} chars) in {code_gen_time:.3f}s")
 
             # Execute code
-            session_id = "test_pipeline_1"
+            print("\n  [TIMING] Code Execution...")
+            session_id = "test_pipeline_real"
             exec_result = sandbox.execute(
                 code=code_result["code"],
                 session_id=session_id
@@ -367,7 +421,8 @@ def test_full_pipeline():
                 print(code_result['code'])
                 return False
 
-            print(f"✓ Execution successful ({exec_result['execution_time']:.2f}s)")
+            exec_time = exec_result['execution_time']
+            print(f"✓ Execution successful in {exec_time:.3f}s")
 
             # Check results
             if exec_result["plots"]:
@@ -376,18 +431,33 @@ def test_full_pipeline():
                 print("  Note: No plots generated (may be statistics-only query)")
 
             if exec_result["stdout"]:
-                print(f"✓ Statistics output:\n{exec_result['stdout']}")
+                # Show first few lines of output
+                stdout_lines = exec_result['stdout'].strip().split('\n')
+                preview = '\n'.join(stdout_lines[:10])
+                if len(stdout_lines) > 10:
+                    preview += f"\n  ... ({len(stdout_lines) - 10} more lines)"
+                print(f"✓ Statistics output:\n{preview}")
             else:
                 print("  Note: No statistics output")
 
             print(f"✓ Results saved to: {exec_result['output_path']}")
 
-            print("\n✅ TEST 3 PASSED: Full pipeline working correctly")
+            # Calculate and display timing breakdown
+            pipeline_total = time_module.time() - pipeline_start
+
+            print("\n  [TIMING SUMMARY]")
+            print(f"    Code Generation:  {code_gen_time:6.3f}s ({code_gen_time/pipeline_total*100:5.1f}%)")
+            print(f"    Code Execution:   {exec_time:6.3f}s ({exec_time/pipeline_total*100:5.1f}%)")
+            print(f"    Other (overhead): {pipeline_total - code_gen_time - exec_time:6.3f}s ({(pipeline_total - code_gen_time - exec_time)/pipeline_total*100:5.1f}%)")
+            print(f"    " + "-" * 40)
+            print(f"    TOTAL:            {pipeline_total:6.3f}s (100.0%)")
+
+            print("\n✅ TEST 3 PASSED: Full pipeline working correctly with real data")
             return True
 
         finally:
-            if os.path.exists(db_path):
-                os.unlink(db_path)
+            # Don't delete the real database!
+            pass
 
     except Exception as e:
         print(f"\n✗ TEST 3 FAILED with exception: {e}")
