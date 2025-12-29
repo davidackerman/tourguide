@@ -16,6 +16,7 @@ import base64
 from datetime import datetime
 
 from recording import RecordingManager, MovieCompiler
+from analysis_results import AnalysisResultsManager
 
 # Will be set by main.py
 ng_tracker = None
@@ -34,6 +35,7 @@ def create_app(tracker, query_agent=None) -> FastAPI:
     # Initialize analysis components
     analysis_agent = None
     container_sandbox = None
+    analysis_results_manager = None
 
     if query_agent:  # Only if database configured
         try:
@@ -49,6 +51,7 @@ def create_app(tracker, query_agent=None) -> FastAPI:
                 db_path=os.getenv("ORGANELLE_DB_PATH", "./organelle_data/organelles.db"),
                 timeout=int(os.getenv("CONTAINER_TIMEOUT", os.getenv("DOCKER_TIMEOUT", "60")))
             )
+            analysis_results_manager = AnalysisResultsManager()
             print("[ANALYSIS] Analysis mode initialized", flush=True)
         except Exception as e:
             print(f"[ANALYSIS] Failed to initialize analysis mode: {e}", flush=True)
@@ -57,6 +60,7 @@ def create_app(tracker, query_agent=None) -> FastAPI:
 
     app.state.analysis_agent = analysis_agent
     app.state.container_sandbox = container_sandbox
+    app.state.analysis_results_manager = analysis_results_manager
 
     # Track active WebSocket connections
     active_connections: Set[WebSocket] = set()
@@ -763,13 +767,13 @@ Provide narration:"""
 
     @app.post("/api/mode/set")
     async def set_mode(request: Request):
-        """Switch between explore and query modes."""
+        """Switch between explore, query, and analysis modes."""
         try:
             data = await request.json()
             mode = data.get("mode", "explore")
 
-            if mode not in ["explore", "query"]:
-                return {"status": "error", "message": "Invalid mode. Must be 'explore' or 'query'."}
+            if mode not in ["explore", "query", "analysis"]:
+                return {"status": "error", "message": "Invalid mode. Must be 'explore', 'query', or 'analysis'."}
 
             current_mode["mode"] = mode
             print(f"[MODE] Switched to {mode} mode", flush=True)
@@ -929,8 +933,10 @@ Provide narration:"""
 
             print(f"[ANALYSIS] Processing: {user_query}", flush=True)
 
-            # Generate code using AI
+            # Generate code using AI with timing
+            code_gen_start = time.time()
             code_result = app.state.analysis_agent.generate_analysis_code(user_query)
+            code_gen_time = time.time() - code_gen_start
 
             if "error" in code_result:
                 return {
@@ -945,6 +951,16 @@ Provide narration:"""
                 session_id=session_id
             )
 
+            # Save metadata with timing information
+            if hasattr(app.state, 'analysis_results_manager'):
+                app.state.analysis_results_manager.save_session_metadata(
+                    session_id=session_id,
+                    query=user_query,
+                    code=code_result["code"],
+                    execution_result=exec_result,
+                    code_generation_time=code_gen_time
+                )
+
             # Return comprehensive response
             return {
                 "status": "ok" if exec_result["status"] == "success" else "error",
@@ -955,7 +971,11 @@ Provide narration:"""
                 "plots": exec_result["plots"],
                 "output_path": exec_result["output_path"],
                 "session_id": session_id,
-                "execution_time": exec_result["execution_time"],
+                "timing": {
+                    "code_generation_seconds": round(code_gen_time, 3),
+                    "execution_seconds": round(exec_result["execution_time"], 3),
+                    "total_seconds": round(code_gen_time + exec_result["execution_time"], 3)
+                },
                 "execution_status": exec_result["status"],
                 "timestamp": time.time()
             }
@@ -992,6 +1012,75 @@ Provide narration:"""
         media_type = media_type_map.get(file_path.suffix, "application/octet-stream")
 
         return FileResponse(path=str(file_path), media_type=media_type)
+
+    @app.get("/api/analysis/sessions")
+    async def list_analysis_sessions(limit: int = 50):
+        """
+        List recent analysis sessions with summary information.
+
+        Args:
+            limit: Maximum number of sessions to return (default: 50)
+
+        Returns:
+            List of session summaries sorted by creation time (newest first)
+        """
+        if not hasattr(app.state, 'analysis_results_manager'):
+            return {
+                "status": "error",
+                "message": "Analysis results manager not available"
+            }
+
+        try:
+            sessions = app.state.analysis_results_manager.list_sessions(limit=limit)
+            return {
+                "status": "ok",
+                "sessions": sessions,
+                "total": len(sessions)
+            }
+        except Exception as e:
+            print(f"[ANALYSIS] Error listing sessions: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": f"Failed to list sessions: {str(e)}"
+            }
+
+    @app.get("/api/analysis/session/{session_id}")
+    async def get_analysis_session(session_id: str):
+        """
+        Get detailed information about a specific analysis session.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Full session metadata including code, results, plots, and timing
+        """
+        # Validate input
+        if not session_id.startswith("session_") or ".." in session_id or "/" in session_id:
+            return Response(status_code=400, content="Invalid session ID")
+
+        if not hasattr(app.state, 'analysis_results_manager'):
+            return {
+                "status": "error",
+                "message": "Analysis results manager not available"
+            }
+
+        try:
+            session_details = app.state.analysis_results_manager.get_session_details(session_id)
+
+            if session_details is None:
+                return Response(status_code=404, content="Session not found")
+
+            return {
+                "status": "ok",
+                "session": session_details
+            }
+        except Exception as e:
+            print(f"[ANALYSIS] Error getting session {session_id}: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": f"Failed to get session: {str(e)}"
+            }
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):

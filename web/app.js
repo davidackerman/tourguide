@@ -2460,7 +2460,7 @@ class NGLiveStream {
 
         // Metadata
         html += `<div class="analysis-meta">
-            ${data.execution_time.toFixed(2)}s |
+            ${data.timing?.total_seconds?.toFixed(2) || '0.00'}s |
             ${this.escapeHtml(data.output_path)}
         </div>`;
 
@@ -2479,7 +2479,7 @@ class NGLiveStream {
         const html = `
             <p><strong>Query:</strong> ${this.escapeHtml(data.query)}</p>
             <pre class="code-block">${this.escapeHtml(data.code)}</pre>
-            <div class="code-meta">Status: ${data.execution_status} | ${data.execution_time.toFixed(2)}s</div>
+            <div class="code-meta">Status: ${data.execution_status} | ${data.timing?.total_seconds?.toFixed(2) || '0.00'}s</div>
         `;
 
         codeEntry.innerHTML = html;
