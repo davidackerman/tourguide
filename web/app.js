@@ -38,6 +38,11 @@ class NGLiveStream {
         this.moviePollInterval = null;  // For tracking movie compilation polling
         this.isGeneratingNarrations = false;  // Flag to prevent concurrent narration generation
 
+        // State change detection for auto-capture
+        this.lastCapturedState = null;
+        this.positionThreshold = 10;  // Minimum position change (in voxels) to trigger capture
+        this.scaleThreshold = 0.1;  // Minimum scale change ratio to trigger capture
+
         // DOM elements
         this.ngIframe = document.getElementById('ng-iframe');
         this.stateInfo = document.getElementById('state-info');
@@ -165,6 +170,9 @@ class NGLiveStream {
 
             // Start or stop the capture interval based on the checkbox
             if (this.autoScreenshotEnabled) {
+                // Take a screenshot immediately first
+                this.capturePageScreenshot(false);  // Not manual, but immediate
+                // Then start the interval for subsequent captures
                 this.startScreenshotInterval();
             } else {
                 this.stopScreenshotInterval();
@@ -855,6 +863,118 @@ class NGLiveStream {
         }
     }
 
+    getCurrentNeuroglancerState() {
+        // Get current Neuroglancer state from iframe
+        try {
+            if (!this.ngIframe || !this.ngIframe.contentWindow) {
+                return null;
+            }
+
+            const iframeDoc = this.ngIframe.contentDocument || this.ngIframe.contentWindow.document;
+            if (!iframeDoc) {
+                return null;
+            }
+
+            // Try to get state from Neuroglancer viewer if available
+            const ngViewer = this.ngIframe.contentWindow.viewer;
+            if (!ngViewer) {
+                return null;
+            }
+
+            // Get the state JSON
+            const stateObj = ngViewer.state.toJSON();
+
+            // Extract relevant fields for comparison
+            return {
+                position: stateObj.position || null,
+                crossSectionScale: stateObj.crossSectionScale || null,
+                selectedSegments: this.getSelectedSegments(stateObj),
+                visibleLayers: this.getVisibleLayers(stateObj)
+            };
+        } catch (e) {
+            // If we can't access the viewer, return null
+            return null;
+        }
+    }
+
+    getSelectedSegments(stateObj) {
+        // Extract selected segments from all layers
+        const segments = [];
+        if (stateObj.layers) {
+            for (const layer of stateObj.layers) {
+                if (layer.segments) {
+                    segments.push(...layer.segments);
+                }
+            }
+        }
+        return segments.sort().join(',');
+    }
+
+    getVisibleLayers(stateObj) {
+        // Get list of visible layers
+        const visible = [];
+        if (stateObj.layers) {
+            for (const layer of stateObj.layers) {
+                if (layer.visible !== false) {  // Default is visible
+                    visible.push(layer.name);
+                }
+            }
+        }
+        return visible.sort().join(',');
+    }
+
+    hasStateChanged(prevState, currState) {
+        // If no previous state, this is the first capture
+        if (!prevState) {
+            return true;
+        }
+
+        // If we can't get current state, skip capture
+        if (!currState) {
+            return false;
+        }
+
+        // Check position change
+        if (prevState.position && currState.position) {
+            const distance = Math.sqrt(
+                prevState.position.reduce((sum, val, i) => {
+                    const diff = val - currState.position[i];
+                    return sum + diff * diff;
+                }, 0)
+            );
+
+            if (distance > this.positionThreshold) {
+                console.log(`[STATE] Position changed by ${distance.toFixed(1)} voxels`);
+                return true;
+            }
+        }
+
+        // Check scale change
+        if (prevState.crossSectionScale !== null && currState.crossSectionScale !== null) {
+            const scaleRatio = Math.abs(currState.crossSectionScale - prevState.crossSectionScale) /
+                              (prevState.crossSectionScale + 1e-10);
+
+            if (scaleRatio > this.scaleThreshold) {
+                console.log(`[STATE] Scale changed by ${(scaleRatio * 100).toFixed(1)}%`);
+                return true;
+            }
+        }
+
+        // Check selected segments change
+        if (prevState.selectedSegments !== currState.selectedSegments) {
+            console.log(`[STATE] Selected segments changed`);
+            return true;
+        }
+
+        // Check visible layers change
+        if (prevState.visibleLayers !== currState.visibleLayers) {
+            console.log(`[STATE] Visible layers changed`);
+            return true;
+        }
+
+        return false;
+    }
+
     capturePageScreenshot(forceCapture = false) {
         try {
             // Skip screenshot capture in query mode (screenshots only needed for AI narration in explore mode)
@@ -865,6 +985,17 @@ class NGLiveStream {
             // Skip if auto-capture is disabled and not forced
             if (!this.autoScreenshotEnabled && !forceCapture) {
                 return;
+            }
+
+            // For auto-capture (not manual), check if state has changed
+            if (!forceCapture) {
+                const currentState = this.getCurrentNeuroglancerState();
+                if (!this.hasStateChanged(this.lastCapturedState, currentState)) {
+                    // State hasn't changed meaningfully, skip capture
+                    return;
+                }
+                // Update last captured state
+                this.lastCapturedState = currentState;
             }
 
             // Create a canvas the size of the Neuroglancer viewer area
