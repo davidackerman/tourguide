@@ -1,6 +1,6 @@
-# Neuroglancer Live Stream
+# Neuroglancer Tourguide
 
-A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, with AI narration and movie recording capabilities powered by Gemini, Claude, or local Ollama.
+A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, featuring AI narration, natural language querying of organelle data, interactive plotting and analysis, and movie recording capabilities powered by Gemini, Claude, or local Ollama.
 
 ## Features
 
