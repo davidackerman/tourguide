@@ -1,0 +1,163 @@
+import type { LLMBackend } from "./llm.js";
+import type { DatasetDB } from "./db.js";
+import type { DatasetDescriptor } from "./descriptor.js";
+import type { Viewer } from "./viewer.js";
+import { runAgent, type AgentTraceItem } from "./agent.js";
+
+export interface QueryUIContext {
+  getDB: () => DatasetDB | null;
+  getDescriptor: () => DatasetDescriptor | null;
+  getBackend: () => LLMBackend;
+  viewer: Viewer;
+}
+
+export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): void {
+  container.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "query-box";
+  box.innerHTML = `
+    <form class="query-form">
+      <input
+        type="text"
+        class="query-input"
+        placeholder="Ask: 'largest mito' or 'plot mito volumes'"
+        autocomplete="off"
+      />
+      <button class="btn-primary" type="submit">Ask</button>
+    </form>
+    <div class="query-status" data-status></div>
+    <div class="query-answer" data-answer></div>
+    <div class="plot-output" data-plot hidden></div>
+    <details class="query-details" data-details hidden>
+      <summary>Show agent trace</summary>
+      <div class="agent-trace" data-trace></div>
+    </details>
+  `;
+  container.appendChild(box);
+
+  const form = box.querySelector<HTMLFormElement>(".query-form")!;
+  const input = box.querySelector<HTMLInputElement>(".query-input")!;
+  const button = box.querySelector<HTMLButtonElement>("button[type=submit]")!;
+  const statusEl = box.querySelector<HTMLDivElement>("[data-status]")!;
+  const answerEl = box.querySelector<HTMLDivElement>("[data-answer]")!;
+  const plotEl = box.querySelector<HTMLDivElement>("[data-plot]")!;
+  const detailsEl = box.querySelector<HTMLDetailsElement>("[data-details]")!;
+  const traceEl = box.querySelector<HTMLDivElement>("[data-trace]")!;
+
+  const setStatus = (msg: string, kind: "" | "err" | "ok" | "pending" = ""): void => {
+    statusEl.textContent = msg;
+    statusEl.className = `query-status ${kind}`;
+  };
+
+  const appendTrace = (item: AgentTraceItem): void => {
+    detailsEl.hidden = false;
+    const row = document.createElement("div");
+    row.className = "agent-trace-item";
+    const argStr = Object.keys(item.args ?? {}).length ? truncate(JSON.stringify(item.args), 220) : "";
+    const safeArgs = argStr ? `<div class="agent-trace-args">${escapeHtml(argStr)}</div>` : "";
+    let resultLine = "";
+    if (item.error) {
+      resultLine = `<div class="agent-trace-result agent-trace-error">${escapeHtml(item.error)}</div>`;
+    } else if (item.result !== undefined) {
+      const r = truncate(typeof item.result === "string" ? item.result : JSON.stringify(item.result), 320);
+      resultLine = `<div class="agent-trace-result">${escapeHtml(r)}</div>`;
+    }
+    row.innerHTML = `<span class="agent-trace-tool">${escapeHtml(item.tool)}</span>${safeArgs}${resultLine}`;
+    traceEl.appendChild(row);
+    traceEl.scrollTop = traceEl.scrollHeight;
+  };
+
+  const renderPlot = (
+    pngDataUrl: string,
+    code: string,
+    title?: string,
+    explanation?: string,
+  ): void => {
+    plotEl.hidden = false;
+    plotEl.innerHTML = "";
+    if (title) {
+      const h = document.createElement("h3");
+      h.className = "plot-title";
+      h.textContent = title;
+      plotEl.appendChild(h);
+    }
+    const img = document.createElement("img");
+    img.src = pngDataUrl;
+    img.className = "plot-image";
+    plotEl.appendChild(img);
+    if (explanation) {
+      const p = document.createElement("p");
+      p.className = "plot-explanation";
+      p.textContent = explanation;
+      plotEl.appendChild(p);
+    }
+    void code;
+  };
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const question = input.value.trim();
+    if (!question) return;
+    const db = ctx.getDB();
+    if (!db) {
+      setStatus("Load a dataset with organelle CSVs first.", "err");
+      return;
+    }
+    const backend = ctx.getBackend();
+    if (!backend.isReady()) {
+      setStatus("No AI configured. Click Settings to add a key or enable WebLLM.", "err");
+      return;
+    }
+    button.disabled = true;
+    setStatus("Thinking…", "pending");
+    answerEl.textContent = "";
+    plotEl.hidden = true;
+    traceEl.innerHTML = "";
+    detailsEl.hidden = true;
+    let answeredOrFlew = false;
+    try {
+      await runAgent(question, {
+        db,
+        descriptor: ctx.getDescriptor(),
+        viewer: ctx.viewer,
+        backend,
+        callbacks: {
+          onTrace: (t) => appendTrace(t),
+          onProgress: (m) => setStatus(m, "pending"),
+          onAnswer: (text) => {
+            answerEl.textContent = text;
+            answeredOrFlew = true;
+          },
+          onPlot: (png, code, title, explanation) => {
+            renderPlot(png, code, title, explanation);
+            answeredOrFlew = true;
+          },
+          onFly: (_pos, layer, id) => {
+            setStatus(`Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
+            answeredOrFlew = true;
+          },
+        },
+      });
+      if (!answeredOrFlew) {
+        setStatus("Agent finished without delivering an answer.", "");
+      }
+    } catch (err) {
+      setStatus((err as Error).message, "err");
+      console.error(err);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}

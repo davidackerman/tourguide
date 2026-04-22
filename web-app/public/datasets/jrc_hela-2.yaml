@@ -1,0 +1,41 @@
+name: jrc_hela-2
+display_name: HeLa Cell 2
+description: |
+  HeLa-2 FIB-SEM volume with seven organelle segmentations, hosted on the
+  public janelia-cosem-datasets S3 bucket. Voxel size 4 nm isotropic.
+voxel_size_nm: [4, 4, 4]
+initial_position: [12000, 1600, 8342]
+projection_orientation: [0, 0, 0, 1]
+
+layers:
+  - name: fibsem-uint8
+    type: image
+    source: zarr://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.zarr/recon-1/em/fibsem-uint8/
+  - name: endo_seg
+    type: segmentation
+    organelle_class: endosome
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/endo_seg
+  - name: er_seg
+    type: segmentation
+    organelle_class: endoplasmic_reticulum
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/er_seg
+  - name: golgi_seg
+    type: segmentation
+    organelle_class: golgi
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/golgi_seg
+  - name: mito_seg
+    type: segmentation
+    organelle_class: mitochondria
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/mito_seg
+  - name: nucleus_seg
+    type: segmentation
+    organelle_class: nucleus
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/nucleus_seg
+  - name: pm_seg
+    type: segmentation
+    organelle_class: plasma_membrane
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/pm_seg
+  - name: vesicle_seg
+    type: segmentation
+    organelle_class: vesicle
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/vesicle_seg

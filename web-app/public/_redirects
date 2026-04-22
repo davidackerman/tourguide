@@ -1,0 +1,3 @@
+# Single-page-app fallback: any unmatched path goes to index.html.
+# Static assets (anything with a dot, like .json/.yaml/.csv/.wasm) pass through.
+/*    /index.html    200
