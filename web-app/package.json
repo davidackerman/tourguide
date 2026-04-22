@@ -9,8 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.82",
     "@types/papaparse": "^5.5.2",
     "js-yaml": "^4.1.0",
+    "neuroglancer": "^2.41.2",
     "papaparse": "^5.5.3",
     "sql.js": "^1.14.1"
   },

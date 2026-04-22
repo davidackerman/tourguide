@@ -7,6 +7,7 @@ import {
 } from "./loader.js";
 import type { DatasetDescriptor, LayerType } from "./descriptor.js";
 import { detectSourceMetadata } from "./detect.js";
+import { isFsAccessSupported, pickLocalFolder, buildLocalSourceUrl } from "./local_folder.js";
 
 type LoaderResult = (descriptor: DatasetDescriptor) => void;
 
@@ -21,6 +22,7 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
       </header>
       <div class="modal-tabs" role="tablist">
         <button class="modal-tab active" data-tab="form" role="tab">Paste URLs</button>
+        <button class="modal-tab" data-tab="folder" role="tab">Local folder</button>
         <button class="modal-tab" data-tab="yaml" role="tab">YAML</button>
         <button class="modal-tab" data-tab="server" role="tab">Local server</button>
       </div>
@@ -53,6 +55,15 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
           <div class="form-actions">
             <button class="btn-primary" data-action="load-form">Load</button>
           </div>
+        </section>
+        <section class="modal-pane" data-pane="folder">
+          <p class="hint">Pick a folder from your computer. Tourguide reads files directly via the File System Access API — nothing uploads anywhere, nothing leaves your machine. Works in Chrome / Edge / Brave (Chromium-based browsers).</p>
+          <div class="folder-pick-row">
+            <button class="btn-primary" data-action="pick-folder">Open folder…</button>
+            <span class="folder-pick-status" data-folder-status></span>
+          </div>
+          <div class="folder-detected" data-folder-detected hidden></div>
+          <p class="hint warn folder-unsupported" data-folder-unsupported hidden>This browser doesn't support the File System Access API. Use Chrome / Edge, or use the <strong>Local server</strong> tab.</p>
         </section>
         <section class="modal-pane" data-pane="yaml">
           <p class="hint">Paste a complete dataset descriptor in YAML.</p>
@@ -239,5 +250,95 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
   overlay.querySelector("[data-action='load-form']")!.addEventListener("click", submitForm);
   overlay.querySelector("[data-action='load-yaml']")!.addEventListener("click", submitYaml);
 
+  // ---- Local folder tab ----
+  const folderUnsupported = overlay.querySelector<HTMLElement>("[data-folder-unsupported]")!;
+  const folderStatusEl = overlay.querySelector<HTMLSpanElement>("[data-folder-status]")!;
+  const folderDetectedEl = overlay.querySelector<HTMLDivElement>("[data-folder-detected]")!;
+  const pickBtn = overlay.querySelector<HTMLButtonElement>("[data-action='pick-folder']")!;
+  if (!isFsAccessSupported()) {
+    folderUnsupported.hidden = false;
+    pickBtn.disabled = true;
+  }
+  pickBtn.addEventListener("click", async () => {
+    pickBtn.disabled = true;
+    folderStatusEl.textContent = "Waiting for folder pick…";
+    folderStatusEl.className = "folder-pick-status pending";
+    folderDetectedEl.hidden = true;
+    try {
+      const reg = await pickLocalFolder();
+      folderStatusEl.textContent = `Picked: ${reg.name}`;
+      folderStatusEl.className = "folder-pick-status ok";
+      // Probe the picked folder for common formats and offer one-click loading.
+      folderDetectedEl.hidden = false;
+      folderDetectedEl.innerHTML = `
+        <p class="hint">Trying to detect a dataset under <code>${escapeHtml(reg.name)}</code>…</p>
+      `;
+      const candidates: Array<{ kind: "zarr" | "n5" | "precomputed"; subpath: string }> = [];
+      // Probe a few common entry-points: root and one level deep.
+      for (const sub of ["", "data.zarr/", "data.n5/", "image/"]) {
+        for (const kind of ["zarr", "n5", "precomputed"] as const) {
+          candidates.push({ kind, subpath: sub });
+        }
+      }
+      const found: Array<{ kind: string; subpath: string; meta: { voxel_size_nm: [number, number, number]; via: string; center_nm?: [number, number, number] } }> = [];
+      for (const c of candidates) {
+        try {
+          const url = buildLocalSourceUrl(reg, c.kind, c.subpath);
+          const meta = await detectSourceMetadata(url);
+          found.push({ kind: c.kind, subpath: c.subpath, meta });
+          break; // first hit wins
+        } catch {
+          // try next
+        }
+      }
+      if (found.length === 0) {
+        folderDetectedEl.innerHTML = `
+          <p class="hint">No top-level dataset detected. Switch to the <strong>Paste URLs</strong> tab and use a source URL like:</p>
+          <pre class="code-block">zarr://${reg.baseUrl}path/to/your.zarr/</pre>
+        `;
+      } else {
+        const f = found[0];
+        const sub = f.subpath ? f.subpath : "(root)";
+        const url = buildLocalSourceUrl(reg, f.kind as "zarr" | "n5" | "precomputed", f.subpath);
+        folderDetectedEl.innerHTML = `
+          <p class="hint">✓ Detected ${f.kind} at <code>${escapeHtml(sub)}</code> — voxel ${f.meta.voxel_size_nm.join(" × ")} nm.</p>
+          <button class="btn-primary" data-action="load-detected">Load this dataset</button>
+        `;
+        folderDetectedEl.querySelector("[data-action='load-detected']")!.addEventListener("click", () => {
+          try {
+            const layers = [{
+              name: f.subpath ? f.subpath.replace(/[/.]+$/, "") : "image",
+              type: "image" as const,
+              source: url,
+            }];
+            const descriptor = buildDescriptorFromInput({
+              name: reg.name,
+              voxel_size_nm: f.meta.voxel_size_nm,
+              initial_position: f.meta.center_nm,
+              layers,
+            });
+            onLoad(descriptor);
+            close();
+          } catch (err) {
+            setError((err as Error).message);
+          }
+        });
+      }
+    } catch (err) {
+      folderStatusEl.textContent = (err as Error).message;
+      folderStatusEl.className = "folder-pick-status err";
+    } finally {
+      pickBtn.disabled = false;
+    }
+  });
+
   document.body.appendChild(overlay);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

@@ -1,12 +1,12 @@
 import type { DatasetDB, IngestedTable, QueryResult } from "./db.js";
 import { runQuery } from "./db.js";
-import type { Viewer } from "./viewer.js";
+import type { BundledViewer } from "./bundled_viewer.js";
 
 const NAVIGABLE_NUMERIC_COLUMNS = ["volume", "surface_area"];
 
 export interface BrowserContext {
   db: DatasetDB;
-  viewer: Viewer;
+  viewer: BundledViewer;
 }
 
 interface SortState {
@@ -188,7 +188,7 @@ function formatCell(v: unknown): string {
   return String(v);
 }
 
-function flyFromRow(viewer: Viewer, table: IngestedTable, row: Record<string, unknown>): void {
+function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<string, unknown>): void {
   const px = row.position_x;
   const py = row.position_y;
   const pz = row.position_z;

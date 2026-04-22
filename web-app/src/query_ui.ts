@@ -1,14 +1,14 @@
 import type { LLMBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import type { DatasetDescriptor } from "./descriptor.js";
-import type { Viewer } from "./viewer.js";
+import type { BundledViewer } from "./bundled_viewer.js";
 import { runAgent, type AgentTraceItem } from "./agent.js";
 
 export interface QueryUIContext {
   getDB: () => DatasetDB | null;
   getDescriptor: () => DatasetDescriptor | null;
   getBackend: () => LLMBackend;
-  viewer: Viewer;
+  viewer: BundledViewer;
 }
 
 export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): void {

@@ -2,7 +2,7 @@ import type { LLMBackend, LLMMessage } from "./llm.js";
 import { WebLLMBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import { runQuery } from "./db.js";
-import type { Viewer } from "./viewer.js";
+import type { BundledViewer } from "./bundled_viewer.js";
 import { loadPyodide } from "./plot.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 
@@ -24,7 +24,7 @@ export interface AgentCallbacks {
 export interface AgentContext {
   db: DatasetDB | null;
   descriptor: DatasetDescriptor | null;
-  viewer: Viewer;
+  viewer: BundledViewer;
   backend: LLMBackend;
   callbacks: AgentCallbacks;
 }

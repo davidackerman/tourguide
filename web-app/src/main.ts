@@ -1,4 +1,4 @@
-import { Viewer } from "./viewer.js";
+import { BundledViewer } from "./bundled_viewer.js";
 import { fetchCatalog, fetchDescriptor } from "./catalog.js";
 import { openLoaderDialog } from "./loader_ui.js";
 import { ingestDescriptor, type DatasetDB } from "./db.js";
@@ -7,9 +7,19 @@ import { renderQueryBox } from "./query_ui.js";
 import { openSettingsDialog } from "./settings_ui.js";
 import { loadSettings, backendFromSettings, type LLMBackend } from "./llm.js";
 import { decodeState, buildPermalinkURL } from "./permalink.js";
+import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
 const CATALOG_URL = "./catalog.json";
+
+// Register the service worker early (best-effort) so /local-data/ URLs are
+// servable as soon as the user picks a folder. Skipped silently in browsers
+// that don't support either the SW or FS Access API.
+if (isFsAccessSupported()) {
+  void registerServiceWorker().catch((err) => {
+    console.warn("Service worker registration failed:", err);
+  });
+}
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -25,8 +35,8 @@ const backendIndicator = $<HTMLSpanElement>("backend-indicator");
 const meta = $<HTMLDivElement>("dataset-meta");
 const browserHost = $<HTMLDivElement>("browser-host");
 const queryHost = $<HTMLDivElement>("query-host");
-const ngFrame = $<HTMLIFrameElement>("ng-frame");
-const viewer = new Viewer(ngFrame);
+const ngHost = $<HTMLDivElement>("ng-host");
+const viewer = new BundledViewer(ngHost);
 
 let entries: CatalogEntry[] = [];
 let currentDB: DatasetDB | null = null;
