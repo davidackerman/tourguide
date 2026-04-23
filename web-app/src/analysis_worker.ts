@@ -576,7 +576,8 @@ function numpyToZarrDtype(dtype: string): string | null {
     int64: "<i8",
     float32: "<f4",
     float64: "<f8",
-    bool: "|b1",
+    // bool intentionally omitted — Python side coerces to uint8 so NG can
+    // render it. Letting it through as |b1 makes NG fail to parse the zarr.
   };
   return map[dtype] ?? null;
 }
@@ -960,6 +961,14 @@ if _TG_NEW_LAYER is not None:
     if _axes is None: _axes = ["z", "y", "x"][-arr.ndim:]
     if _spacing is None: _spacing = [1.0] * arr.ndim
     if _offsets is None: _offsets = [0.0] * arr.ndim
+    # Neuroglancer doesn't handle bool zarrs — and float16 / float64 are also
+    # awkward for its layer renderers. Coerce to NG-friendly dtypes.
+    if arr.dtype == np.bool_:
+        arr = arr.astype(np.uint8)
+    elif arr.dtype == np.float64:
+        arr = arr.astype(np.float32)
+    elif arr.dtype == np.float16:
+        arr = arr.astype(np.float32)
     arr_c = np.ascontiguousarray(arr)
     _tg_new_layer_spec = {
         "bytes": arr_c.tobytes(order="C"),
