@@ -6,9 +6,11 @@ import type {
   OutgoingMsg,
   InspectResultMsg,
   AnalyzeResultMsg,
+  CustomResultMsg,
   ProgressMsg,
   ErrorMsg,
   AnalyzeRequest,
+  CustomRequest,
 } from "./analysis_worker.js";
 
 export interface LayerScaleInfo {
@@ -32,6 +34,14 @@ export interface AnalysisResult {
   shape: number[];
   voxelNm: [number, number, number];
   labelCount: number;
+}
+
+export interface CustomAnalysisResult {
+  table?: { name: string; columns: string[]; rows: (number | string | null)[][] };
+  plotPngDataUrl?: string;
+  fly?: { pos: [number, number, number]; segmentId?: string; layer?: string };
+  narration?: string;
+  stdout?: string;
 }
 
 export type ProgressCallback = (message: string, phase?: string) => void;
@@ -101,6 +111,18 @@ export class AnalysisClient {
         this.pending = null;
         return;
       }
+      case "customResult": {
+        const m = msg as CustomResultMsg;
+        this.pending.resolve({
+          table: m.table,
+          plotPngDataUrl: m.plotPngDataUrl,
+          fly: m.fly,
+          narration: m.narration,
+          stdout: m.stdout,
+        } as CustomAnalysisResult);
+        this.pending = null;
+        return;
+      }
       case "error": {
         const m = msg as ErrorMsg;
         this.pending.reject(new Error(m.message + (m.where ? ` (during ${m.where})` : "")));
@@ -152,6 +174,18 @@ export class AnalysisClient {
         alreadyLabeled: params.alreadyLabeled ?? true,
       };
       worker.postMessage(req);
+    });
+  }
+
+  async customAnalyze(
+    params: CustomRequest,
+    onProgress?: ProgressCallback,
+  ): Promise<CustomAnalysisResult> {
+    const worker = this.ensureWorker();
+    if (this.pending) throw new Error("Analysis already in progress");
+    return new Promise<CustomAnalysisResult>((resolve, reject) => {
+      this.pending = { resolve, reject, onProgress };
+      worker.postMessage(params);
     });
   }
 

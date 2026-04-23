@@ -47,8 +47,25 @@ export interface AnalyzeRequest {
   connectivity: 1 | 2 | 3; // for scipy.ndimage.label
   alreadyLabeled: boolean; // skip label() if values are already unique ids
 }
+export interface CustomRequest {
+  kind: "custom";
+  // Each layer gets read at the given scale and bound to a Python variable.
+  layers: {
+    varName: string; // identifier-safe Python name, e.g. "mito"
+    url: string;
+    scalePath: string;
+    axesOrder: string[];
+    voxelNm: [number, number, number];
+    offsetNm: [number, number, number];
+  }[];
+  // DataFrames already in the sql.js DB that should be exposed to Python as
+  // df_<organelle_class> (already the make_plot convention).
+  tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
+  code: string; // user- or LLM-written Python
+  timeoutMs: number;
+}
 export interface CancelRequest { kind: "cancel" }
-export type IncomingMsg = InspectRequest | AnalyzeRequest | CancelRequest;
+export type IncomingMsg = InspectRequest | AnalyzeRequest | CustomRequest | CancelRequest;
 
 // Messages — out
 export interface ProgressMsg { kind: "progress"; message: string; phase?: string }
@@ -74,8 +91,26 @@ export interface AnalyzeResultMsg {
   voxelNm: [number, number, number];
   labelCount: number;
 }
-export interface ErrorMsg { kind: "error"; message: string; where?: string }
-export type OutgoingMsg = ProgressMsg | InspectResultMsg | AnalyzeResultMsg | ErrorMsg;
+export interface CustomResultMsg {
+  kind: "customResult";
+  // Optional output channels — any may be absent. The UI wires them through.
+  table?: {
+    name: string;
+    columns: string[];
+    rows: (number | string | null)[][];
+  };
+  plotPngDataUrl?: string;
+  fly?: { pos: [number, number, number]; segmentId?: string; layer?: string };
+  narration?: string;
+  stdout?: string;
+}
+export interface ErrorMsg { kind: "error"; message: string; where?: string; traceback?: string }
+export type OutgoingMsg =
+  | ProgressMsg
+  | InspectResultMsg
+  | AnalyzeResultMsg
+  | CustomResultMsg
+  | ErrorMsg;
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -479,6 +514,236 @@ _tg_nlabels = int(n_labels)
   });
 }
 
+// --- Custom (arbitrary Python) mode -----------------------------------------
+// Loads N zarr layers as numpy arrays, exposes them + the sql.js DataFrames
+// + numpy/scipy/skimage/pandas/matplotlib to user- or LLM-written Python,
+// then returns any of: table, plot, fly-to, narration.
+
+async function readLayerArray(layerSpec: CustomRequest["layers"][number]): Promise<{
+  data: ArrayBufferView;
+  shape: number[];
+  spacing: number[];
+  offsets: number[];
+  axes: string[];
+}> {
+  const store = new zarr.FetchStore(layerSpec.url);
+  const root = await zarr.open(store);
+  const arr = layerSpec.scalePath
+    ? await zarr.open(root.kind === "group" ? root.resolve(layerSpec.scalePath) : root, { kind: "array" })
+    : (root.kind === "array" ? root : await zarr.open(root.resolve(""), { kind: "array" }));
+  const fullShape = arr.shape;
+  const axisNames = layerSpec.axesOrder;
+  let sel: (null | number)[] = axisNames.map((a) =>
+    a === "x" || a === "y" || a === "z" ? null : 0,
+  );
+  if (sel.length !== fullShape.length) {
+    sel = fullShape.map((_, i) => (i >= fullShape.length - 3 ? null : 0));
+  }
+  const surviving = axisNames.filter((_a, i) => sel[i] === null);
+  const axesForPython = surviving.length === fullShape.filter((_, i) => sel[i] === null).length
+    ? surviving
+    : ["z", "y", "x"].slice(-fullShape.filter((_, i) => sel[i] === null).length);
+  const axisScaleMap: Record<string, number> = {
+    x: layerSpec.voxelNm[0], y: layerSpec.voxelNm[1], z: layerSpec.voxelNm[2],
+  };
+  const axisOffsetMap: Record<string, number> = {
+    x: layerSpec.offsetNm[0], y: layerSpec.offsetNm[1], z: layerSpec.offsetNm[2],
+  };
+  const spacing = axesForPython.map((a) => axisScaleMap[a] ?? 1);
+  const offsets = axesForPython.map((a) => axisOffsetMap[a] ?? 0);
+  const result = await zarr.get(arr, sel as any);
+  return {
+    data: (result as any).data,
+    shape: (result as any).shape,
+    spacing,
+    offsets,
+    axes: axesForPython,
+  };
+}
+
+async function handleCustom(msg: CustomRequest): Promise<void> {
+  progress("Loading layers …", "load");
+  const loaded: Record<string, Awaited<ReturnType<typeof readLayerArray>>> = {};
+  for (const layer of msg.layers) {
+    progress(`Reading ${layer.varName} (${layer.scalePath || "root"}) …`, "read");
+    loaded[layer.varName] = await readLayerArray(layer);
+    if (cancelled) return;
+  }
+
+  progress("Loading Python runtime …", "python");
+  const py = await ensurePyodide();
+  // Custom mode needs pandas + matplotlib in addition to the regionprops set.
+  await py.loadPackage(["pandas", "matplotlib"]);
+  if (cancelled) return;
+
+  // Hand each array to Python with metadata.
+  py.globals.set("_tg_layer_names", msg.layers.map((l) => l.varName));
+  py.globals.set("_tg_tables_json", JSON.stringify(msg.tables));
+  for (const [name, info] of Object.entries(loaded)) {
+    py.globals.set(`__tg_${name}_data`, info.data);
+    py.globals.set(`__tg_${name}_shape`, info.shape);
+    py.globals.set(`__tg_${name}_spacing`, info.spacing);
+    py.globals.set(`__tg_${name}_offsets`, info.offsets);
+    py.globals.set(`__tg_${name}_axes`, info.axes);
+  }
+  py.globals.set("_tg_user_code", msg.code);
+  py.globals.set("_tg_timeout_ms", msg.timeoutMs);
+
+  progress("Running custom analysis …", "compute");
+  const setupCode = `
+import numpy as np, pandas as pd, json, io, base64, traceback
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from scipy import ndimage as ndi
+try:
+    import skimage
+    from skimage import measure as _sk_measure
+except Exception:
+    _sk_measure = None
+
+# Reconstruct each loaded layer as a dict {array, spacing, offsets, axes}.
+layers = {}
+for _name in list(_tg_layer_names):
+    _arr = np.asarray(globals()[f'__tg_{_name}_data']).reshape(
+        tuple(int(x) for x in list(globals()[f'__tg_{_name}_shape']))
+    )
+    layers[_name] = {
+        "array": _arr,
+        "spacing": tuple(float(x) for x in list(globals()[f'__tg_{_name}_spacing'])),
+        "offsets": tuple(float(x) for x in list(globals()[f'__tg_{_name}_offsets'])),
+        "axes":    [str(a) for a in list(globals()[f'__tg_{_name}_axes'])],
+    }
+    # Expose the bare array under its var name (the common case).
+    globals()[_name] = _arr
+
+# Build DataFrames from sql.js tables sent across the wire.
+_tg_tables = json.loads(_tg_tables_json)
+for _t in _tg_tables:
+    _df = pd.DataFrame(_t["rows"], columns=_t["columns"])
+    globals()[f"df_{_t['name']}"] = _df
+
+# Output channels. User code sets any of these.
+_TG_TABLE = None       # pandas DataFrame
+_TG_TABLE_NAME = None  # display name for the table
+_TG_PLOT = None        # True if you called plt.<stuff>; we'll grab the current figure
+_TG_FLY = None         # {"pos": [x,y,z], "segment_id": str, "layer": str}
+_TG_NARRATION = None   # string
+_TG_STDOUT = []        # captured via print()
+
+# Capture print() output without touching sys.stdout (workers don't have one).
+import builtins as _b
+_real_print = _b.print
+def _captured_print(*args, **kwargs):
+    _TG_STDOUT.append(" ".join(str(a) for a in args))
+    _real_print(*args, **kwargs)
+_b.print = _captured_print
+`;
+  await py.runPythonAsync(setupCode);
+
+  // Run user code inside a try/except so we get tracebacks, not opaque errors.
+  const userCode = msg.code;
+  const runCode = `
+_tg_err = None
+try:
+${indent(userCode, 4)}
+except Exception as e:
+    _tg_err = traceback.format_exc()
+`;
+  try {
+    await py.runPythonAsync(runCode);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Python failed: ${message}`);
+  }
+  const pyErr = py.globals.get("_tg_err") as string | null;
+  if (pyErr) {
+    emit({ kind: "error", message: String(pyErr).split("\n").slice(-3).join("\n"), where: "custom", traceback: String(pyErr) });
+    return;
+  }
+
+  // Collect output channels.
+  const outMsg: CustomResultMsg = { kind: "customResult" };
+
+  // Table — convert a pandas DataFrame into {columns, rows}.
+  await py.runPythonAsync(`
+_tg_out_cols = None
+_tg_out_rows = None
+_tg_out_name = None
+if _TG_TABLE is not None:
+    _df = _TG_TABLE
+    if not isinstance(_df, pd.DataFrame):
+        _df = pd.DataFrame(_df)
+    _tg_out_cols = list(_df.columns)
+    _tg_out_rows = _df.where(pd.notnull(_df), None).values.tolist()
+    _tg_out_name = str(_TG_TABLE_NAME) if _TG_TABLE_NAME else "custom_result"
+`);
+  const tblCols = py.globals.get("_tg_out_cols");
+  if (tblCols) {
+    outMsg.table = {
+      name: String(py.globals.get("_tg_out_name")),
+      columns: (tblCols as any).toJs({ create_proxies: false }) as string[],
+      rows: (py.globals.get("_tg_out_rows") as any).toJs({ create_proxies: false }) as any[][],
+    };
+  }
+
+  // Plot — if user drew something, save the current figure as PNG.
+  await py.runPythonAsync(`
+_tg_out_png = None
+if plt.get_fignums() or _TG_PLOT is not None:
+    _buf = io.BytesIO()
+    plt.savefig(_buf, format="png", bbox_inches="tight", dpi=120)
+    plt.close("all")
+    _tg_out_png = base64.b64encode(_buf.getvalue()).decode("ascii")
+`);
+  const b64 = py.globals.get("_tg_out_png");
+  if (b64) outMsg.plotPngDataUrl = `data:image/png;base64,${b64}`;
+
+  // Fly target.
+  await py.runPythonAsync(`
+_tg_out_fly = None
+if _TG_FLY is not None:
+    _f = _TG_FLY
+    if isinstance(_f, dict):
+        _tg_out_fly = {"pos": [float(x) for x in list(_f.get("pos") or [])], "segment_id": str(_f.get("segment_id", "")) or None, "layer": str(_f.get("layer", "")) or None}
+`);
+  const flyPy = py.globals.get("_tg_out_fly");
+  if (flyPy) {
+    const f = (flyPy as any).toJs({ create_proxies: false, dict_converter: Object.fromEntries }) as {
+      pos: number[];
+      segment_id?: string;
+      layer?: string;
+    };
+    if (f.pos && f.pos.length >= 3) {
+      outMsg.fly = {
+        pos: [f.pos[0], f.pos[1], f.pos[2]],
+        segmentId: f.segment_id,
+        layer: f.layer,
+      };
+    }
+  }
+
+  // Narration + stdout.
+  const narr = py.globals.get("_TG_NARRATION");
+  if (narr) outMsg.narration = String(narr);
+  const stdoutPy = py.globals.get("_TG_STDOUT");
+  if (stdoutPy) {
+    const lines = (stdoutPy as any).toJs({ create_proxies: false }) as string[];
+    if (lines.length) outMsg.stdout = lines.join("\n");
+  }
+
+  emit(outMsg);
+}
+
+// Helper: indent a block of code by `n` spaces so it fits inside a try/except.
+function indent(code: string, n: number): string {
+  const pad = " ".repeat(n);
+  return code
+    .split("\n")
+    .map((l) => pad + l)
+    .join("\n");
+}
+
 self.addEventListener("message", (ev: MessageEvent<IncomingMsg>) => {
   const msg = ev.data;
   if (msg.kind === "cancel") {
@@ -486,7 +751,10 @@ self.addEventListener("message", (ev: MessageEvent<IncomingMsg>) => {
     return;
   }
   cancelled = false;
-  const handler = msg.kind === "inspect" ? handleInspect(msg) : handleAnalyze(msg);
+  const handler =
+    msg.kind === "inspect" ? handleInspect(msg) :
+    msg.kind === "analyze" ? handleAnalyze(msg) :
+    handleCustom(msg);
   handler.catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     emit({ kind: "error", message, where: msg.kind });
