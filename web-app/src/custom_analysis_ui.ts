@@ -13,6 +13,7 @@ import type { DatasetDB, IngestedTable } from "./db.js";
 import { loadSqlJs, runQuery } from "./db.js";
 import {
   AnalysisClient,
+  SAFE_INPUT_BYTES,
   type CustomAnalysisResult,
   type LayerInspection,
   isZarrSource,
@@ -181,17 +182,22 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       const insp = await client.inspect(url, d.voxel_size_nm);
       slot.inspection = insp;
       scaleSel.innerHTML = insp.scales
-        .map(
-          (s, i) =>
-            `<option value="${i}">${escapeHtml(s.path || "(root)")} — ${s.shape.join("×")} @ ${s.voxelNm
-              .map((v) => v.toFixed(1))
-              .join("×")} nm</option>`,
-        )
+        .map((s, i) => {
+          const risk =
+            s.approxBytes > 3 * SAFE_INPUT_BYTES
+              ? " [⚠ beyond WASM cap]"
+              : s.approxBytes > SAFE_INPUT_BYTES
+                ? " [⚠ may OOM]"
+                : "";
+          return `<option value="${i}">${escapeHtml(s.path || "(root)")} — ${s.shape.join("×")} @ ${s.voxelNm
+            .map((v) => v.toFixed(1))
+            .join("×")} nm (${humanBytes(s.approxBytes)})${risk}</option>`;
+        })
         .join("");
-      // Default: coarsest scale under the safety cap.
+      // Default: coarsest scale under the safe byte budget.
       let defaultIdx = insp.scales.length - 1;
       for (let i = insp.scales.length - 1; i >= 0; i--) {
-        if (insp.scales[i].shape.reduce((a, b) => a * b, 1) <= 32_000_000) {
+        if (insp.scales[i].approxBytes <= SAFE_INPUT_BYTES) {
           defaultIdx = i;
           break;
         }
@@ -382,6 +388,19 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         showError(`Layer '${slot.varName}' is still inspecting.`);
         return;
       }
+    }
+    // Warn when the sum of selected input sizes pushes us near the WASM cap.
+    const totalBytes = slots.reduce(
+      (n, s) => n + (s.inspection!.scales[s.scaleIdx!].approxBytes || 0),
+      0,
+    );
+    if (totalBytes > SAFE_INPUT_BYTES) {
+      const gb = (totalBytes / 1024 ** 3).toFixed(2);
+      const ok = confirm(
+        `Selected layers total ${gb} GB. Pyodide's WASM ceiling is ~4 GB and ` +
+          `intermediates typically 2–4× the input size. Analysis may OOM. Continue?`,
+      );
+      if (!ok) return;
     }
     runBtn.disabled = true;
     showProgress("Starting …");
@@ -599,6 +618,13 @@ function insertRows(
   } finally {
     stmt.free();
   }
+}
+
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 function escapeHtml(s: string): string {

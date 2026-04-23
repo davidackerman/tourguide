@@ -9,7 +9,7 @@ import type { DatasetDB, IngestedTable } from "./db.js";
 import { loadSqlJs } from "./db.js";
 import {
   AnalysisClient,
-  DEFAULT_MAX_VOXELS,
+  SAFE_INPUT_BYTES,
   type AnalysisResult,
   type LayerInspection,
   type LayerScaleInfo,
@@ -168,29 +168,50 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     const tb = tbl.querySelector("tbody")!;
     insp.scales.forEach((s, i) => {
       const tr = document.createElement("tr");
-      const tooBig = productOf(s.shape) > DEFAULT_MAX_VOXELS;
+      // Warn but don't disable. Pyodide's WASM32 ceiling is ~4 GB, so above
+      // roughly 1.5 GB the analysis *may* OOM — but a pure threshold op on
+      // uint8 at 3 GB can still succeed, so let the user decide.
+      const bytes = s.approxBytes;
+      const risky = bytes > SAFE_INPUT_BYTES;
+      const veryRisky = bytes > 3 * SAFE_INPUT_BYTES; // ~4.5 GB → guaranteed OOM
       const offStr = s.offsetNm.map((v) => format1(v)).join(", ");
       tr.innerHTML = `
-        <td><input type="radio" name="scale" value="${i}" ${tooBig ? "disabled" : ""}></td>
+        <td><input type="radio" name="scale" value="${i}" ${veryRisky ? "disabled" : ""}></td>
         <td><code>${escapeHtml(s.path || "(root)")}</code></td>
         <td><code>${s.shape.join("×")}</code></td>
         <td><code>${s.voxelNm.map((v) => format1(v)).join(" × ")}</code></td>
         <td><code>${offStr}</code></td>
-        <td>${humanSize(s.approxBytes)}</td>
-        <td>${tooBig ? `<span class="chip chip-warn">too large</span>` : ""}</td>
+        <td>${humanSize(bytes)}</td>
+        <td>${
+          veryRisky
+            ? `<span class="chip chip-bad" title="Exceeds WASM memory limit — will OOM">beyond WASM cap</span>`
+            : risky
+              ? `<span class="chip chip-warn" title="May OOM: single-layer analysis typically needs ~6–10× the input size">may OOM</span>`
+              : ""
+        }</td>
       `;
       tb.appendChild(tr);
     });
     scalesHost.appendChild(tbl);
 
-    // Auto-pick the coarsest that fits.
-    const coarsestFitIdx = [...insp.scales].reverse().findIndex((s) => productOf(s.shape) <= DEFAULT_MAX_VOXELS);
+    // Auto-pick the coarsest scale that fits the safe budget.
+    const coarsestFitIdx = [...insp.scales].reverse().findIndex((s) => s.approxBytes <= SAFE_INPUT_BYTES);
     if (coarsestFitIdx !== -1) {
       const realIdx = insp.scales.length - 1 - coarsestFitIdx;
       selectedScaleIdx = realIdx;
       const input = tbl.querySelector<HTMLInputElement>(`input[value="${realIdx}"]`);
       if (input) input.checked = true;
       runBtn.disabled = false;
+    } else {
+      // No scale fits the safe budget — pre-select the smallest that's not
+      // beyond WASM cap, still usable if the user accepts the OOM risk.
+      const idx = insp.scales.findIndex((s) => s.approxBytes <= 3 * SAFE_INPUT_BYTES);
+      if (idx !== -1) {
+        selectedScaleIdx = idx;
+        const input = tbl.querySelector<HTMLInputElement>(`input[value="${idx}"]`);
+        if (input) input.checked = true;
+        runBtn.disabled = false;
+      }
     }
 
     tbl.querySelectorAll<HTMLInputElement>('input[type="radio"]').forEach((inp) => {
@@ -225,13 +246,25 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   runBtn.addEventListener("click", async () => {
     if (!currentInspection || selectedScaleIdx == null) return;
     clearError();
+    const scale: LayerScaleInfo = currentInspection.scales[selectedScaleIdx];
+    if (scale.approxBytes > SAFE_INPUT_BYTES) {
+      const gb = (scale.approxBytes / 1024 ** 3).toFixed(2);
+      const ok = confirm(
+        `This scale is ${gb} GB. Pyodide has a ~4 GB WASM memory ceiling and ` +
+          `scipy typically allocates 6–10× the input size. Analysis may OOM. Continue?`,
+      );
+      if (!ok) return;
+    }
     runBtn.disabled = true;
     inspectStatus.textContent = "";
-    const scale: LayerScaleInfo = currentInspection.scales[selectedScaleIdx];
     const axesOrder = currentInspection.axes.map((a) => a.name);
     showProgress("Starting …");
     try {
       const url = normalizeZarrUrl(currentLayer.source);
+      // Hard safety cap = 3 GB worth of voxels for this dtype — beyond that
+      // the allocation itself fails synchronously. We let the UI confirm
+      // anything between SAFE_INPUT_BYTES and that cap.
+      const maxVoxels = Math.floor((3 * SAFE_INPUT_BYTES) / Math.max(1, scale.approxBytes / productOf(scale.shape)));
       const result = await client.analyze(
         {
           url,
@@ -239,7 +272,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           axesOrder,
           voxelNm: scale.voxelNm,
           offsetNm: scale.offsetNm,
-          maxVoxels: DEFAULT_MAX_VOXELS,
+          maxVoxels,
           alreadyLabeled: labeledSel.value === "true",
         },
         (message) => showProgress(message),

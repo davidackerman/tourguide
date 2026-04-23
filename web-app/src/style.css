@@ -829,6 +829,11 @@ button {
   border-color: #6f5418;
 }
 
+.chip-bad {
+  color: #ff7a7a;
+  border-color: #7a3a3a;
+}
+
 .analysis-progress {
   margin-top: 0.75rem;
   font-size: 0.82rem;

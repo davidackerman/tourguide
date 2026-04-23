@@ -221,7 +221,15 @@ export class AnalysisClient {
   }
 }
 
-// Heuristic: what's a "safe" voxel cap in the browser? uint64 at 64M voxels
-// is 512MB, too much. uint32 at 64M is 256MB — also painful. Let's cap at
-// 32M voxels; skimage will comfortably handle that in <5s on typical laptops.
-export const DEFAULT_MAX_VOXELS = 32_000_000;
+// Byte-based budget instead of a flat voxel cap. Pyodide runs on WASM32 with
+// a 4 GB hard ceiling; scipy.ndimage.label + regionprops typically allocate
+// ~6–10× the input size in intermediates. A 1.5 GB input leaves enough
+// headroom for the common single-layer case to finish without OOM.
+// Over this threshold we *warn* rather than block — the user can opt in if
+// they know their analysis is light (e.g. just a threshold or sum).
+export const SAFE_INPUT_BYTES = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
+
+// Kept for backward compatibility; convert to a voxel count at uint8 just
+// so any remaining callers don't break, but the UI should prefer the byte
+// budget above.
+export const DEFAULT_MAX_VOXELS = Math.floor(SAFE_INPUT_BYTES);
