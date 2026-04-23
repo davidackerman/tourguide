@@ -35,6 +35,7 @@ export function renderStructuredBrowser(container: HTMLElement, ctx: BrowserCont
         <select data-class></select>
       </label>
       <span class="browser-count" data-count></span>
+      <button class="btn-secondary btn-download" data-download title="Download current table as CSV">⬇ CSV</button>
     </div>
     <div class="browser-table-wrap">
       <table class="browser-table">
@@ -59,6 +60,7 @@ export function renderStructuredBrowser(container: HTMLElement, ctx: BrowserCont
   const pageInfo = wrap.querySelector<HTMLSpanElement>("[data-page-info]")!;
   const prevBtn = wrap.querySelector<HTMLButtonElement>("[data-prev]")!;
   const nextBtn = wrap.querySelector<HTMLButtonElement>("[data-next]")!;
+  const downloadBtn = wrap.querySelector<HTMLButtonElement>("[data-download]")!;
 
   ctx.db.tables.forEach((t) => {
     const opt = document.createElement("option");
@@ -158,6 +160,19 @@ export function renderStructuredBrowser(container: HTMLElement, ctx: BrowserCont
   };
 
   select.addEventListener("change", () => switchTable(select.value));
+  downloadBtn.addEventListener("click", () => {
+    const colList = currentTable.columns.map((c) => `"${c}"`).join(", ");
+    const res = runQuery(ctx.db.db, `SELECT ${colList} FROM "${currentTable.table_name}";`);
+    const csv = toCsv(res.columns, res.rows);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${currentTable.table_name}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
   prevBtn.addEventListener("click", () => {
     if (page > 0) {
       page--;
@@ -186,6 +201,17 @@ function formatCell(v: unknown): string {
     return v.toLocaleString(undefined, { maximumFractionDigits: 3 });
   }
   return String(v);
+}
+
+function toCsv(columns: string[], rows: unknown[][]): string {
+  const esc = (v: unknown): string => {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [columns.map(esc).join(",")];
+  for (const row of rows) lines.push(row.map(esc).join(","));
+  return lines.join("\n");
 }
 
 function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<string, unknown>): void {

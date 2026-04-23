@@ -9,6 +9,10 @@
 
 const DB_NAME = "tourguide-handles";
 const STORE = "handles";
+// Second IndexedDB for analysis-generated (synthesized) zarrs. The analysis
+// worker writes zarr v2 files here; this SW serves them under /synthesized/.
+const SYNTH_DB = "tourguide-synthesized";
+const SYNTH_STORE = "files";
 
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -32,6 +36,24 @@ async function getHandle(id) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly").objectStore(STORE).get(id);
     tx.onsuccess = () => resolve(tx.result || null);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function openSynthDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(SYNTH_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(SYNTH_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getSynth(key) {
+  const db = await openSynthDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SYNTH_STORE, "readonly").objectStore(SYNTH_STORE).get(key);
+    tx.onsuccess = () => resolve(tx.result == null ? null : tx.result);
     tx.onerror = () => reject(tx.error);
   });
 }
@@ -103,10 +125,60 @@ async function serveFile(fileHandle, req) {
   });
 }
 
+async function serveSynthesized(id, path, request) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+  const key = `${id}/${path}`;
+  const value = await getSynth(key);
+  if (value == null) {
+    return new Response(`Not found: ${path}`, { status: 404, headers: corsHeaders() });
+  }
+  const blob = value instanceof Uint8Array ? new Blob([value]) : new Blob([value]);
+  const size = blob.size;
+  const range = request.headers.get("Range");
+  if (range) {
+    const m = /^bytes=(\d+)-(\d*)$/.exec(range);
+    if (m) {
+      const start = parseInt(m[1], 10);
+      const end = m[2] ? parseInt(m[2], 10) : size - 1;
+      const slice = blob.slice(start, end + 1);
+      return new Response(slice, {
+        status: 206,
+        headers: corsHeaders({
+          "Content-Range": `bytes ${start}-${end}/${size}`,
+          "Content-Length": String(end - start + 1),
+          "Accept-Ranges": "bytes",
+          "Content-Type": "application/octet-stream",
+        }),
+      });
+    }
+  }
+  return new Response(blob, {
+    status: 200,
+    headers: corsHeaders({
+      "Content-Length": String(size),
+      "Accept-Ranges": "bytes",
+      "Content-Type": "application/octet-stream",
+    }),
+  });
+}
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  // Match /local-data/<id>/<path...> (allow no trailing path for OPTIONS).
+
+  // /synthesized/<id>/<path...> — zarr files written by the analysis worker
+  // into the tourguide-synthesized IndexedDB store.
+  const mSynth = /^\/synthesized\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
+  if (mSynth) {
+    const id = decodeURIComponent(mSynth[1]);
+    const path = mSynth[2] ? decodeURIComponent(mSynth[2]) : "";
+    event.respondWith(serveSynthesized(id, path, event.request));
+    return;
+  }
+
+  // /local-data/<id>/<path...> — files under a FileSystemDirectoryHandle.
   const m = /^\/local-data\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
   if (!m) return;
   const id = decodeURIComponent(m[1]);
@@ -134,8 +206,6 @@ self.addEventListener("fetch", (event) => {
         if (resolved.kind === "file") {
           return serveFile(resolved.handle, event.request);
         }
-        // Directory listing — Neuroglancer doesn't really need this, but it
-        // helps for casual browser navigation.
         const entries = [];
         for await (const [name, h] of resolved.handle.entries()) {
           entries.push({ name, kind: h.kind });

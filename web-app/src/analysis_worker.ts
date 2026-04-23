@@ -103,6 +103,25 @@ export interface CustomResultMsg {
   fly?: { pos: [number, number, number]; segmentId?: string; layer?: string };
   narration?: string;
   stdout?: string;
+  annotations?: {
+    layerName: string;
+    points: { pos: [number, number, number]; id?: string; description?: string }[];
+  };
+  highlight?: { layer: string; ids: string[] };
+  addSourceLayer?: {
+    source: string;
+    name: string;
+    type: "image" | "segmentation";
+  };
+  newLayer?: {
+    // Worker already wrote the synthesized zarr to IndexedDB under this id.
+    // Main thread just has to add a layer pointing at the relative URL.
+    synthesizedId: string;
+    name: string;
+    type: "image" | "segmentation";
+    shape: number[];
+    dtype: string;
+  };
 }
 export interface ErrorMsg { kind: "error"; message: string; where?: string; traceback?: string }
 export type OutgoingMsg =
@@ -514,6 +533,109 @@ _tg_nlabels = int(n_labels)
   });
 }
 
+// --- Synthesized-zarr IndexedDB writer --------------------------------------
+// Python can emit a numpy array as `_TG_NEW_LAYER`. We encode it as an
+// uncompressed zarr v2 with a single chunk and a minimal OME-NGFF .zattrs,
+// and stash every file as a record in IndexedDB. The service worker then
+// serves requests under `/synthesized/<id>/<path>` from the same store, so
+// Neuroglancer can consume it with a plain `zarr://<origin>/synthesized/<id>/`
+// URL — exact same mechanism as local-folder loading, just a different route.
+
+const SYNTH_DB = "tourguide-synthesized";
+const SYNTH_STORE = "files";
+
+function openSynthDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(SYNTH_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(SYNTH_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function synthPut(key: string, value: Uint8Array | string): Promise<void> {
+  const db = await openSynthDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(SYNTH_STORE, "readwrite");
+    tx.objectStore(SYNTH_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+function numpyToZarrDtype(dtype: string): string | null {
+  const map: Record<string, string> = {
+    uint8: "|u1",
+    int8: "|i1",
+    uint16: "<u2",
+    int16: "<i2",
+    uint32: "<u4",
+    int32: "<i4",
+    uint64: "<u8",
+    int64: "<i8",
+    float32: "<f4",
+    float64: "<f8",
+    bool: "|b1",
+  };
+  return map[dtype] ?? null;
+}
+
+async function writeSynthesizedZarr(params: {
+  id: string;
+  bytes: Uint8Array;
+  shape: number[];
+  dtype: string; // numpy dtype name, e.g. "uint8"
+  axes: string[]; // e.g. ["z", "y", "x"] (array-axis order)
+  spacing: number[]; // nm per voxel, array-axis order
+  offsets: number[]; // nm origin, array-axis order
+}): Promise<void> {
+  const zarrDtype = numpyToZarrDtype(params.dtype);
+  if (!zarrDtype) throw new Error(`Unsupported dtype for synthesized layer: ${params.dtype}`);
+
+  const zgroup = JSON.stringify({ zarr_format: 2 });
+  const zattrs = JSON.stringify({
+    multiscales: [
+      {
+        version: "0.4",
+        name: params.id,
+        axes: params.axes.map((n) => ({ name: n, type: "space", unit: "nanometer" })),
+        datasets: [
+          {
+            path: "s0",
+            coordinateTransformations: [
+              { type: "scale", scale: params.spacing },
+              { type: "translation", translation: params.offsets },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const zarray = JSON.stringify({
+    zarr_format: 2,
+    shape: params.shape,
+    // Single-chunk layout — simplest, and our synthesized volumes are small
+    // (bounded by the same 32M-voxel analysis cap, so ~tens of MB max).
+    chunks: params.shape,
+    dtype: zarrDtype,
+    compressor: null,
+    fill_value: 0,
+    order: "C",
+    filters: null,
+    dimension_separator: "/",
+  });
+
+  const prefix = `${params.id}/`;
+  const enc = new TextEncoder();
+  await synthPut(`${prefix}.zgroup`, enc.encode(zgroup));
+  await synthPut(`${prefix}.zattrs`, enc.encode(zattrs));
+  await synthPut(`${prefix}s0/.zarray`, enc.encode(zarray));
+  // Single chunk at origin — with dimension_separator="/" that's `s0/0/0/0...`.
+  const chunkKey = `${prefix}s0/${params.shape.map(() => "0").join("/")}`;
+  await synthPut(chunkKey, params.bytes);
+}
+
 // --- Custom (arbitrary Python) mode -----------------------------------------
 // Loads N zarr layers as numpy arrays, exposes them + the sql.js DataFrames
 // + numpy/scipy/skimage/pandas/matplotlib to user- or LLM-written Python,
@@ -630,6 +752,12 @@ _TG_PLOT = None        # True if you called plt.<stuff>; we'll grab the current 
 _TG_FLY = None         # {"pos": [x,y,z], "segment_id": str, "layer": str}
 _TG_NARRATION = None   # string
 _TG_STDOUT = []        # captured via print()
+_TG_ANNOTATIONS = None # {"layer_name": "my_points", "points": [{"pos": [x,y,z], "id": "...", "description": "..."}, ...]}
+_TG_HIGHLIGHT = None   # {"layer": "<existing ng layer name>", "ids": [1, 2, 3]}
+_TG_ADD_SOURCE_LAYER = None  # {"source": "zarr://...", "name": "new_layer", "type": "segmentation"|"image"}
+_TG_NEW_LAYER = None   # {"array": ndarray, "name": "...", "type": "segmentation"|"image",
+                       #  "spacing": (sz,sy,sx) nm, "offsets": (oz,oy,ox) nm, "axes": ["z","y","x"]}
+                       # - spacing/offsets/axes default to the first selected input layer's values.
 
 # Capture print() output without touching sys.stdout (workers don't have one).
 import builtins as _b
@@ -730,6 +858,154 @@ if _TG_FLY is not None:
   if (stdoutPy) {
     const lines = (stdoutPy as any).toJs({ create_proxies: false }) as string[];
     if (lines.length) outMsg.stdout = lines.join("\n");
+  }
+
+  // Annotations.
+  await py.runPythonAsync(`
+_tg_out_ann = None
+if _TG_ANNOTATIONS is not None:
+    a = _TG_ANNOTATIONS
+    if isinstance(a, list):
+        a = {"layer_name": "custom_points", "points": a}
+    pts = []
+    for p in (a.get("points") or []):
+        if isinstance(p, (list, tuple)):
+            pts.append({"pos": [float(p[0]), float(p[1]), float(p[2])], "id": None, "description": None})
+        else:
+            pos = p.get("pos")
+            pts.append({
+                "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
+                "id": (str(p.get("id")) if p.get("id") is not None else None),
+                "description": (str(p.get("description")) if p.get("description") is not None else None),
+            })
+    _tg_out_ann = {"layer_name": str(a.get("layer_name", "custom_points")), "points": pts}
+`);
+  const annPy = py.globals.get("_tg_out_ann");
+  if (annPy) {
+    const a = (annPy as any).toJs({
+      create_proxies: false,
+      dict_converter: Object.fromEntries,
+    }) as {
+      layer_name: string;
+      points: { pos: number[]; id?: string | null; description?: string | null }[];
+    };
+    outMsg.annotations = {
+      layerName: a.layer_name,
+      points: a.points.map((p) => ({
+        pos: [p.pos[0], p.pos[1], p.pos[2]] as [number, number, number],
+        id: p.id ?? undefined,
+        description: p.description ?? undefined,
+      })),
+    };
+  }
+
+  // Highlight segments.
+  await py.runPythonAsync(`
+_tg_out_hi = None
+if _TG_HIGHLIGHT is not None:
+    h = _TG_HIGHLIGHT
+    _tg_out_hi = {"layer": str(h.get("layer", "")), "ids": [str(i) for i in (h.get("ids") or [])]}
+`);
+  const hiPy = py.globals.get("_tg_out_hi");
+  if (hiPy) {
+    const h = (hiPy as any).toJs({
+      create_proxies: false,
+      dict_converter: Object.fromEntries,
+    }) as { layer: string; ids: string[] };
+    if (h.layer) outMsg.highlight = { layer: h.layer, ids: h.ids };
+  }
+
+  // Add a layer from an existing (remote) zarr/n5/precomputed source.
+  await py.runPythonAsync(`
+_tg_out_src = None
+if _TG_ADD_SOURCE_LAYER is not None:
+    s = _TG_ADD_SOURCE_LAYER
+    _tg_out_src = {"source": str(s.get("source", "")), "name": str(s.get("name", "new_layer")), "type": str(s.get("type", "image"))}
+`);
+  const srcPy = py.globals.get("_tg_out_src");
+  if (srcPy) {
+    const s = (srcPy as any).toJs({
+      create_proxies: false,
+      dict_converter: Object.fromEntries,
+    }) as { source: string; name: string; type: string };
+    if (s.source) {
+      outMsg.addSourceLayer = {
+        source: s.source,
+        name: s.name,
+        type: s.type === "segmentation" ? "segmentation" : "image",
+      };
+    }
+  }
+
+  // New layer backed by a synthesized zarr (the interesting one).
+  // We extract bytes + shape + dtype from Python, then write a minimal
+  // OME-NGFF zarr v2 into IndexedDB for the service worker to serve.
+  await py.runPythonAsync(`
+_tg_new_layer_spec = None
+if _TG_NEW_LAYER is not None:
+    nl = _TG_NEW_LAYER
+    arr = nl.get("array") if isinstance(nl, dict) else None
+    if arr is None:
+        raise ValueError("_TG_NEW_LAYER must be a dict with an 'array' key")
+    if not isinstance(arr, np.ndarray):
+        arr = np.asarray(arr)
+    # Default spacing/offsets/axes to the first selected input layer's values.
+    _default = layers[list(_tg_layer_names)[0]] if list(_tg_layer_names) else None
+    _spacing = nl.get("spacing")
+    if _spacing is None and _default is not None: _spacing = _default["spacing"]
+    _offsets = nl.get("offsets")
+    if _offsets is None and _default is not None: _offsets = _default["offsets"]
+    _axes = nl.get("axes")
+    if _axes is None and _default is not None: _axes = _default["axes"]
+    if _axes is None: _axes = ["z", "y", "x"][-arr.ndim:]
+    if _spacing is None: _spacing = [1.0] * arr.ndim
+    if _offsets is None: _offsets = [0.0] * arr.ndim
+    arr_c = np.ascontiguousarray(arr)
+    _tg_new_layer_spec = {
+        "bytes": arr_c.tobytes(order="C"),
+        "shape": list(arr_c.shape),
+        "dtype": str(arr_c.dtype),
+        "axes": list(_axes),
+        "spacing": [float(x) for x in list(_spacing)],
+        "offsets": [float(x) for x in list(_offsets)],
+        "name": str(nl.get("name", "new_layer")),
+        "type": str(nl.get("type", "segmentation")),
+    }
+`);
+  const newLayerPy = py.globals.get("_tg_new_layer_spec");
+  if (newLayerPy) {
+    const spec = (newLayerPy as any).toJs({
+      create_proxies: false,
+      dict_converter: Object.fromEntries,
+    }) as {
+      bytes: Uint8Array;
+      shape: number[];
+      dtype: string;
+      axes: string[];
+      spacing: number[];
+      offsets: number[];
+      name: string;
+      type: string;
+    };
+    const id = `${spec.name.replace(/[^a-zA-Z0-9_-]/g, "_")}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    await writeSynthesizedZarr({
+      id,
+      bytes: spec.bytes,
+      shape: spec.shape,
+      dtype: spec.dtype,
+      axes: spec.axes,
+      spacing: spec.spacing,
+      offsets: spec.offsets,
+    });
+    outMsg.newLayer = {
+      synthesizedId: id,
+      name: spec.name,
+      type: spec.type === "image" ? "image" : "segmentation",
+      shape: spec.shape,
+      dtype: spec.dtype,
+    };
   }
 
   emit(outMsg);

@@ -42,6 +42,19 @@ export interface CustomAnalysisResult {
   fly?: { pos: [number, number, number]; segmentId?: string; layer?: string };
   narration?: string;
   stdout?: string;
+  annotations?: {
+    layerName: string;
+    points: { pos: [number, number, number]; id?: string; description?: string }[];
+  };
+  highlight?: { layer: string; ids: string[] };
+  addSourceLayer?: { source: string; name: string; type: "image" | "segmentation" };
+  newLayer?: {
+    synthesizedId: string;
+    name: string;
+    type: "image" | "segmentation";
+    shape: number[];
+    dtype: string;
+  };
 }
 
 export type ProgressCallback = (message: string, phase?: string) => void;
@@ -119,6 +132,10 @@ export class AnalysisClient {
           fly: m.fly,
           narration: m.narration,
           stdout: m.stdout,
+          annotations: m.annotations,
+          highlight: m.highlight,
+          addSourceLayer: m.addSourceLayer,
+          newLayer: m.newLayer,
         } as CustomAnalysisResult);
         this.pending = null;
         return;

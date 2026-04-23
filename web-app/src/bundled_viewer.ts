@@ -150,4 +150,69 @@ export class BundledViewer {
   getNgViewer(): NgViewer | null {
     return this.viewer;
   }
+
+  // Merge extra layers into the current NG state (cheapest way to add a
+  // new layer without rebuilding the whole viewer). Takes a partial layer
+  // spec object.
+  addLayerFromSpec(layer: Record<string, unknown>): void {
+    const viewer = this.ensureViewer();
+    const state = viewer.state.toJSON() as { layers?: Array<Record<string, unknown>> } & Record<string, unknown>;
+    const layers = Array.isArray(state.layers) ? state.layers.slice() : [];
+    // Drop any existing layer with the same name, so re-running an analysis
+    // replaces rather than duplicates.
+    const name = String(layer.name ?? "");
+    const filtered = name ? layers.filter((l) => String(l.name) !== name) : layers;
+    filtered.push(layer);
+    state.layers = filtered;
+    viewer.state.restoreState(state);
+    this.currentState = state as any;
+  }
+
+  // Add an in-memory annotation layer with a list of points (world nm).
+  addAnnotationLayer(layerName: string, points: { pos: [number, number, number]; id?: string; description?: string }[]): void {
+    const annotations = points.map((p, i) => ({
+      type: "point",
+      id: p.id ?? `ann-${Date.now()}-${i}`,
+      point: p.pos,
+      description: p.description ?? "",
+    }));
+    this.addLayerFromSpec({
+      type: "annotation",
+      name: layerName,
+      source: "local://annotations",
+      annotations,
+    });
+  }
+
+  // Change which segment IDs are visible in a segmentation layer.
+  highlightSegments(layerName: string, ids: string[]): void {
+    const viewer = this.ensureViewer();
+    const layer = viewer.layerManager.getLayerByName(layerName);
+    if (!layer) {
+      console.warn(`[viewer] highlightSegments: layer '${layerName}' not found`);
+      return;
+    }
+    const ul = layer.layer as unknown as {
+      displayState?: {
+        segmentationGroupState?: {
+          value?: {
+            visibleSegments?: { add: (id: bigint) => void; clear: () => void };
+          };
+        };
+      };
+    };
+    const visible = ul.displayState?.segmentationGroupState?.value?.visibleSegments;
+    if (!visible) {
+      console.warn(`[viewer] highlightSegments: layer '${layerName}' has no visible-segments state`);
+      return;
+    }
+    visible.clear();
+    for (const id of ids) {
+      try {
+        visible.add(BigInt(id));
+      } catch {
+        /* skip invalid ids */
+      }
+    }
+  }
 }

@@ -253,9 +253,19 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
     return out;
   };
 
+  // Keep a handle to the most recent code so download buttons work.
+  let lastCode: string = "";
+
   const renderOutput = (result: CustomAnalysisResult): void => {
     outEl.hidden = false;
     outEl.innerHTML = "";
+
+    const makeDownloadRow = (): HTMLDivElement => {
+      const row = document.createElement("div");
+      row.className = "custom-download-row";
+      return row;
+    };
+
     if (result.narration) {
       const p = document.createElement("p");
       p.className = "custom-narration";
@@ -273,6 +283,9 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       img.src = result.plotPngDataUrl;
       img.className = "custom-plot";
       outEl.appendChild(img);
+      const row = makeDownloadRow();
+      row.appendChild(makeDownloadButton("Download plot (PNG)", () => downloadDataUrl(result.plotPngDataUrl!, "plot.png")));
+      outEl.appendChild(row);
     }
     if (result.table) {
       const info = document.createElement("p");
@@ -281,6 +294,14 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       outEl.appendChild(info);
       void ingestCustomTable(cb, result.table);
       cb.onTableAdded();
+      const row = makeDownloadRow();
+      const tbl = result.table;
+      row.appendChild(
+        makeDownloadButton(`Download ${tbl.name}.csv`, () => {
+          downloadBlob(new Blob([tableToCsv(tbl)], { type: "text/csv" }), `${tbl.name}.csv`);
+        }),
+      );
+      outEl.appendChild(row);
     }
     if (result.fly) {
       cb.viewer.flyTo(result.fly.pos, result.fly.segmentId, result.fly.layer);
@@ -289,6 +310,63 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       info.textContent = `Flew viewer to (${result.fly.pos.map((n) => n.toFixed(0)).join(", ")}) nm.`;
       outEl.appendChild(info);
     }
+    if (result.annotations) {
+      cb.viewer.addAnnotationLayer(result.annotations.layerName, result.annotations.points);
+      const info = document.createElement("p");
+      info.className = "hint";
+      info.textContent = `Added annotation layer '${result.annotations.layerName}' with ${result.annotations.points.length} points.`;
+      outEl.appendChild(info);
+    }
+    if (result.highlight) {
+      cb.viewer.highlightSegments(result.highlight.layer, result.highlight.ids);
+      const info = document.createElement("p");
+      info.className = "hint";
+      info.textContent = `Highlighted ${result.highlight.ids.length} segments in '${result.highlight.layer}'.`;
+      outEl.appendChild(info);
+    }
+    if (result.addSourceLayer) {
+      cb.viewer.addLayerFromSpec({
+        type: result.addSourceLayer.type,
+        name: result.addSourceLayer.name,
+        source: result.addSourceLayer.source,
+      });
+      const info = document.createElement("p");
+      info.className = "hint";
+      info.textContent = `Added layer '${result.addSourceLayer.name}' from ${result.addSourceLayer.source}.`;
+      outEl.appendChild(info);
+    }
+    if (result.newLayer) {
+      const { synthesizedId, name, type } = result.newLayer;
+      // Build an origin-relative URL so NG + the SW can both resolve it.
+      const url = new URL(`synthesized/${synthesizedId}/`, window.location.href).toString();
+      cb.viewer.addLayerFromSpec({
+        type,
+        name,
+        source: `zarr://${url}`,
+      });
+      const info = document.createElement("p");
+      info.className = "hint";
+      info.textContent = `Added synthesized ${type} layer '${name}' (${result.newLayer.shape.join("×")} ${result.newLayer.dtype}).`;
+      outEl.appendChild(info);
+      const row = makeDownloadRow();
+      row.appendChild(
+        makeDownloadButton(`Download ${name}.zarr.zip`, () => downloadSynthesizedZarr(synthesizedId, name)),
+      );
+      outEl.appendChild(row);
+    }
+
+    // Script download — always available once we've run something.
+    const scriptRow = makeDownloadRow();
+    scriptRow.appendChild(
+      makeDownloadButton("Download .py script", () => {
+        const header = buildScriptHeader(slots);
+        downloadBlob(
+          new Blob([header + "\n" + lastCode + "\n"], { type: "text/x-python" }),
+          "analysis.py",
+        );
+      }),
+    );
+    outEl.appendChild(scriptRow);
   };
 
   runBtn.addEventListener("click", async () => {
@@ -298,6 +376,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       showError("Add at least one layer first.");
       return;
     }
+    lastCode = codeEl.value;
     for (const slot of slots) {
       if (!slot.inspection || slot.scaleIdx == null) {
         showError(`Layer '${slot.varName}' is still inspecting.`);
@@ -406,6 +485,10 @@ OUTPUT CONTRACT (set zero or more):
 - \`_TG_TABLE_NAME\`: string — name for the table.
 - \`_TG_FLY\`: dict \`{"pos": [x, y, z], "segment_id": "...", "layer": "..."}\` — world-nm position to fly the viewer to.
 - \`_TG_NARRATION\`: string — short human-readable summary shown under the output.
+- \`_TG_ANNOTATIONS\`: \`{"layer_name": "<name>", "points": [{"pos": [x,y,z], "id": "...", "description": "..."}, ...]}\` — creates an annotation layer in the viewer with point markers. Positions in world nm.
+- \`_TG_HIGHLIGHT\`: \`{"layer": "<existing NG layer name>", "ids": [1, 2, 3, ...]}\` — in a segmentation layer, show only these segment ids. Useful to focus attention on the objects your analysis selected.
+- \`_TG_ADD_SOURCE_LAYER\`: \`{"source": "zarr://...", "name": "new_layer", "type": "segmentation"|"image"}\` — add a pre-existing remote zarr/n5/precomputed source as a new layer.
+- \`_TG_NEW_LAYER\`: \`{"array": <numpy ndarray>, "name": "<name>", "type": "segmentation"|"image", "spacing": [sz,sy,sx]?, "offsets": [oz,oy,ox]?, "axes": ["z","y","x"]?}\` — the array is encoded as a zarr and added as a new layer in the viewer. spacing/offsets/axes default to the first input layer's values. Use this for derived masks (e.g. a contact-site mask).
 - Any matplotlib figure you draw is auto-captured and shown as a PNG.
 
 RULES:
@@ -527,4 +610,215 @@ function escapeHtml(s: string): string {
 }
 function escapeAttr(s: string): string {
   return escapeHtml(s);
+}
+
+// --- Download helpers -------------------------------------------------------
+
+function makeDownloadButton(label: string, onClick: () => void | Promise<void>): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "btn-secondary btn-download";
+  btn.type = "button";
+  btn.textContent = `⬇ ${label}`;
+  btn.addEventListener("click", () => void onClick());
+  return btn;
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function downloadDataUrl(dataUrl: string, filename: string): void {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function tableToCsv(tbl: { columns: string[]; rows: (number | string | null)[][] }): string {
+  const esc = (v: unknown): string => {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [tbl.columns.map(esc).join(",")];
+  for (const row of tbl.rows) {
+    lines.push(row.map(esc).join(","));
+  }
+  return lines.join("\n");
+}
+
+function buildScriptHeader(
+  slots: { varName: string; layer: DatasetLayer; inspection?: LayerInspection; scaleIdx?: number }[],
+): string {
+  const parts = [
+    "# Tourguide custom analysis — extracted script",
+    "# Generated " + new Date().toISOString(),
+    "#",
+    "# Input layers (already loaded as numpy ndarrays in the tourguide worker):",
+  ];
+  for (const s of slots) {
+    const scale = s.inspection?.scales[s.scaleIdx ?? 0];
+    parts.push(
+      `#   ${s.varName}: ${s.layer.source} scale=${scale?.path ?? "?"} shape=${scale?.shape.join("×") ?? "?"} voxel_nm=${scale?.voxelNm.map((v) => v.toFixed(2)).join(",") ?? "?"} offset_nm=${scale?.offsetNm.map((v) => v.toFixed(0)).join(",") ?? "?"}`,
+    );
+  }
+  parts.push(
+    "#",
+    "# To rerun outside tourguide, load each layer (e.g. via zarr/ome-zarr-py or",
+    "# tensorstore), bind to the variable names above, then run the body below.",
+    "",
+  );
+  return parts.join("\n");
+}
+
+// Download the synthesized zarr as a ZIP. We read each file from the same
+// IndexedDB store the SW serves from, then assemble a minimal ZIP in-memory.
+async function downloadSynthesizedZarr(id: string, name: string): Promise<void> {
+  const prefix = `${id}/`;
+  const entries: { path: string; bytes: Uint8Array }[] = [];
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = indexedDB.open("tourguide-synthesized", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("files");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("files", "readonly");
+    const store = tx.objectStore("files");
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) {
+        resolve();
+        return;
+      }
+      const key = String(cur.key);
+      if (key.startsWith(prefix)) {
+        const v = cur.value;
+        const bytes = v instanceof Uint8Array ? v : new TextEncoder().encode(String(v));
+        entries.push({ path: key.slice(prefix.length), bytes });
+      }
+      cur.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  if (entries.length === 0) {
+    alert("Nothing to download — synthesized zarr is empty.");
+    return;
+  }
+  const zipBytes = buildZip(entries);
+  downloadBlob(
+    new Blob([zipBytes as BlobPart], { type: "application/zip" }),
+    `${name}.zarr.zip`,
+  );
+}
+
+// Minimal STORE-only (no compression) ZIP writer. Good enough for the small
+// synthesized zarrs we generate.
+function buildZip(entries: { path: string; bytes: Uint8Array }[]): Uint8Array {
+  const enc = new TextEncoder();
+  const fileRecords: Uint8Array[] = [];
+  const centralDir: Uint8Array[] = [];
+  let offset = 0;
+
+  const crcTable = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      }
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+  const crc32 = (data: Uint8Array): number => {
+    let c = 0xffffffff;
+    for (let i = 0; i < data.length; i++) {
+      c = crcTable[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  };
+
+  for (const e of entries) {
+    const nameBytes = enc.encode(e.path);
+    const crc = crc32(e.bytes);
+    const size = e.bytes.length;
+    // Local file header
+    const lfh = new Uint8Array(30 + nameBytes.length);
+    const dv = new DataView(lfh.buffer);
+    dv.setUint32(0, 0x04034b50, true); // signature
+    dv.setUint16(4, 20, true); // version
+    dv.setUint16(6, 0, true); // flags
+    dv.setUint16(8, 0, true); // method (0 = store)
+    dv.setUint16(10, 0, true); // mtime
+    dv.setUint16(12, 0, true); // mdate
+    dv.setUint32(14, crc, true);
+    dv.setUint32(18, size, true); // compressed
+    dv.setUint32(22, size, true); // uncompressed
+    dv.setUint16(26, nameBytes.length, true);
+    dv.setUint16(28, 0, true); // extra len
+    lfh.set(nameBytes, 30);
+    fileRecords.push(lfh, e.bytes);
+    // Central directory entry
+    const cdh = new Uint8Array(46 + nameBytes.length);
+    const cdv = new DataView(cdh.buffer);
+    cdv.setUint32(0, 0x02014b50, true);
+    cdv.setUint16(4, 20, true);
+    cdv.setUint16(6, 20, true);
+    cdv.setUint16(8, 0, true);
+    cdv.setUint16(10, 0, true);
+    cdv.setUint16(12, 0, true);
+    cdv.setUint16(14, 0, true);
+    cdv.setUint32(16, crc, true);
+    cdv.setUint32(20, size, true);
+    cdv.setUint32(24, size, true);
+    cdv.setUint16(28, nameBytes.length, true);
+    cdv.setUint16(30, 0, true);
+    cdv.setUint16(32, 0, true);
+    cdv.setUint16(34, 0, true);
+    cdv.setUint16(36, 0, true);
+    cdv.setUint32(38, 0, true);
+    cdv.setUint32(42, offset, true);
+    cdh.set(nameBytes, 46);
+    centralDir.push(cdh);
+    offset += lfh.length + e.bytes.length;
+  }
+  const cdSize = centralDir.reduce((n, b) => n + b.length, 0);
+  const cdOffset = offset;
+  const eocd = new Uint8Array(22);
+  const edv = new DataView(eocd.buffer);
+  edv.setUint32(0, 0x06054b50, true);
+  edv.setUint16(4, 0, true);
+  edv.setUint16(6, 0, true);
+  edv.setUint16(8, entries.length, true);
+  edv.setUint16(10, entries.length, true);
+  edv.setUint32(12, cdSize, true);
+  edv.setUint32(16, cdOffset, true);
+  edv.setUint16(20, 0, true);
+
+  const total =
+    fileRecords.reduce((n, b) => n + b.length, 0) + cdSize + eocd.length;
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const b of fileRecords) {
+    out.set(b, p);
+    p += b.length;
+  }
+  for (const b of centralDir) {
+    out.set(b, p);
+    p += b.length;
+  }
+  out.set(eocd, p);
+  return out;
 }

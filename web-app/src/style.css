@@ -963,6 +963,18 @@ button {
   background: #fff;
 }
 
+.custom-download-row {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0;
+}
+
+.btn-download {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.55rem;
+}
+
 @keyframes progress-indeterminate {
   0% {
     background-position: 100% 0;
