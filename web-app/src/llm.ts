@@ -248,6 +248,11 @@ export class GeminiBackend implements LLMBackend {
       generationConfig: {
         temperature: options.temperature ?? 0.1,
         maxOutputTokens: options.maxTokens ?? 1024,
+        // Gemini 2.5 enables "thinking" by default, which silently burns
+        // maxOutputTokens before any visible text is emitted. Disable it
+        // so small-budget requests (e.g. the 10-token validate ping)
+        // actually return a response.
+        thinkingConfig: { thinkingBudget: 0 },
         ...(options.jsonMode ? { responseMimeType: "application/json" } : {}),
       },
     };
@@ -307,7 +312,7 @@ export class GeminiBackend implements LLMBackend {
   async validate(): Promise<void> {
     await this.complete(
       [{ role: "user", content: "Reply with only the word: ok" }],
-      { maxTokens: 10 },
+      { maxTokens: 64 },
     );
   }
 }

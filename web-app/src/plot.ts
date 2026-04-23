@@ -104,6 +104,8 @@ Reply with a strict JSON object:
 
 Rules:
 - Output ONLY the JSON object. No markdown fences.
+- The DataFrames listed above are ALREADY in globals(). Use them by name directly: \`df_mitochondria["volume"]\`. DO NOT reassign them. DO NOT write \`df_x = pd.DataFrame(globals()["df_x"])\` — that is a syntax error and unnecessary.
+- DO NOT import anything — numpy (np), pandas (pd), and matplotlib.pyplot (plt) are already imported. Do not write 'import' statements.
 - The code must produce exactly one matplotlib figure (use plt.figure() if needed) and end after plotting; do NOT call plt.show() or plt.savefig() — the harness handles that.
 - Use seaborn-friendly clean styling (set fig size, axis labels, title).
 - Volume is in nm^3, surface area in nm^2, positions in nm. Convert to micrometers when readable (e.g. divide volume by 1e9 for um^3).

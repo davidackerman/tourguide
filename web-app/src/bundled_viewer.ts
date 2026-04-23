@@ -82,8 +82,46 @@ export class BundledViewer {
   ): void {
     const viewer = this.ensureViewer();
     if (!this.currentState) return;
-    // Update camera position (in nm, matching our state.dimensions of 1nm/unit).
-    viewer.navigationState.position.value = Float32Array.from(position);
+    // NG's `navigationState.position.value` is in *output dim units*, not nm.
+    // Even though we declare dimensions at 1 nm/unit, NG often inherits the
+    // source zarr's native scale (e.g. z at 2.62 nm/unit). So we must:
+    //   (1) read the live dim order and reshuffle our (x,y,z) input,
+    //   (2) divide each value by the live per-dim scale to convert nm → units.
+    // Input `position` is always in world-space nm (x, y, z).
+    const cs = (viewer.navigationState as any).coordinateSpace?.value as
+      | { names?: string[]; scales?: Float64Array | number[]; units?: string[] }
+      | undefined;
+    const names = cs?.names ?? ["x", "y", "z"];
+    const scales = cs?.scales ?? [1e-9, 1e-9, 1e-9];
+    const units = cs?.units ?? ["m", "m", "m"];
+    const xyzNm: Record<string, number> = {
+      x: position[0],
+      y: position[1],
+      z: position[2],
+    };
+    const orderedPos = names.map((n, i) => {
+      const nmValue = xyzNm[n] ?? 0;
+      const scale = Number(scales[i]); // base-unit per voxel
+      const unit = units[i];
+      // Convert world nm → base units of this dim, then divide by scale.
+      // For unit "m" with scale 2.62e-9: nmValue * 1e-9 / 2.62e-9 = nmValue/2.62.
+      // For unit "" (dimensionless) or unknown: assume already in dim units.
+      const nmToBase =
+        unit === "m" ? 1e-9 :
+        unit === "µm" || unit === "um" || unit === "micrometer" ? 1e-3 :
+        unit === "nm" || unit === "nanometer" ? 1 :
+        unit === "" ? scale /* fallback: treat as already in nm */ :
+        1;
+      return scale > 0 ? (nmValue * nmToBase) / scale : nmValue;
+    });
+    console.log("[viewer] flyTo", {
+      input_xyz_nm: position,
+      ngDimNames: names,
+      ngDimScales: Array.from(scales),
+      ngDimUnits: units,
+      written_in_dim_units: orderedPos,
+    });
+    viewer.navigationState.position.value = Float32Array.from(orderedPos);
     // Highlight a segment within a layer if requested.
     if (segmentId && layerName) {
       const layer = viewer.layerManager.getLayerByName(layerName);

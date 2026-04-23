@@ -5,6 +5,7 @@ import { ingestDescriptor, type DatasetDB } from "./db.js";
 import { renderStructuredBrowser } from "./browser.js";
 import { renderQueryBox } from "./query_ui.js";
 import { openSettingsDialog } from "./settings_ui.js";
+import { openAnalysisDialog } from "./analysis_ui.js";
 import { loadSettings, backendFromSettings, type LLMBackend } from "./llm.js";
 import { decodeState, buildPermalinkURL } from "./permalink.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
@@ -29,6 +30,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
 
 const select = $<HTMLSelectElement>("dataset-select");
 const loadBtn = $<HTMLButtonElement>("load-data-btn");
+const analyzeBtn = $<HTMLButtonElement>("analyze-btn");
 const settingsBtn = $<HTMLButtonElement>("settings-btn");
 const shareBtn = $<HTMLButtonElement>("share-btn");
 const backendIndicator = $<HTMLSpanElement>("backend-indicator");
@@ -87,9 +89,12 @@ async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Pr
 }
 
 async function ingestAndRender(d: DatasetDescriptor, baseUrl: string | null): Promise<void> {
+  // Reset DB for every dataset switch, so a previous dataset's CSV tables
+  // (or prior analysis tables) don't leak into the new one.
+  currentDB = null;
   const csvLayers = d.layers.filter((l) => l.csv);
   if (csvLayers.length === 0) {
-    browserHost.innerHTML = `<p class="placeholder">No organelle CSVs in this dataset — nothing to query yet. Add a <code>csv</code> field to layers in the descriptor to enable the structured browser.</p>`;
+    browserHost.innerHTML = `<p class="placeholder">No organelle CSVs in this dataset — nothing to query yet. Add a <code>csv</code> field to layers in the descriptor to enable the structured browser, or click ∑ Analyze to compute stats on a zarr segmentation.</p>`;
     return;
   }
   browserHost.innerHTML = `<p class="placeholder">Loading ${csvLayers.length} CSV file(s)…</p>`;
@@ -198,6 +203,28 @@ function loadDescriptorDirect(d: DatasetDescriptor): void {
 
 loadBtn.addEventListener("click", () => {
   openLoaderDialog((d) => loadDescriptorDirect(d));
+});
+
+analyzeBtn.addEventListener("click", () => {
+  openAnalysisDialog({
+    getDescriptor: () => currentDescriptor,
+    getDB: () => currentDB,
+    setDB: (db) => {
+      currentDB = db;
+      console.log("[analysis] setDB", { tables: db.tables.map((t) => t.table_name) });
+    },
+    onTableAdded: () => {
+      console.log("[analysis] onTableAdded", {
+        hasDB: !!currentDB,
+        tables: currentDB?.tables.map((t) => ({
+          name: t.table_name,
+          rows: t.row_count,
+          cols: t.columns.length,
+        })),
+      });
+      if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
+    },
+  });
 });
 
 settingsBtn.addEventListener("click", () => {

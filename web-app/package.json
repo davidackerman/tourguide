@@ -14,7 +14,8 @@
     "js-yaml": "^4.1.0",
     "neuroglancer": "^2.41.2",
     "papaparse": "^5.5.3",
-    "sql.js": "^1.14.1"
+    "sql.js": "^1.14.1",
+    "zarrita": "^0.7.1"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

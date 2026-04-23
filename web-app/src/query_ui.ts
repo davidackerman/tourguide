@@ -53,14 +53,16 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     detailsEl.hidden = false;
     const row = document.createElement("div");
     row.className = "agent-trace-item";
-    const argStr = Object.keys(item.args ?? {}).length ? truncate(JSON.stringify(item.args), 220) : "";
-    const safeArgs = argStr ? `<div class="agent-trace-args">${escapeHtml(argStr)}</div>` : "";
+    const argStr = Object.keys(item.args ?? {}).length ? JSON.stringify(item.args, null, 2) : "";
+    const safeArgs = argStr
+      ? `<details class="agent-trace-block"><summary>args</summary><pre class="agent-trace-args">${escapeHtml(argStr)}</pre></details>`
+      : "";
     let resultLine = "";
     if (item.error) {
-      resultLine = `<div class="agent-trace-result agent-trace-error">${escapeHtml(item.error)}</div>`;
+      resultLine = `<details class="agent-trace-block" open><summary>error</summary><pre class="agent-trace-result agent-trace-error">${escapeHtml(item.error)}</pre></details>`;
     } else if (item.result !== undefined) {
-      const r = truncate(typeof item.result === "string" ? item.result : JSON.stringify(item.result), 320);
-      resultLine = `<div class="agent-trace-result">${escapeHtml(r)}</div>`;
+      const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
+      resultLine = `<details class="agent-trace-block"><summary>result</summary><pre class="agent-trace-result">${escapeHtml(r)}</pre></details>`;
     }
     row.innerHTML = `<span class="agent-trace-tool">${escapeHtml(item.tool)}</span>${safeArgs}${resultLine}`;
     traceEl.appendChild(row);
@@ -158,6 +160,3 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
-}

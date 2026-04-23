@@ -689,6 +689,20 @@ button {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0.2rem 0 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  max-height: none;
+}
+
+.agent-trace-block {
+  margin-top: 0.2rem;
+}
+
+.agent-trace-block > summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  font-size: 0.72rem;
+  user-select: none;
 }
 
 .agent-trace-error {
@@ -770,4 +784,91 @@ button {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
+}
+
+.modal-analysis {
+  width: min(820px, 94vw);
+}
+
+.analysis-scales-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-top: 0.5rem;
+}
+
+.analysis-scales-table th,
+.analysis-scales-table td {
+  padding: 0.3rem 0.45rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.analysis-scales-table th {
+  font-weight: 500;
+  color: var(--fg-dim);
+}
+
+.analysis-scales-table code {
+  font-size: 0.78rem;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.chip-warn {
+  color: #d4a02e;
+  border-color: #6f5418;
+}
+
+.analysis-progress {
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+}
+
+.progress-line {
+  margin-bottom: 0.3rem;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.2s linear;
+}
+
+.progress-bar-fill.indeterminate {
+  background: linear-gradient(
+    90deg,
+    var(--accent) 0%,
+    var(--accent-hover) 50%,
+    var(--accent) 100%
+  );
+  background-size: 200% 100%;
+  animation: progress-indeterminate 1.4s linear infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
 }

@@ -1,0 +1,384 @@
+// Modal UI for running browser-side segmentation analysis. Lets the user
+// pick a segmentation layer + scale, watches progress, and on success injects
+// the resulting per-object stats as a new table in the existing DatasetDB so
+// the structured browser picks it up for free (sort / paginate / fly-to).
+
+import type { Database } from "sql.js";
+import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
+import type { DatasetDB, IngestedTable } from "./db.js";
+import { loadSqlJs } from "./db.js";
+import {
+  AnalysisClient,
+  DEFAULT_MAX_VOXELS,
+  type AnalysisResult,
+  type LayerInspection,
+  type LayerScaleInfo,
+  isZarrSource,
+  normalizeZarrUrl,
+} from "./analysis.js";
+
+export interface AnalysisUICallbacks {
+  getDescriptor: () => DatasetDescriptor | null;
+  getDB: () => DatasetDB | null;
+  setDB: (db: DatasetDB) => void;
+  onTableAdded: () => void; // refresh browser UI
+}
+
+export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
+  const d = cb.getDescriptor();
+  if (!d) {
+    alert("Load a dataset first.");
+    return;
+  }
+  // Any zarr layer is analyzable — the "Already labeled?" switch lets the
+  // user decide whether to treat values as segment ids or threshold to a mask.
+  // We don't filter by l.type === "segmentation" because the universal loader
+  // often flags label volumes as "image" based on dtype/intensity heuristics.
+  const segLayers = d.layers.filter((l) => isZarrSource(l.source));
+  if (segLayers.length === 0) {
+    alert("No zarr layers in this dataset. Browser analysis currently supports OME-Zarr only.");
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal modal-analysis">
+      <div class="modal-header">
+        <h2>Analyze segmentation</h2>
+        <button class="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">
+          Runs connected-components + regionprops on a downsampled scale of a
+          zarr segmentation, entirely in your browser. First run downloads the
+          Pyodide Python runtime (~6 MB, cached after).
+        </p>
+        <div class="form-row">
+          <label>
+            <span>Layer</span>
+            <select data-layer></select>
+          </label>
+          <label>
+            <span>Already labeled?</span>
+            <select data-labeled>
+              <option value="true" selected>Yes — values are segment ids</option>
+              <option value="false">No — run connected-components on mask</option>
+            </select>
+          </label>
+        </div>
+        <div data-scales-host>
+          <p class="hint" data-inspect-status>Pick a layer to list available scales.</p>
+        </div>
+        <div class="analysis-progress" data-progress hidden>
+          <div class="progress-line" data-progress-text></div>
+          <div class="progress-bar"><div class="progress-bar-fill" data-progress-bar></div></div>
+        </div>
+        <p class="modal-error" data-error></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" data-cancel>Cancel</button>
+        <button class="btn-primary" data-run disabled>Run analysis</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const $ = <T extends HTMLElement>(sel: string): T => overlay.querySelector<T>(sel)!;
+  const layerSel = $<HTMLSelectElement>("[data-layer]");
+  const labeledSel = $<HTMLSelectElement>("[data-labeled]");
+  const scalesHost = $<HTMLDivElement>("[data-scales-host]");
+  const inspectStatus = $<HTMLParagraphElement>("[data-inspect-status]");
+  const progressEl = $<HTMLDivElement>("[data-progress]");
+  const progressText = $<HTMLDivElement>("[data-progress-text]");
+  const progressBar = $<HTMLDivElement>("[data-progress-bar]");
+  const errEl = $<HTMLParagraphElement>("[data-error]");
+  const runBtn = $<HTMLButtonElement>("[data-run]");
+  const cancelBtn = $<HTMLButtonElement>("[data-cancel]");
+  const closeBtn = $<HTMLButtonElement>(".modal-close");
+
+  const client = new AnalysisClient();
+
+  segLayers.forEach((l, i) => {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = `${l.name} [${l.type}]${l.organelle_class ? ` — ${l.organelle_class}` : ""}`;
+    layerSel.appendChild(opt);
+  });
+
+  let currentLayer: DatasetLayer = segLayers[0];
+  let currentInspection: LayerInspection | null = null;
+  let selectedScaleIdx: number | null = null;
+
+  const close = (): void => {
+    client.terminate();
+    overlay.remove();
+  };
+  closeBtn.addEventListener("click", close);
+  cancelBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  const showError = (msg: string): void => {
+    errEl.textContent = msg;
+  };
+  const clearError = (): void => {
+    errEl.textContent = "";
+  };
+  const showProgress = (msg: string, indeterminate = true): void => {
+    progressEl.hidden = false;
+    progressText.textContent = msg;
+    progressBar.style.width = indeterminate ? "100%" : "0%";
+    progressBar.classList.toggle("indeterminate", indeterminate);
+  };
+  const hideProgress = (): void => {
+    progressEl.hidden = true;
+  };
+
+  const renderScales = (insp: LayerInspection): void => {
+    scalesHost.innerHTML = "";
+    if (insp.scales.length === 0) {
+      scalesHost.innerHTML = `<p class="hint warn">No scales found.</p>`;
+      return;
+    }
+    const hdr = document.createElement("p");
+    hdr.className = "hint";
+    hdr.textContent = insp.isMultiscale
+      ? `OME-Zarr multiscale pyramid detected (${insp.scales.length} scales). Coarser scales are faster but lower resolution.`
+      : "Single-scale zarr — only one resolution available.";
+    scalesHost.appendChild(hdr);
+
+    const tbl = document.createElement("table");
+    tbl.className = "analysis-scales-table";
+    tbl.innerHTML = `
+      <thead>
+        <tr>
+          <th></th>
+          <th>Path</th>
+          <th>Shape</th>
+          <th>Voxel (nm)</th>
+          <th>Offset (nm, xyz)</th>
+          <th>Size</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tb = tbl.querySelector("tbody")!;
+    insp.scales.forEach((s, i) => {
+      const tr = document.createElement("tr");
+      const tooBig = productOf(s.shape) > DEFAULT_MAX_VOXELS;
+      const offStr = s.offsetNm.map((v) => format1(v)).join(", ");
+      tr.innerHTML = `
+        <td><input type="radio" name="scale" value="${i}" ${tooBig ? "disabled" : ""}></td>
+        <td><code>${escapeHtml(s.path || "(root)")}</code></td>
+        <td><code>${s.shape.join("×")}</code></td>
+        <td><code>${s.voxelNm.map((v) => format1(v)).join(" × ")}</code></td>
+        <td><code>${offStr}</code></td>
+        <td>${humanSize(s.approxBytes)}</td>
+        <td>${tooBig ? `<span class="chip chip-warn">too large</span>` : ""}</td>
+      `;
+      tb.appendChild(tr);
+    });
+    scalesHost.appendChild(tbl);
+
+    // Auto-pick the coarsest that fits.
+    const coarsestFitIdx = [...insp.scales].reverse().findIndex((s) => productOf(s.shape) <= DEFAULT_MAX_VOXELS);
+    if (coarsestFitIdx !== -1) {
+      const realIdx = insp.scales.length - 1 - coarsestFitIdx;
+      selectedScaleIdx = realIdx;
+      const input = tbl.querySelector<HTMLInputElement>(`input[value="${realIdx}"]`);
+      if (input) input.checked = true;
+      runBtn.disabled = false;
+    }
+
+    tbl.querySelectorAll<HTMLInputElement>('input[type="radio"]').forEach((inp) => {
+      inp.addEventListener("change", () => {
+        selectedScaleIdx = Number(inp.value);
+        runBtn.disabled = false;
+      });
+    });
+  };
+
+  const inspectLayer = async (layer: DatasetLayer): Promise<void> => {
+    clearError();
+    scalesHost.innerHTML = `<p class="hint">Inspecting ${escapeHtml(layer.name)} …</p>`;
+    selectedScaleIdx = null;
+    runBtn.disabled = true;
+    try {
+      const url = normalizeZarrUrl(layer.source);
+      const insp = await client.inspect(url, d.voxel_size_nm);
+      currentInspection = insp;
+      renderScales(insp);
+    } catch (err) {
+      showError((err as Error).message);
+      scalesHost.innerHTML = "";
+    }
+  };
+
+  layerSel.addEventListener("change", () => {
+    currentLayer = segLayers[Number(layerSel.value)];
+    void inspectLayer(currentLayer);
+  });
+
+  runBtn.addEventListener("click", async () => {
+    if (!currentInspection || selectedScaleIdx == null) return;
+    clearError();
+    runBtn.disabled = true;
+    inspectStatus.textContent = "";
+    const scale: LayerScaleInfo = currentInspection.scales[selectedScaleIdx];
+    const axesOrder = currentInspection.axes.map((a) => a.name);
+    showProgress("Starting …");
+    try {
+      const url = normalizeZarrUrl(currentLayer.source);
+      const result = await client.analyze(
+        {
+          url,
+          scalePath: scale.path,
+          axesOrder,
+          voxelNm: scale.voxelNm,
+          offsetNm: scale.offsetNm,
+          maxVoxels: DEFAULT_MAX_VOXELS,
+          alreadyLabeled: labeledSel.value === "true",
+        },
+        (message) => showProgress(message),
+      );
+      showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
+      await ingestResult(cb, currentLayer, scale, result);
+      cb.onTableAdded();
+      close();
+    } catch (err) {
+      hideProgress();
+      showError((err as Error).message);
+      runBtn.disabled = false;
+    }
+  });
+
+  void inspectLayer(currentLayer);
+}
+
+function productOf(shape: number[]): number {
+  return shape.reduce((a, b) => a * b, 1);
+}
+
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function format1(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Inject the analysis result into the existing DatasetDB as a new table so
+// the structured browser picks it up with zero extra wiring.
+async function ingestResult(
+  cb: AnalysisUICallbacks,
+  layer: DatasetLayer,
+  scale: LayerScaleInfo,
+  result: AnalysisResult,
+): Promise<void> {
+  let db = cb.getDB();
+  if (!db) {
+    const SQL = await loadSqlJs();
+    const database = new SQL.Database();
+    db = { db: database, tables: [] };
+    cb.setDB(db);
+  }
+  // organelle_class doubles as a Python identifier inside make_plot
+  // (it becomes df_<organelle_class>). Keep it identifier-safe.
+  const baseClass = safeTableName(layer.organelle_class ?? layer.name);
+  const scaleSuffix = safeTableName(scale.path || "root");
+  const organelleClass = `${baseClass}_computed_${scaleSuffix}`;
+  const tableName = organelleClass;
+  const types = inferTypes(result.columns, result.rows);
+  createTable(db.db, tableName, types, result.columns);
+  insertRows(db.db, tableName, result.columns, result.rows);
+
+  const table: IngestedTable = {
+    table_name: tableName,
+    organelle_class: organelleClass,
+    layer_name: layer.name,
+    row_count: result.rows.length,
+    columns: result.columns,
+  };
+  // Replace an existing computed table for the same layer+scale so re-runs don't duplicate.
+  const existingIdx = db.tables.findIndex((t) => t.table_name === tableName);
+  if (existingIdx >= 0) db.tables[existingIdx] = table;
+  else db.tables.push(table);
+}
+
+function safeTableName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+}
+
+function inferTypes(
+  columns: string[],
+  rows: (number | string)[][],
+): Record<string, "INTEGER" | "REAL" | "TEXT"> {
+  const out: Record<string, "INTEGER" | "REAL" | "TEXT"> = {};
+  columns.forEach((col, i) => {
+    let allInt = true;
+    let allNum = true;
+    for (const row of rows.slice(0, 200)) {
+      const v = row[i];
+      if (v === null || v === undefined) continue;
+      if (typeof v !== "number") {
+        allInt = false;
+        allNum = false;
+      } else if (!Number.isInteger(v)) {
+        allInt = false;
+      }
+    }
+    out[col] = allInt ? "INTEGER" : allNum ? "REAL" : "TEXT";
+  });
+  return out;
+}
+
+function createTable(
+  db: Database,
+  tableName: string,
+  types: Record<string, "INTEGER" | "REAL" | "TEXT">,
+  columnOrder: string[],
+): void {
+  const cols = columnOrder.map((c) => `"${c}" ${types[c]}`).join(", ");
+  db.run(`DROP TABLE IF EXISTS "${tableName}";`);
+  db.run(`CREATE TABLE "${tableName}" (${cols});`);
+}
+
+function insertRows(
+  db: Database,
+  tableName: string,
+  columns: string[],
+  rows: (number | string)[][],
+): void {
+  const placeholders = columns.map(() => "?").join(", ");
+  const colList = columns.map((c) => `"${c}"`).join(", ");
+  const stmt = db.prepare(
+    `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders});`,
+  );
+  db.run("BEGIN;");
+  try {
+    for (const row of rows) {
+      const values = row.map((v) => (v === undefined ? null : v));
+      stmt.run(values);
+    }
+    db.run("COMMIT;");
+  } catch (e) {
+    db.run("ROLLBACK;");
+    throw e;
+  } finally {
+    stmt.free();
+  }
+}
