@@ -540,7 +540,10 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
           { role: "system", content: systemPrompt },
           { role: "user", content: question },
         ],
-        { temperature: 0.1, maxTokens: 2000, jsonMode: true },
+        // Don't use jsonMode — small models mangle embedded Python strings
+        // badly (backslashes + quotes inside JSON break the parse). Plain
+        // Python + a fence-stripper is much more robust.
+        { temperature: 0.1, maxTokens: 2000 },
       );
       const code = extractPythonCode(raw);
       codeEl.value = code;
@@ -595,28 +598,38 @@ OUTPUT CONTRACT (set zero or more):
 - Any matplotlib figure you draw is auto-captured and shown as a PNG.
 
 RULES:
-- Return a JSON object exactly of shape: {"code": "...", "explanation": "one-line summary"}
-- Output ONLY that JSON object, no markdown fences, no preamble.
-- The \`code\` must be a single Python block. Do NOT reassign the provided ndarrays or DataFrames (they already exist as globals — use them by name). Do NOT add 'import' statements for the libs already imported above; you may import standard-lib modules freely.
+- Reply with RAW PYTHON CODE ONLY. No JSON, no markdown fences, no prose, no preamble.
+- Do NOT reassign the provided ndarrays or DataFrames (they already exist as globals — use them by name).
+- Do NOT add 'import' statements for the libs already imported above; you may import standard-lib modules freely.
 - Convert positions with array_index * spacing + offset if you need world nm.
 - Prefer operating on the loaded arrays directly; don't try to re-read from disk.
 - Keep runtime under ~30s; prefer coarsest-scale arrays.`;
 }
 
 function extractPythonCode(raw: string): string {
-  const trimmed = raw.trim();
-  try {
-    const obj = JSON.parse(
-      trimmed.startsWith("{") ? trimmed : trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1),
-    );
-    if (typeof obj.code === "string") return obj.code;
-  } catch {
-    /* fallthrough */
+  let s = raw.trim();
+  // Strip any fenced code block (```python ... ``` or ``` ... ```).
+  const fenced = s.match(/```(?:python)?\s*([\s\S]*?)```/);
+  if (fenced) s = fenced[1].trim();
+  // If the model still wrapped everything in a JSON object (older prompts
+  // or a stubborn model), pull the `code` value out by best-effort parse.
+  if (s.startsWith("{")) {
+    try {
+      const obj = JSON.parse(s);
+      if (typeof obj?.code === "string") s = obj.code;
+    } catch {
+      // Manual extraction: find the first "code": "..." field, un-escape it.
+      const m = s.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (m) {
+        try {
+          s = JSON.parse(`"${m[1]}"`);
+        } catch {
+          s = m[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+        }
+      }
+    }
   }
-  // Fallback: extract fenced python if the model ignored JSON instructions.
-  const fenced = trimmed.match(/```(?:python)?\s*([\s\S]*?)```/);
-  if (fenced) return fenced[1].trim();
-  return trimmed;
+  return s;
 }
 
 async function ingestCustomTable(
