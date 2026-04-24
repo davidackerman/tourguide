@@ -337,7 +337,7 @@ export const DEFAULT_ANALYSIS_BACKEND = "https://ackermand-tourguide-analysis.hf
 const DEFAULT_SETTINGS: Settings = {
   backend: "none",
   geminiApiKey: "",
-  geminiModel: "gemini-2.5-flash",
+  geminiModel: "gemini-2.5-flash-lite",
   webllmModel: WEBLLM_MODELS[0].id,
   analysisBackendUrl: DEFAULT_ANALYSIS_BACKEND,
 };

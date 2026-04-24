@@ -73,8 +73,9 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           <label>
             Gemini model
             <select data-field="geminiModel">
-              <option value="gemini-2.5-flash" ${current.geminiModel === "gemini-2.5-flash" ? "selected" : ""}>gemini-2.5-flash (fast, recommended)</option>
-              <option value="gemini-2.5-pro" ${current.geminiModel === "gemini-2.5-pro" ? "selected" : ""}>gemini-2.5-pro (higher quality, slower)</option>
+              <option value="gemini-2.5-flash-lite" ${current.geminiModel === "gemini-2.5-flash-lite" ? "selected" : ""}>gemini-2.5-flash-lite (1000 req/day free, recommended)</option>
+              <option value="gemini-2.5-flash" ${current.geminiModel === "gemini-2.5-flash" ? "selected" : ""}>gemini-2.5-flash (better quality, ~20–250 req/day free)</option>
+              <option value="gemini-2.5-pro" ${current.geminiModel === "gemini-2.5-pro" ? "selected" : ""}>gemini-2.5-pro (highest quality, 100 req/day free)</option>
             </select>
           </label>
           <p class="hint">Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com</a>. Key is stored in your browser's localStorage only.</p>
