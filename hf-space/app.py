@@ -210,17 +210,20 @@ async def _load_layer(layer: LayerSpec, tunnel: Optional[TunnelSession]) -> np.n
         if tunnel is None or not tunnel.is_ready():
             raise HTTPException(status_code=400, detail=f"layer '{layer.varName}' is local but no browser tunnel is attached")
 
-        # Extract path after /local-data/<id>/ since the BROWSER serves using
-        # the relative path the SW sees. We pass that back through the tunnel.
-        # The tunnel read function just takes a path relative to the layer url.
-        base = layer.url.split("://", 1)[-1]  # strip zarr:// if it lingered
-        async def read(path: str) -> Optional[bytes]:
-            full = _join_url(base, f"{layer.scalePath}/{path}" if layer.scalePath else path)
-            return await tunnel.read(full)
-        # read_zarr_scale expects the read fn to take keys relative to the zarr
-        # root + scalePath prefix. We handle that prefix inside `read`.
+        # The tunnel's peer is the user's browser. It resolves paths relative
+        # to its own origin, so we must pass just the PATH (no scheme, no
+        # host) through the WS. Otherwise `new URL(path, window.origin)`
+        # resolves wrong and Cloudflare Pages' SPA fallback returns HTML for
+        # a non-existent route — which looks like "empty .zarray" to the
+        # zarr reader and fails with a bewildering JSONDecodeError.
+        from urllib.parse import urlparse
+        parsed = urlparse(layer.url)
+        base_path = parsed.path or "/"
+        if not base_path.endswith("/"):
+            base_path += "/"
         async def read_at_scale(path: str) -> Optional[bytes]:
-            full = _join_url(base, path)
+            full = _join_url(base_path, path)
+            log.debug("tunnel read %s", full)
             return await tunnel.read(full)
         return await read_zarr_scale(read_at_scale, layer.scalePath)
 

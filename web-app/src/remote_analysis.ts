@@ -129,6 +129,14 @@ export function openBrowserTunnel(
         ws.send(JSON.stringify({ type: "response", req_id: msg.req_id, found: false }));
         return;
       }
+      // Cloudflare Pages returns the SPA index.html (status 200, HTML) for
+      // any unknown route. Treat that as not-found — otherwise the remote
+      // side tries to parse HTML as zarr JSON and explodes.
+      const ct = (res.headers.get("content-type") || "").toLowerCase();
+      if (ct.includes("text/html")) {
+        ws.send(JSON.stringify({ type: "response", req_id: msg.req_id, found: false }));
+        return;
+      }
       const buf = await res.arrayBuffer();
       const b64 = bytesToBase64(new Uint8Array(buf));
       ws.send(JSON.stringify({ type: "response", req_id: msg.req_id, found: true, bytes_b64: b64 }));
