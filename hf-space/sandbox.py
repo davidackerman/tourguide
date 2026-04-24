@@ -46,7 +46,14 @@ ALLOWED_IMPORTS = {
     "matplotlib",
     "matplotlib.pyplot",
     "plt",
+    # Seung-lab image-analysis stack — same domain as skimage/scipy.ndimage
+    # but 10–100× faster on label volumes. Installed in the HF Dockerfile.
     "cc3d",
+    "fastmorph",
+    "fastremap",
+    "edt",
+    "kimimaro",
+    "zmesh",
     "json",
     "math",
     "statistics",
@@ -59,6 +66,8 @@ ALLOWED_IMPORTS = {
     "io",
     "base64",
     "traceback",
+    "concurrent",
+    "concurrent.futures",
 }
 
 FORBIDDEN_PATTERNS = [
@@ -138,6 +147,35 @@ def _apply_rlimits(mem_bytes: int, cpu_s: int) -> None:
         pass
 
 
+# Prelude executed in the sandbox before user code. Matches what the
+# Pyodide worker pre-imports, so identical user code works in both places.
+# The Seung-lab extras (cc3d, fastmorph, etc.) are optional imports — present
+# on the HF Space, missing in Pyodide — so the prompt tells the LLM which
+# set to use based on where the code is running.
+_PRELUDE = """
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from scipy import ndimage as ndi
+from skimage import measure as _sk_measure
+# Optional Seung-lab imports — only the ones successfully installed.
+try: import cc3d
+except ImportError: cc3d = None
+try: import fastmorph
+except ImportError: fastmorph = None
+try: import fastremap
+except ImportError: fastremap = None
+try: import edt
+except ImportError: edt = None
+try: import kimimaro
+except ImportError: kimimaro = None
+try: import zmesh
+except ImportError: zmesh = None
+"""
+
+
 def _worker_entrypoint(
     source: str,
     globals_dict: Dict[str, Any],
@@ -146,10 +184,12 @@ def _worker_entrypoint(
     cpu_s: int,
 ) -> None:
     _apply_rlimits(mem_bytes, cpu_s)
-    # Discourage the user code from spawning its own subprocesses even if it
-    # somehow got past the whitelist.
     os.environ["MPLBACKEND"] = "Agg"
     try:
+        # Inject the prelude imports into the same globals dict the user
+        # code sees. Without this, every analysis dies on 'NameError: np'
+        # (or ndi/plt/pd/...).
+        exec(compile(_PRELUDE, "<tourguide-prelude>", "exec"), globals_dict)
         exec(compile(source, "<tourguide-analysis>", "exec"), globals_dict)
         # Pull out the _TG_* outputs the user code set.
         result = {k: v for k, v in globals_dict.items() if k.startswith("_TG_")}

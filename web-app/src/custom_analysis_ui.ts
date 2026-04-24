@@ -549,7 +549,10 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
     askAiBtn.disabled = true;
     askAiBtn.textContent = "Thinking…";
     try {
-      const systemPrompt = buildSystemPrompt(slots, collectTables());
+      // Tell the LLM which runtime the code will run in so it picks the
+      // right library set (Seung-lab extras are backend-only).
+      const aiUseRemote = !!(analysisBackendUrl && remoteToggle.checked);
+      const systemPrompt = buildSystemPrompt(slots, collectTables(), aiUseRemote);
       const raw = await backend.complete(
         [
           { role: "system", content: systemPrompt },
@@ -576,6 +579,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
 function buildSystemPrompt(
   slots: { varName: string; layer: DatasetLayer; inspection?: LayerInspection; scaleIdx?: number }[],
   tables: { name: string; columns: string[]; rows: unknown[][] }[],
+  useRemote: boolean,
 ): string {
   const layerDescs = slots.map((s) => {
     const scale = s.inspection?.scales[s.scaleIdx ?? 0];
@@ -586,7 +590,36 @@ function buildSystemPrompt(
   const tableDescs = tables.map(
     (t) => `- df_${t.name}: pandas DataFrame, columns=[${t.columns.join(", ")}], rows=${t.rows.length}`,
   );
-  return `You write Python code that runs in a browser-side Pyodide sandbox.
+  // The Seung-lab stack only exists on the HF backend. In Pyodide the user
+  // gets the stdlib scientific stack only. Branch the prompt so the LLM
+  // doesn't hallucinate `cc3d.dust(...)` for code that will run locally.
+  const runtimeHeader = useRemote
+    ? `You write Python code that runs on a cloud HF Space container with ~16 GB RAM and 2 vCPU.`
+    : `You write Python code that runs in a browser-side Pyodide sandbox (~2 GB usable memory, WASM).`;
+  const librariesBlock = useRemote
+    ? `Libraries (already imported; do NOT reimport):
+- numpy as np, pandas as pd, matplotlib.pyplot as plt
+- scipy.ndimage as ndi
+- from skimage import measure as _sk_measure
+
+Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/skimage for label volumes — prefer these when applicable):
+- cc3d — connected_components, statistics, dust (remove small components),
+         largest_k, each_contiguous_region, each_neighboring_pair.
+         Auto-parallelizes via OpenMP; don't bother threading it yourself.
+- fastmorph — spherical_erode / spherical_dilate / spherical_open / spherical_close,
+              much faster than scipy.ndimage for label or binary volumes.
+- fastremap — renumber, remap, mask, unique, refit; in-place relabeling at numpy speeds.
+- edt — signed / unsigned Euclidean distance transform.
+- kimimaro — TEASAR skeletonization for neuron/tubule volumes.
+- zmesh — fast multi-resolution meshing from a labeled volume.`
+    : `Libraries (already imported; do NOT reimport):
+- numpy as np, pandas as pd, matplotlib.pyplot as plt
+- scipy.ndimage as ndi
+- from skimage import measure as _sk_measure
+
+Note: cc3d / fastmorph / kimimaro / zmesh / fastremap / edt are NOT available in the browser Pyodide runtime. Use scipy.ndimage + skimage.measure / morphology instead.`;
+
+  return `${runtimeHeader}
 
 AVAILABLE VARIABLES:
 Layers (numpy ndarrays, already loaded):
@@ -597,9 +630,7 @@ Per-layer metadata is also available as \`layers["<varName>"]\` with keys: array
 DataFrames:
 ${tableDescs.join("\n") || "(none)"}
 
-Libraries (already imported):
-- numpy as np, pandas as pd, matplotlib.pyplot as plt, scipy.ndimage as ndi
-- from skimage import measure as _sk_measure (available)
+${librariesBlock}
 
 OUTPUT CONTRACT (set zero or more):
 - \`_TG_TABLE\`: a pandas DataFrame — will be added to the sidebar as a new table. If it has object_id + position_x/y/z columns, rows become click-to-fly.
