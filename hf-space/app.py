@@ -229,24 +229,34 @@ async def _load_layer(layer: LayerSpec, tunnel: Optional[TunnelSession]) -> np.n
     import fsspec  # noqa: WPS433
 
     url = layer.url
-    if "://" in url:
-        proto = url.split("://", 1)[0]
-    else:
-        proto = "file"
+    raw_proto = url.split("://", 1)[0] if "://" in url else "file"
+    # fsspec's HTTP backend covers both http and https under the "http" key.
+    proto = "http" if raw_proto in ("http", "https") else raw_proto
     fs_kwargs: Dict[str, Any] = {}
-    if proto in ("s3",):
+    if proto == "s3":
         fs_kwargs["anon"] = True  # CellMap buckets are public
-    fs = fsspec.filesystem(proto, **fs_kwargs)
-    mapper = fs.get_mapper(url)
-    arr = zarr.open(mapper, path=layer.scalePath, mode="r")
+    try:
+        fs = fsspec.filesystem(proto, **fs_kwargs)
+        mapper = fs.get_mapper(url)
+        arr = zarr.open(mapper, path=layer.scalePath, mode="r")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=f"failed to open {url} (path={layer.scalePath!r}): {type(exc).__name__}: {exc}",
+        )
     # Reduce leading non-spatial dims to 0; mirror frontend's Pyodide path.
     sel = tuple(slice(None) if a in ("x", "y", "z") else 0 for a in layer.axesOrder) if layer.axesOrder else tuple(
         slice(None) for _ in range(arr.ndim)
     )
-    # If axes came from the caller but length doesn't match, take last 3.
     if len(sel) != arr.ndim:
         sel = tuple(slice(None) if i >= arr.ndim - 3 else 0 for i in range(arr.ndim))
-    return np.asarray(arr[sel])
+    try:
+        return np.asarray(arr[sel])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=f"failed to read {url} at {layer.scalePath!r} shape={arr.shape}: {type(exc).__name__}: {exc}",
+        )
 
 
 def _join_url(base: str, rel: str) -> str:
@@ -488,14 +498,25 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
     tunnel = get_tunnel(session_id) if any(_is_local_url(l.url) for l in body.layers) else None
     t0 = time.monotonic()
 
+    import traceback
     QUEUE_DEPTH += 1
     try:
         async with ANALYSIS_SEMAPHORE:
             # Load each layer into a numpy array.
-            layers_info: Dict[str, Dict[str, Any]] = {}
-            for layer in body.layers:
-                arr = await _load_layer(layer, tunnel)
-                layers_info[layer.varName] = _layer_to_globals(layer, arr)
+            try:
+                layers_info: Dict[str, Dict[str, Any]] = {}
+                for layer in body.layers:
+                    arr = await _load_layer(layer, tunnel)
+                    layers_info[layer.varName] = _layer_to_globals(layer, arr)
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.exception("layer load failed")
+                return {
+                    "kind": "error",
+                    "message": f"failed to load layer: {type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(),
+                }
 
             # Build the globals dict that the user code will see.
             g = _build_globals(layers_info, body.tables)
@@ -554,6 +575,15 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
             elapsed = round(time.monotonic() - t0, 2)
             log.info("analysis done in %.2fs (session=%s, layers=%d)", elapsed, session_id, len(body.layers))
             return out_msg
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("unexpected failure in /api/analysis/run")
+        return {
+            "kind": "error",
+            "message": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(),
+        }
     finally:
         QUEUE_DEPTH -= 1
 
