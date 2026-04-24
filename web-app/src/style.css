@@ -988,6 +988,26 @@ button {
   margin: 0;
 }
 
+.custom-remote-toggle code {
+  color: var(--fg);
+  font-size: 0.76rem;
+}
+
+.remote-muted {
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+
+.remote-ok {
+  color: #7fd3a4;
+  font-size: 0.78rem;
+}
+
+.remote-warn {
+  color: #d4a02e;
+  font-size: 0.78rem;
+}
+
 .analysis-backend-row {
   display: flex;
   align-items: center;

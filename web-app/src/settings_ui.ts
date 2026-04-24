@@ -28,13 +28,30 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-label="Settings">
       <header class="modal-header">
-        <h2>AI settings</h2>
+        <h2>Settings</h2>
         <button class="modal-close" aria-label="Close">×</button>
       </header>
       <div class="modal-body">
-        <p class="hint">Tourguide works without AI — the structured browser and click-row-to-fly are always available. Configure an AI backend here to unlock plain-English queries and plots.</p>
+        <p class="hint">Two independent pieces of configuration, both optional. The app works without either one.</p>
 
-        <h3>Backend</h3>
+        <h3>Analysis backend</h3>
+        <div class="settings-section" data-section="analysis-backend">
+          <p class="hint">Where to run heavy analyses that don't fit in Pyodide's ~4 GB ceiling. Leave empty to disable the remote path (everything still runs locally in your browser).</p>
+          <label>
+            Backend URL
+            <input type="text" data-field="analysisBackendUrl" value="${escapeAttr(current.analysisBackendUrl)}" placeholder="${DEFAULT_ANALYSIS_BACKEND}" />
+          </label>
+          <div class="analysis-backend-row">
+            <button class="btn-secondary" data-action="test-analysis-backend">Test backend</button>
+            <span class="test-result" data-analysis-backend-result></span>
+          </div>
+          <p class="hint">
+            Want isolated compute? <a href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space</a> into your own free HF account (~5 min, one-time), then paste the resulting URL above.
+          </p>
+        </div>
+
+        <h3>AI backend</h3>
+        <p class="hint">AI unlocks plain-English queries and auto-generated plot/analysis code. Pick none, a local in-browser model, or Gemini.</p>
         <div class="radio-group">
           <label class="radio-row">
             <input type="radio" name="backend" value="none" ${current.backend === "none" ? "checked" : ""}>
@@ -81,22 +98,6 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           <p class="hint">Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com</a>. Key is stored in your browser's localStorage only.</p>
           <button class="btn-secondary" data-action="test-gemini">Test key</button>
           <span class="test-result" data-test-result></span>
-        </div>
-
-        <h3>Analysis backend</h3>
-        <div class="settings-section" data-section="analysis-backend">
-          <p class="hint">Optional. Heavy analyses (beyond Pyodide's ~4 GB cap) can run on a Hugging Face Space instead of in your browser. Default points at a shared instance; leave empty to disable the remote path.</p>
-          <label>
-            Backend URL
-            <input type="text" data-field="analysisBackendUrl" value="${escapeAttr(current.analysisBackendUrl)}" placeholder="${DEFAULT_ANALYSIS_BACKEND}" />
-          </label>
-          <div class="analysis-backend-row">
-            <button class="btn-secondary" data-action="test-analysis-backend">Test backend</button>
-            <span class="test-result" data-analysis-backend-result></span>
-          </div>
-          <p class="hint">
-            Want isolated compute? <a href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space</a> into your own free HF account (~5 min, one-time), then paste the resulting URL above.
-          </p>
         </div>
       </div>
       <div class="modal-footer">

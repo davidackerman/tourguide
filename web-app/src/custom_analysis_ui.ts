@@ -117,20 +117,35 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
 
   const client = new AnalysisClient();
 
-  // Detect analysis backend availability once up front. If the user has one
-  // configured in settings AND it's reachable, expose the "Run on backend"
-  // toggle. Otherwise keep the modal identical to today.
+  // Detect analysis backend availability. Show the configured URL so the
+  // user knows exactly which Space the toggle would use. If the URL is
+  // empty, hide the toggle and point to Settings with a small note.
   const analysisBackendUrl = loadSettings().analysisBackendUrl.trim();
   let backendReady = false;
-  if (analysisBackendUrl) {
-    remoteRow.hidden = false;
-    remoteLabel.textContent = `Run on backend`;
+  remoteRow.hidden = false;
+  const shortUrl = analysisBackendUrl
+    ? analysisBackendUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")
+    : "";
+  if (!analysisBackendUrl) {
+    // No backend configured: disable the toggle and nudge to Settings.
+    remoteToggle.disabled = true;
+    remoteToggle.checked = false;
+    remoteLabel.innerHTML = `Run on backend <span class="remote-muted">(none — add one in ⚙ Settings)</span>`;
+  } else {
+    remoteToggle.disabled = true; // re-enabled after the health probe succeeds
+    remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-muted">(checking …)</span>`;
     void (async () => {
       const h = await fetchHealth(analysisBackendUrl);
       backendReady = !!h?.ok;
-      remoteLabel.textContent = backendReady
-        ? `Run on backend (ready)`
-        : `Run on backend (asleep — will wake on first run)`;
+      if (backendReady) {
+        remoteToggle.disabled = false;
+        remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-ok">● ready</span>`;
+      } else {
+        // Space might be asleep (cold start) OR gone. We can't distinguish
+        // without trying harder; mark as "asleep" but still let the user try.
+        remoteToggle.disabled = false;
+        remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-warn">● unreachable (click Run to retry; may be asleep or deleted)</span>`;
+      }
     })();
   }
 
