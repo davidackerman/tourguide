@@ -477,8 +477,12 @@ async def _cleanup_session_later(session_id: str) -> None:
 
 
 @app.post("/api/analysis/run")
-@limiter.limit("10/minute")
 async def run_analysis(request: Request, body: CustomRequestBody, background: BackgroundTasks) -> Dict[str, Any]:
+    # Rate limiting intentionally not applied here — slowapi's @limiter
+    # decorator interferes with FastAPI's body/dependency inspection and
+    # makes pydantic bodies look like query params. For a single-user or
+    # small-group Space the semaphore + cold-start delay are already
+    # effective throttles. Revisit if the Space sees abuse.
     global QUEUE_DEPTH  # noqa: PLW0603
     session_id = body.sessionId or uuid.uuid4().hex
     tunnel = get_tunnel(session_id) if any(_is_local_url(l.url) for l in body.layers) else None
