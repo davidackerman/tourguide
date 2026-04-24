@@ -20,7 +20,14 @@ import {
   normalizeZarrUrl,
 } from "./analysis.js";
 import type { LLMBackend } from "./llm.js";
+import { loadSettings } from "./llm.js";
 import type { BundledViewer } from "./bundled_viewer.js";
+import {
+  fetchHealth,
+  openBrowserTunnel,
+  postAnalysisRequest,
+  waitForBackendReady,
+} from "./remote_analysis.js";
 
 export interface CustomAnalysisUICallbacks {
   getDescriptor: () => DatasetDescriptor | null;
@@ -81,6 +88,10 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" data-action="cancel">Close</button>
+        <label class="custom-remote-toggle" data-remote-row hidden>
+          <input type="checkbox" data-remote-toggle />
+          <span data-remote-label>Run on backend</span>
+        </label>
         <button class="btn-primary" data-action="run">Run</button>
       </div>
     </div>
@@ -100,8 +111,41 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   const askAiBtn = $<HTMLButtonElement>("[data-action='ask-ai']");
   const cancelBtn = $<HTMLButtonElement>("[data-action='cancel']");
   const closeBtn = $<HTMLButtonElement>(".modal-close");
+  const remoteRow = $<HTMLLabelElement>("[data-remote-row]");
+  const remoteToggle = $<HTMLInputElement>("[data-remote-toggle]");
+  const remoteLabel = $<HTMLSpanElement>("[data-remote-label]");
 
   const client = new AnalysisClient();
+
+  // Detect analysis backend availability once up front. If the user has one
+  // configured in settings AND it's reachable, expose the "Run on backend"
+  // toggle. Otherwise keep the modal identical to today.
+  const analysisBackendUrl = loadSettings().analysisBackendUrl.trim();
+  let backendReady = false;
+  if (analysisBackendUrl) {
+    remoteRow.hidden = false;
+    remoteLabel.textContent = `Run on backend`;
+    void (async () => {
+      const h = await fetchHealth(analysisBackendUrl);
+      backendReady = !!h?.ok;
+      remoteLabel.textContent = backendReady
+        ? `Run on backend (ready)`
+        : `Run on backend (asleep — will wake on first run)`;
+    })();
+  }
+
+  // Auto-enable the toggle when the selected-layer total is bigger than
+  // Pyodide can comfortably hold. We re-evaluate whenever a slot changes.
+  const refreshRemoteDefault = (): void => {
+    if (!analysisBackendUrl || remoteToggle.checked) return;
+    const total = slots.reduce(
+      (n, s) => n + (s.inspection?.scales[s.scaleIdx ?? 0]?.approxBytes ?? 0),
+      0,
+    );
+    if (total > SAFE_INPUT_BYTES) {
+      remoteToggle.checked = true;
+    }
+  };
 
   const close = (): void => {
     client.terminate();
@@ -204,8 +248,10 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       }
       scaleSel.value = String(defaultIdx);
       slot.scaleIdx = defaultIdx;
+      refreshRemoteDefault();
       scaleSel.addEventListener("change", () => {
         slot.scaleIdx = Number(scaleSel.value);
+        refreshRemoteDefault();
       });
     } catch (err) {
       scaleSel.innerHTML = `<option>inspect failed: ${(err as Error).message.slice(0, 80)}</option>`;
@@ -389,48 +435,86 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         return;
       }
     }
-    // Warn when the sum of selected input sizes pushes us near the WASM cap.
-    const totalBytes = slots.reduce(
-      (n, s) => n + (s.inspection!.scales[s.scaleIdx!].approxBytes || 0),
-      0,
-    );
-    if (totalBytes > SAFE_INPUT_BYTES) {
-      const gb = (totalBytes / 1024 ** 3).toFixed(2);
-      const ok = confirm(
-        `Selected layers total ${gb} GB. Pyodide's WASM ceiling is ~4 GB and ` +
-          `intermediates typically 2–4× the input size. Analysis may OOM. Continue?`,
+    const useRemote = analysisBackendUrl && remoteToggle.checked;
+
+    // Skip the WASM OOM warning when running on the backend — it has 16 GB
+    // real RAM and no Pyodide layer, so the budget isn't the same.
+    if (!useRemote) {
+      const totalBytes = slots.reduce(
+        (n, s) => n + (s.inspection!.scales[s.scaleIdx!].approxBytes || 0),
+        0,
       );
-      if (!ok) return;
+      if (totalBytes > SAFE_INPUT_BYTES) {
+        const gb = (totalBytes / 1024 ** 3).toFixed(2);
+        const ok = confirm(
+          `Selected layers total ${gb} GB. Pyodide's WASM ceiling is ~4 GB and ` +
+            `intermediates typically 2–4× the input size. Analysis may OOM. Continue?`,
+        );
+        if (!ok) return;
+      }
     }
+
+    const layersForRequest = slots.map((s) => {
+      const scale = s.inspection!.scales[s.scaleIdx!];
+      return {
+        varName: s.varName,
+        url: normalizeZarrUrl(s.layer.source),
+        scalePath: scale.path,
+        axesOrder: s.inspection!.axes.map((a) => a.name),
+        voxelNm: scale.voxelNm,
+        offsetNm: scale.offsetNm,
+      };
+    });
+
     runBtn.disabled = true;
     showProgress("Starting …");
+    let tunnel: { close: () => void } | null = null;
     try {
-      const result = await client.customAnalyze(
-        {
-          kind: "custom",
-          layers: slots.map((s) => {
-            const scale = s.inspection!.scales[s.scaleIdx!];
-            return {
-              varName: s.varName,
-              url: normalizeZarrUrl(s.layer.source),
-              scalePath: scale.path,
-              axesOrder: s.inspection!.axes.map((a) => a.name),
-              voxelNm: scale.voxelNm,
-              offsetNm: scale.offsetNm,
-            };
-          }),
+      let result: CustomAnalysisResult;
+      if (useRemote) {
+        // Wait for backend to be ready (handles HF cold start).
+        await waitForBackendReady(analysisBackendUrl, {
+          onProgress: (_state, msg) => showProgress(msg),
+        });
+        backendReady = true;
+        const needsTunnel = layersForRequest.some((l) => /\/local-data\//.test(l.url));
+        const sessionId =
+          typeof crypto?.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        if (needsTunnel) {
+          showProgress("Opening tunnel to browser data …");
+          const t = openBrowserTunnel(analysisBackendUrl, sessionId);
+          await t.ready;
+          tunnel = t;
+        }
+        showProgress("Running on backend …");
+        result = await postAnalysisRequest(analysisBackendUrl, {
+          layers: layersForRequest,
           tables: collectTables(),
           code: codeEl.value,
-          timeoutMs: 60000,
-        },
-        (m) => showProgress(m),
-      );
+          timeoutMs: 60_000,
+          sessionId,
+        });
+      } else {
+        result = await client.customAnalyze(
+          {
+            kind: "custom",
+            layers: layersForRequest,
+            tables: collectTables(),
+            code: codeEl.value,
+            timeoutMs: 60000,
+          },
+          (m) => showProgress(m),
+        );
+      }
       hideProgress();
       renderOutput(result);
     } catch (err) {
       hideProgress();
       showError((err as Error).message);
     } finally {
+      tunnel?.close();
       runBtn.disabled = false;
     }
   });

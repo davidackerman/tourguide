@@ -7,9 +7,11 @@ import {
   WEBLLM_MODELS,
   hasWebGPU,
   diagnoseWebGPU,
+  DEFAULT_ANALYSIS_BACKEND,
   type Settings,
   type LLMBackend,
 } from "./llm.js";
+import { waitForBackendReady, fetchHealth } from "./remote_analysis.js";
 
 export interface SettingsUIOptions {
   onChange: (backend: LLMBackend) => void;
@@ -79,6 +81,22 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           <button class="btn-secondary" data-action="test-gemini">Test key</button>
           <span class="test-result" data-test-result></span>
         </div>
+
+        <h3>Analysis backend</h3>
+        <div class="settings-section" data-section="analysis-backend">
+          <p class="hint">Optional. Heavy analyses (beyond Pyodide's ~4 GB cap) can run on a Hugging Face Space instead of in your browser. Default points at a shared instance; leave empty to disable the remote path.</p>
+          <label>
+            Backend URL
+            <input type="text" data-field="analysisBackendUrl" value="${escapeAttr(current.analysisBackendUrl)}" placeholder="${DEFAULT_ANALYSIS_BACKEND}" />
+          </label>
+          <div class="analysis-backend-row">
+            <button class="btn-secondary" data-action="test-analysis-backend">Test backend</button>
+            <span class="test-result" data-analysis-backend-result></span>
+          </div>
+          <p class="hint">
+            Want isolated compute? <a href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space</a> into your own free HF account (~5 min, one-time), then paste the resulting URL above.
+          </p>
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" data-action="cancel">Cancel</button>
@@ -127,6 +145,52 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       testBtn.disabled = false;
     }
   });
+
+  const testAnalysisBtn = overlay.querySelector<HTMLButtonElement>("[data-action='test-analysis-backend']")!;
+  const analysisResult = overlay.querySelector<HTMLSpanElement>("[data-analysis-backend-result]")!;
+  testAnalysisBtn.addEventListener("click", async () => {
+    const url = get("analysisBackendUrl").trim();
+    if (!url) {
+      analysisResult.textContent = "URL empty — remote analysis disabled";
+      analysisResult.className = "test-result";
+      return;
+    }
+    analysisResult.textContent = "Pinging…";
+    analysisResult.className = "test-result pending";
+    testAnalysisBtn.disabled = true;
+    try {
+      const h = await waitForBackendReady(url, {
+        maxMs: 90_000,
+        onProgress: (state, msg) => {
+          analysisResult.textContent = msg;
+          analysisResult.className = state === "ready" ? "test-result ok" : "test-result pending";
+        },
+      });
+      const memStr = h.mem_gb_total ? ` (${h.mem_gb_free?.toFixed(1) ?? "?"} / ${h.mem_gb_total.toFixed(1)} GB free)` : "";
+      analysisResult.textContent = `● Ready ${h.version ?? ""}${memStr}`;
+      analysisResult.className = "test-result ok";
+    } catch (err) {
+      analysisResult.textContent = (err as Error).message.slice(0, 140);
+      analysisResult.className = "test-result err";
+    } finally {
+      testAnalysisBtn.disabled = false;
+    }
+  });
+
+  // Quick, non-blocking health ping when the dialog opens so the status
+  // reflects current reality without a click.
+  void (async () => {
+    const url = get("analysisBackendUrl").trim();
+    if (!url) return;
+    const h = await fetchHealth(url);
+    if (h?.ok) {
+      analysisResult.textContent = `● Ready`;
+      analysisResult.className = "test-result ok";
+    } else {
+      analysisResult.textContent = `● Asleep — click Test to wake`;
+      analysisResult.className = "test-result";
+    }
+  })();
 
   const testWebLLMBtn = overlay.querySelector<HTMLButtonElement>("[data-action='test-webllm']")!;
   const webllmResult = overlay.querySelector<HTMLSpanElement>("[data-webllm-result]")!;
@@ -189,6 +253,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       geminiApiKey: get("geminiApiKey").trim(),
       geminiModel: get("geminiModel") || "gemini-2.5-flash",
       webllmModel: get("webllmModel") || WEBLLM_MODELS[0].id,
+      analysisBackendUrl: get("analysisBackendUrl").trim(),
     };
     saveSettings(next);
     opts.onChange(backendFromSettings(next));

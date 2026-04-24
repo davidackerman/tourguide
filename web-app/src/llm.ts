@@ -324,13 +324,22 @@ export interface Settings {
   geminiApiKey: string;
   geminiModel: string;
   webllmModel: string;
+  // Optional HF-Space analysis backend (see hf-space/app.py). Empty string
+  // disables the remote path — everything still works via Pyodide.
+  analysisBackendUrl: string;
 }
+
+// Shared tourguide analysis Space. Each user who wants isolated compute can
+// duplicate this to their own HF account and paste the new URL into Settings
+// — but the default just works with no setup.
+export const DEFAULT_ANALYSIS_BACKEND = "https://ackermand-tourguide-analysis.hf.space";
 
 const DEFAULT_SETTINGS: Settings = {
   backend: "none",
   geminiApiKey: "",
   geminiModel: "gemini-2.5-flash",
   webllmModel: WEBLLM_MODELS[0].id,
+  analysisBackendUrl: DEFAULT_ANALYSIS_BACKEND,
 };
 
 export function loadSettings(): Settings {

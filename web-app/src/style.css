@@ -975,6 +975,26 @@ button {
   margin: 0.4rem 0;
 }
 
+.custom-remote-toggle {
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+}
+
+.custom-remote-toggle input {
+  margin: 0;
+}
+
+.analysis-backend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
 .btn-download {
   font-size: 0.78rem;
   padding: 0.25rem 0.55rem;
