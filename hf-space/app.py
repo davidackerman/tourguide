@@ -227,39 +227,71 @@ async def _load_layer(layer: LayerSpec, tunnel: Optional[TunnelSession]) -> np.n
             return await tunnel.read(full)
         return await read_zarr_scale(read_at_scale, layer.scalePath)
 
-    # Remote path.
-    import zarr
-    import fsspec  # noqa: WPS433
+    # Remote path — use tensorstore. Parallel chunk fetches over HTTP are
+    # substantially faster than zarr-python + fsspec for multi-chunk arrays.
+    return await _load_via_tensorstore(layer)
 
-    url = layer.url
-    raw_proto = url.split("://", 1)[0] if "://" in url else "file"
-    # fsspec's HTTP backend covers both http and https under the "http" key.
-    proto = "http" if raw_proto in ("http", "https") else raw_proto
-    fs_kwargs: Dict[str, Any] = {}
-    if proto == "s3":
-        fs_kwargs["anon"] = True  # CellMap buckets are public
+
+async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
+    """Open a remote zarr with tensorstore and materialize to numpy.
+
+    Uses the tensorstore HTTP kvstore for https:// and s3:// (S3 is reachable
+    over HTTPS, anon read). Supports zarr v2 and v3 — we try v2 first since
+    that's the CellMap / COSEM convention.
+    """
+    import tensorstore as ts  # noqa: WPS433
+
+    url = layer.url.rstrip("/") + "/"
+    raw_proto = url.split("://", 1)[0] if "://" in url else "http"
+    if raw_proto in ("http", "https"):
+        kvstore: Dict[str, Any] = {"driver": "http", "base_url": url}
+    elif raw_proto == "s3":
+        # TODO: tensorstore's native s3 driver is faster than tunneling via
+        # http, but needs bucket+path broken out. For now treat as http over
+        # the bucket's HTTPS endpoint (CellMap buckets are public + anon).
+        https_url = "https://" + url.split("://", 1)[1]
+        kvstore = {"driver": "http", "base_url": https_url}
+    else:
+        raise HTTPException(status_code=400, detail=f"unsupported layer URL scheme: {raw_proto}")
+
+    # Try zarr v2 first (CellMap default), fall back to v3.
+    last_err: Optional[Exception] = None
+    ts_arr = None
+    for driver in ("zarr", "zarr3"):
+        spec = {
+            "driver": driver,
+            "kvstore": kvstore,
+            "path": layer.scalePath or "",
+            "open": True,
+        }
+        try:
+            ts_arr = await ts.open(spec)
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            continue
+    if ts_arr is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"tensorstore failed to open {url} path={layer.scalePath!r}: {type(last_err).__name__}: {last_err}",
+        )
+
+    rank = ts_arr.rank
+    axes = list(layer.axesOrder) if layer.axesOrder and len(layer.axesOrder) == rank else None
+    if axes is not None:
+        sel = tuple(slice(None) if a in ("x", "y", "z") else 0 for a in axes)
+    else:
+        sel = tuple(slice(None) if i >= rank - 3 else 0 for i in range(rank))
+
     try:
-        fs = fsspec.filesystem(proto, **fs_kwargs)
-        mapper = fs.get_mapper(url)
-        arr = zarr.open(mapper, path=layer.scalePath, mode="r")
+        sliced = ts_arr[sel]
+        data = await sliced.read()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=400,
-            detail=f"failed to open {url} (path={layer.scalePath!r}): {type(exc).__name__}: {exc}",
+            detail=f"tensorstore read failed ({url} path={layer.scalePath!r} shape={list(ts_arr.shape)}): {type(exc).__name__}: {exc}",
         )
-    # Reduce leading non-spatial dims to 0; mirror frontend's Pyodide path.
-    sel = tuple(slice(None) if a in ("x", "y", "z") else 0 for a in layer.axesOrder) if layer.axesOrder else tuple(
-        slice(None) for _ in range(arr.ndim)
-    )
-    if len(sel) != arr.ndim:
-        sel = tuple(slice(None) if i >= arr.ndim - 3 else 0 for i in range(arr.ndim))
-    try:
-        return np.asarray(arr[sel])
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=400,
-            detail=f"failed to read {url} at {layer.scalePath!r} shape={arr.shape}: {type(exc).__name__}: {exc}",
-        )
+    return np.asarray(data)
 
 
 def _join_url(base: str, rel: str) -> str:
