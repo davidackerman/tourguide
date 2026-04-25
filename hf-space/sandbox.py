@@ -155,6 +155,11 @@ def _apply_rlimits(mem_bytes: int, cpu_s: int) -> None:
 # The Seung-lab extras (cc3d, fastmorph, etc.) are optional imports — present
 # on the HF Space, missing in Pyodide — so the prompt tells the LLM which
 # set to use based on where the code is running.
+#
+# We also override builtins.print so user code's prints flow into
+# _TG_STDOUT and end up in the response (and the modal's output area)
+# instead of being lost in the subprocess. Without this the user has no
+# visibility into anything their code printed during analysis.
 _PRELUDE = """
 import numpy as np
 import pandas as pd
@@ -176,6 +181,19 @@ try: import kimimaro
 except ImportError: kimimaro = None
 try: import zmesh
 except ImportError: zmesh = None
+
+# Print capture (mirrors the Pyodide worker setup).
+import builtins as _b
+if not isinstance(_TG_STDOUT, list):
+    _TG_STDOUT = []
+_real_print = _b.print
+def _captured_print(*args, **kwargs):
+    try:
+        _TG_STDOUT.append(' '.join(str(a) for a in args))
+    except Exception:
+        pass
+    _real_print(*args, **kwargs)
+_b.print = _captured_print
 """
 
 
