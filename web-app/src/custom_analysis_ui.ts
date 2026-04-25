@@ -504,11 +504,14 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
           tunnel = t;
         }
         showProgress("Running on backend …");
+        // Remote runs get a much longer budget than Pyodide because there
+        // is no WASM memory cap and we often operate on whole multi-hundred-
+        // million-voxel arrays. 5 min matches the backend sandbox default.
         result = await postAnalysisRequest(analysisBackendUrl, {
           layers: layersForRequest,
           tables: collectTables(),
           code: codeEl.value,
-          timeoutMs: 60_000,
+          timeoutMs: 300_000,
           sessionId,
         });
       } else {

@@ -221,11 +221,23 @@ async def _load_layer(layer: LayerSpec, tunnel: Optional[TunnelSession]) -> np.n
         base_path = parsed.path or "/"
         if not base_path.endswith("/"):
             base_path += "/"
+        n_reads = 0
         async def read_at_scale(path: str) -> Optional[bytes]:
+            nonlocal n_reads
+            n_reads += 1
             full = _join_url(base_path, path)
-            log.debug("tunnel read %s", full)
-            return await tunnel.read(full)
-        return await read_zarr_scale(read_at_scale, layer.scalePath)
+            log.info("tunnel read #%d %s", n_reads, full)
+            t_read = time.monotonic()
+            data = await tunnel.read(full)
+            log.info(
+                "tunnel read #%d -> %s bytes in %.2fs",
+                n_reads, len(data) if data else 0, time.monotonic() - t_read,
+            )
+            return data
+        log.info("loading layer %s via tunnel (scale=%s, session=%s)", layer.varName, layer.scalePath, tunnel.session_id)
+        arr = await read_zarr_scale(read_at_scale, layer.scalePath)
+        log.info("loaded layer %s: shape=%s dtype=%s in %d reads", layer.varName, arr.shape, arr.dtype, n_reads)
+        return arr
 
     # Remote path — use tensorstore. Parallel chunk fetches over HTTP are
     # substantially faster than zarr-python + fsspec for multi-chunk arrays.
@@ -558,10 +570,21 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
             timeout_s = max(5, body.timeoutMs // 1000)
 
             # Run user code sandboxed. fork keeps numpy arrays COW-shared.
+            log.info(
+                "running sandbox (session=%s, code=%d bytes, timeout=%ds, layers=%s)",
+                session_id, len(body.code), timeout_s,
+                [(n, v["array"].shape, str(v["array"].dtype)) for n, v in layers_info.items()],
+            )
+            t_sandbox = time.monotonic()
             sandbox_result: SandboxResult = run_sandboxed(
                 body.code,
                 g,
                 timeout_s=timeout_s,
+            )
+            log.info(
+                "sandbox finished in %.2fs ok=%s error=%s",
+                time.monotonic() - t_sandbox, sandbox_result.ok,
+                (sandbox_result.error or "")[:160],
             )
             if not sandbox_result.ok:
                 return {

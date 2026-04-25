@@ -131,9 +131,12 @@ def check_code(source: str) -> SandboxVerdict:
 # ---- Execution --------------------------------------------------------------
 
 # Limits applied to the worker process before user code runs.
-DEFAULT_TIMEOUT_S = 60
+# On the HF Space with 16 GB RAM and 2 vCPU, ops like binary_erosion or
+# cc3d.connected_components on a 500M-voxel array take a couple of minutes.
+# The 60s ceiling we started with was way too tight.
+DEFAULT_TIMEOUT_S = 300  # 5 minutes wall-clock; user code should stay well under
 DEFAULT_MEM_BYTES = 14 * 1024 * 1024 * 1024  # 14 GB — leaves headroom inside a 16 GB Space
-DEFAULT_CPU_S = 120  # CPU-seconds; generous so the wall-clock timeout is the real gate
+DEFAULT_CPU_S = 600  # CPU-seconds; generous so wall-clock is the real gate
 
 
 def _apply_rlimits(mem_bytes: int, cpu_s: int) -> None:
