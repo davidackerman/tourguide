@@ -652,7 +652,9 @@ RULES:
 - Do NOT add 'import' statements for the libs already imported above; you may import standard-lib modules freely.
 - Convert positions with array_index * spacing + offset if you need world nm.
 - Prefer operating on the loaded arrays directly; don't try to re-read from disk.
-- Keep runtime under ~30s; prefer coarsest-scale arrays.`;
+- Use \`print(...)\` to log intermediate progress: input shapes/dtypes/value ranges, intermediate counts, timing of expensive steps. Captured stdout shows up in the modal's output area, so the user can see what your script is doing — especially valuable for analyses that take more than a few seconds.
+- Set \`_TG_NARRATION\` to a one- or two-sentence final human-readable summary (the answer, not the play-by-play).
+- Keep runtime ${useRemote ? "under ~5 min on the HF backend (long-running ops are fine; report progress via print())" : "under ~30s; prefer coarsest-scale arrays"}.`;
 }
 
 function extractPythonCode(raw: string): string {
