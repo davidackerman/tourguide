@@ -21,6 +21,6 @@ connected-components-3d==3.18.0
 fastmorph==1.2.0
 fastremap==1.15.0
 edt==2.4.1
-kimimaro==4.2.1
+kimimaro==5.8.1
 zmesh==1.9.1
 python-multipart==0.0.12
