@@ -68,6 +68,19 @@ ALLOWED_IMPORTS = {
     "traceback",
     "concurrent",
     "concurrent.futures",
+    # Common stdlib utilities user/LLM code reaches for. None of these can
+    # do anything dangerous on their own — file/socket/process modules
+    # remain blocked elsewhere by the regex deny-list.
+    "time",
+    "datetime",
+    "random",
+    "copy",
+    "string",
+    "uuid",
+    "warnings",
+    "operator",
+    "heapq",
+    "bisect",
 }
 
 FORBIDDEN_PATTERNS = [
