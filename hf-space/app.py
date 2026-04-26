@@ -576,7 +576,11 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
                 [(n, v["array"].shape, str(v["array"].dtype)) for n, v in layers_info.items()],
             )
             t_sandbox = time.monotonic()
-            sandbox_result: SandboxResult = run_sandboxed(
+            # run_sandboxed blocks on proc.join — push it onto a worker thread
+            # so the asyncio loop stays responsive (health probes, other
+            # sessions, the WS tunnel itself).
+            sandbox_result: SandboxResult = await asyncio.to_thread(
+                run_sandboxed,
                 body.code,
                 g,
                 timeout_s=timeout_s,

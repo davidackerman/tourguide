@@ -241,6 +241,10 @@ class SandboxResult:
     traceback: Optional[str] = None
 
 
+_HEARTBEAT_S = 10
+_log = __import__("logging").getLogger("tourguide")
+
+
 def run_sandboxed(
     source: str,
     globals_dict: Dict[str, Any],
@@ -254,7 +258,14 @@ def run_sandboxed(
     Note: multiprocessing pickles globals_dict to send it over. numpy arrays
     handle that fine; anything exotic (PyProxy, open file handles) would
     break — but we don't hand user code anything exotic.
+
+    We poll the process with short joins instead of one long join, so we
+    can emit a heartbeat to the parent's logger every ~10 s. That gives
+    the user something to watch in HF Container Logs even when the AI's
+    code is silent (no prints).
     """
+    import time as _time
+
     verdict = check_code(source)
     if not verdict.ok:
         return SandboxResult(ok=False, error=verdict.reason)
@@ -267,13 +278,22 @@ def run_sandboxed(
         daemon=True,
     )
     proc.start()
-    proc.join(timeout=timeout_s)
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(5)
-        if proc.is_alive():
-            proc.kill()
-        return SandboxResult(ok=False, error=f"timed out after {timeout_s}s")
+    start = _time.time()
+    last_heartbeat = start
+    while True:
+        proc.join(timeout=1)
+        if not proc.is_alive():
+            break
+        elapsed = _time.time() - start
+        if elapsed > timeout_s:
+            proc.terminate()
+            proc.join(5)
+            if proc.is_alive():
+                proc.kill()
+            return SandboxResult(ok=False, error=f"timed out after {timeout_s}s")
+        if _time.time() - last_heartbeat >= _HEARTBEAT_S:
+            last_heartbeat = _time.time()
+            _log.info("sandbox heartbeat: still running, elapsed %.0fs / %ds", elapsed, timeout_s)
 
     if proc.exitcode != 0 and queue.empty():
         return SandboxResult(ok=False, error=f"worker exited with code {proc.exitcode}")
