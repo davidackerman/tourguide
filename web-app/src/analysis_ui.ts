@@ -11,11 +11,19 @@ import {
   AnalysisClient,
   SAFE_INPUT_BYTES,
   type AnalysisResult,
+  type CustomAnalysisResult,
   type LayerInspection,
   type LayerScaleInfo,
   isZarrSource,
   normalizeZarrUrl,
 } from "./analysis.js";
+import { loadSettings } from "./llm.js";
+import {
+  fetchHealth,
+  openBrowserTunnel,
+  postAnalysisRequest,
+  waitForBackendReady,
+} from "./remote_analysis.js";
 
 export interface AnalysisUICallbacks {
   getDescriptor: () => DatasetDescriptor | null;
@@ -78,6 +86,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" data-cancel>Cancel</button>
+        <label class="custom-remote-toggle" data-remote-row hidden>
+          <input type="checkbox" data-remote-toggle />
+          <span data-remote-label>Run on backend</span>
+        </label>
         <button class="btn-primary" data-run disabled>Run analysis</button>
       </div>
     </div>
@@ -96,8 +108,33 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   const runBtn = $<HTMLButtonElement>("[data-run]");
   const cancelBtn = $<HTMLButtonElement>("[data-cancel]");
   const closeBtn = $<HTMLButtonElement>(".modal-close");
+  const remoteRow = $<HTMLLabelElement>("[data-remote-row]");
+  const remoteToggle = $<HTMLInputElement>("[data-remote-toggle]");
+  const remoteLabel = $<HTMLSpanElement>("[data-remote-label]");
 
   const client = new AnalysisClient();
+
+  // Wire the same Run-on-backend toggle the Custom modal has. When
+  // checked, instead of using Pyodide we generate a regionprops Python
+  // snippet and POST it to the HF Space — keeps one code path on the
+  // backend (POST /api/analysis/run) and reuses the result-table plumbing.
+  const analysisBackendUrl = loadSettings().analysisBackendUrl.trim();
+  if (analysisBackendUrl) {
+    remoteRow.hidden = false;
+    const shortUrl = analysisBackendUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-muted">(checking …)</span>`;
+    remoteToggle.disabled = true;
+    void (async () => {
+      const h = await fetchHealth(analysisBackendUrl);
+      if (h?.ok) {
+        remoteToggle.disabled = false;
+        remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-ok">● ready</span>`;
+      } else {
+        remoteToggle.disabled = false;
+        remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-warn">● unreachable (click Run to retry)</span>`;
+      }
+    })();
+  }
 
   segLayers.forEach((l, i) => {
     const opt = document.createElement("option");
@@ -247,7 +284,11 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     if (!currentInspection || selectedScaleIdx == null) return;
     clearError();
     const scale: LayerScaleInfo = currentInspection.scales[selectedScaleIdx];
-    if (scale.approxBytes > SAFE_INPUT_BYTES) {
+    const useRemote = analysisBackendUrl && remoteToggle.checked;
+
+    // WASM-cap warning only matters for the local Pyodide path. Backend
+    // has 16 GB real RAM; skip the prompt there.
+    if (!useRemote && scale.approxBytes > SAFE_INPUT_BYTES) {
       const gb = (scale.approxBytes / 1024 ** 3).toFixed(2);
       const ok = confirm(
         `This scale is ${gb} GB. Pyodide has a ~4 GB WASM memory ceiling and ` +
@@ -258,33 +299,81 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     runBtn.disabled = true;
     inspectStatus.textContent = "";
     const axesOrder = currentInspection.axes.map((a) => a.name);
+    const url = normalizeZarrUrl(currentLayer.source);
     showProgress("Starting …");
+    let tunnel: { close: () => void } | null = null;
     try {
-      const url = normalizeZarrUrl(currentLayer.source);
-      // Hard safety cap = 3 GB worth of voxels for this dtype — beyond that
-      // the allocation itself fails synchronously. We let the UI confirm
-      // anything between SAFE_INPUT_BYTES and that cap.
-      const maxVoxels = Math.floor((3 * SAFE_INPUT_BYTES) / Math.max(1, scale.approxBytes / productOf(scale.shape)));
-      const result = await client.analyze(
-        {
-          url,
-          scalePath: scale.path,
-          axesOrder,
+      if (useRemote) {
+        await waitForBackendReady(analysisBackendUrl, {
+          onProgress: (_state, msg) => showProgress(msg),
+        });
+        const sessionId =
+          typeof crypto?.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        if (/\/local-data\//.test(url)) {
+          showProgress("Opening tunnel to browser data …");
+          const t = openBrowserTunnel(analysisBackendUrl, sessionId);
+          await t.ready;
+          tunnel = t;
+        }
+        showProgress("Running regionprops on backend …");
+        const remote: CustomAnalysisResult = await postAnalysisRequest(analysisBackendUrl, {
+          layers: [
+            {
+              varName: "image",
+              url,
+              scalePath: scale.path,
+              axesOrder,
+              voxelNm: scale.voxelNm,
+              offsetNm: scale.offsetNm,
+            },
+          ],
+          tables: [],
+          code: buildRegionpropsCode(labeledSel.value === "true"),
+          timeoutMs: 300_000,
+          sessionId,
+        });
+        if (!remote.table) throw new Error("Backend returned no table.");
+        // Adapt the {table: {columns, rows}} response into the AnalysisResult
+        // shape that ingestResult already knows how to consume.
+        const result: AnalysisResult = {
+          columns: remote.table.columns,
+          rows: remote.table.rows as (number | string)[][],
+          shape: scale.shape,
           voxelNm: scale.voxelNm,
-          offsetNm: scale.offsetNm,
-          maxVoxels,
-          alreadyLabeled: labeledSel.value === "true",
-        },
-        (message) => showProgress(message),
-      );
-      showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
-      await ingestResult(cb, currentLayer, scale, result);
-      cb.onTableAdded();
-      close();
+          labelCount: remote.table.rows.length,
+        };
+        showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
+        await ingestResult(cb, currentLayer, scale, result);
+        cb.onTableAdded();
+        close();
+      } else {
+        // Local Pyodide path (unchanged).
+        const maxVoxels = Math.floor((3 * SAFE_INPUT_BYTES) / Math.max(1, scale.approxBytes / productOf(scale.shape)));
+        const result = await client.analyze(
+          {
+            url,
+            scalePath: scale.path,
+            axesOrder,
+            voxelNm: scale.voxelNm,
+            offsetNm: scale.offsetNm,
+            maxVoxels,
+            alreadyLabeled: labeledSel.value === "true",
+          },
+          (message) => showProgress(message),
+        );
+        showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
+        await ingestResult(cb, currentLayer, scale, result);
+        cb.onTableAdded();
+        close();
+      }
     } catch (err) {
       hideProgress();
       showError((err as Error).message);
       runBtn.disabled = false;
+    } finally {
+      tunnel?.close();
     }
   });
 
@@ -312,6 +401,69 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Backend-side regionprops Python. Mirrors the Pyodide kernel in
+// analysis_worker.ts so the schema of the returned table matches exactly:
+// object_id, volume, position_xyz, bbox_min/max_xyz, equivalent_diameter,
+// n_voxels. Click-to-fly works out of the box because the columns line up.
+function buildRegionpropsCode(alreadyLabeled: boolean): string {
+  return `
+import time as _t, numpy as np
+spacing = layers["image"]["spacing"]
+offsets = layers["image"]["offsets"]
+axes    = layers["image"]["axes"]
+arr = image
+print(f"input shape={arr.shape} dtype={arr.dtype}", flush=True)
+
+if arr.dtype == np.uint64:
+    arr = arr.astype(np.int64, copy=False)
+
+t0 = _t.time()
+if ${alreadyLabeled ? "True" : "False"}:
+    labels = arr.astype(np.int64, copy=False)
+    n_labels = int(labels.max()) if labels.size else 0
+else:
+    structure = ndi.generate_binary_structure(arr.ndim, 1)
+    labels, n_labels = ndi.label(arr > 0, structure=structure)
+print(f"label step done in {_t.time()-t0:.2f}s; {n_labels} components", flush=True)
+
+t1 = _t.time()
+from skimage.measure import regionprops_table
+props = ("label", "area", "bbox", "centroid", "equivalent_diameter_area")
+tbl = regionprops_table(labels, spacing=tuple(spacing), properties=props)
+print(f"regionprops in {_t.time()-t1:.2f}s; rows={len(tbl['label'])}", flush=True)
+
+voxel_volume = float(np.prod(spacing))
+def axis_col(prefix, world_axis):
+    if world_axis not in axes: return [0.0] * len(tbl["label"])
+    i = axes.index(world_axis); off = offsets[i]
+    return [float(v) + off for v in tbl[f"{prefix}-{i}"].tolist()]
+def bbox_pair(world_axis):
+    if world_axis not in axes:
+        n = len(tbl["label"]); return [0.0]*n, [0.0]*n
+    i = axes.index(world_axis); s = spacing[i]; off = offsets[i]
+    lo = [float(v)*s + off for v in tbl[f"bbox-{i}"].tolist()]
+    hi = [float(v)*s + off for v in tbl[f"bbox-{i + len(axes)}"].tolist()]
+    return lo, hi
+
+cx = axis_col("centroid", "x"); cy = axis_col("centroid", "y"); cz = axis_col("centroid", "z")
+bx0, bx1 = bbox_pair("x"); by0, by1 = bbox_pair("y"); bz0, bz1 = bbox_pair("z")
+
+import pandas as pd
+df = pd.DataFrame({
+    "object_id":           [int(v) for v in tbl["label"].tolist()],
+    "volume":              [float(v) for v in tbl["area"].tolist()],
+    "position_x": cx, "position_y": cy, "position_z": cz,
+    "bbox_min_x": bx0, "bbox_min_y": by0, "bbox_min_z": bz0,
+    "bbox_max_x": bx1, "bbox_max_y": by1, "bbox_max_z": bz1,
+    "equivalent_diameter": [float(v) for v in tbl["equivalent_diameter_area"].tolist()],
+    "n_voxels":            [int(v / voxel_volume + 0.5) for v in tbl["area"].tolist()],
+})
+_TG_TABLE = df
+_TG_TABLE_NAME = "regionprops"
+_TG_NARRATION = f"Regionprops on backend: {len(df)} objects."
+`;
 }
 
 // Inject the analysis result into the existing DatasetDB as a new table so
