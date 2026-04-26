@@ -671,6 +671,11 @@ Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/ski
               spherical_dilate / spherical_open / spherical_close. radius is a
               SCALAR in physical units; anisotropy is per-axis voxel spacing.
               Do NOT pass a per-axis list as radius — that raises a broadcast error.
+              Operates DIRECTLY on label volumes: each label is eroded
+              independently, fully-eroded labels disappear, labels are
+              preserved (no relabeling needed). Do NOT loop over np.unique(labels)
+              calling ndi.binary_erosion per-label — one fastmorph call replaces
+              that entire pattern and is 100-1000× faster.
 - fastremap — renumber, remap, mask, unique, refit; in-place relabeling at numpy speeds.
 - edt — signed / unsigned Euclidean distance transform.
 - kimimaro — TEASAR skeletonization for neuron/tubule volumes.
