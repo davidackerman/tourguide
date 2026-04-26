@@ -721,9 +721,9 @@ RULES:
 - Do NOT add 'import' statements for the libs already imported above; you may import standard-lib modules freely.
 - Convert positions with array_index * spacing + offset if you need world nm.
 - Prefer operating on the loaded arrays directly; don't try to re-read from disk.
-- ALWAYS print BEFORE every potentially-slow operation and AFTER it with timing. This is mandatory, not optional. Examples:
+- ALWAYS print BEFORE every potentially-slow operation and AFTER it with timing. This is mandatory, not optional. \`time\` is already imported, no need to re-import. Examples:
   \`print(f"input shape={mito.shape} dtype={mito.dtype} unique_labels={len(np.unique(mito))-1}", flush=True)\`
-  \`import time; t0=time.time(); eroded = fastmorph.spherical_erode(...); print(f"erode done in {time.time()-t0:.2f}s", flush=True)\`
+  \`t0=time.time(); eroded = fastmorph.spherical_erode(...); print(f"erode done in {time.time()-t0:.2f}s", flush=True)\`
   Without these prints the user sees a blank "Running on backend..." for minutes with no idea what's happening. Even a 200-ms call should be wrapped if it's the main work step.
 - Pass \`flush=True\` on every print so HF Container Logs see it in real time (Python block-buffers stdout otherwise).
 - Set \`_TG_NARRATION\` to a one- or two-sentence final human-readable summary (the answer, not the play-by-play).

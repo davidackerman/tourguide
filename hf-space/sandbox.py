@@ -174,6 +174,7 @@ def _apply_rlimits(mem_bytes: int, cpu_s: int) -> None:
 # instead of being lost in the subprocess. Without this the user has no
 # visibility into anything their code printed during analysis.
 _PRELUDE = """
+import time
 import numpy as np
 import pandas as pd
 import matplotlib
