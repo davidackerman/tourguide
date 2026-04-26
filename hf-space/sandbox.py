@@ -183,15 +183,26 @@ try: import zmesh
 except ImportError: zmesh = None
 
 # Print capture (mirrors the Pyodide worker setup).
-import builtins as _b
+import builtins as _b, sys as _sys
 if not isinstance(_TG_STDOUT, list):
     _TG_STDOUT = []
+# Subprocess stdout is inherited from the parent (uvicorn -> HF Container
+# logs). But Python defaults to block buffering on a non-tty, so prints
+# from a long-running analysis don't appear in the logs until the process
+# exits. Force line buffering + flush=True so each print() is visible
+# in HF Logs in real time.
+try:
+    _sys.stdout.reconfigure(line_buffering=True)
+    _sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 _real_print = _b.print
 def _captured_print(*args, **kwargs):
     try:
         _TG_STDOUT.append(' '.join(str(a) for a in args))
     except Exception:
         pass
+    kwargs.setdefault('flush', True)
     _real_print(*args, **kwargs)
 _b.print = _captured_print
 """
