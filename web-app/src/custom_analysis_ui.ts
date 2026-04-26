@@ -609,8 +609,10 @@ Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/ski
 - cc3d — connected_components, statistics, dust (remove small components),
          largest_k, each_contiguous_region, each_neighboring_pair.
          Auto-parallelizes via OpenMP; don't bother threading it yourself.
-- fastmorph — spherical_erode / spherical_dilate / spherical_open / spherical_close,
-              much faster than scipy.ndimage for label or binary volumes.
+- fastmorph — spherical_erode(labels, radius, anisotropy=(sx,sy,sz)) /
+              spherical_dilate / spherical_open / spherical_close. radius is a
+              SCALAR in physical units; anisotropy is per-axis voxel spacing.
+              Do NOT pass a per-axis list as radius — that raises a broadcast error.
 - fastremap — renumber, remap, mask, unique, refit; in-place relabeling at numpy speeds.
 - edt — signed / unsigned Euclidean distance transform.
 - kimimaro — TEASAR skeletonization for neuron/tubule volumes.
