@@ -667,9 +667,13 @@ Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/ski
 - cc3d — connected_components, statistics, dust (remove small components),
          largest_k, each_contiguous_region, each_neighboring_pair.
          Auto-parallelizes via OpenMP; don't bother threading it yourself.
-- fastmorph — spherical_erode(labels, radius, anisotropy=(sx,sy,sz)) /
+- fastmorph — spherical_erode(labels, radius, anisotropy=...) /
               spherical_dilate / spherical_open / spherical_close. radius is a
-              SCALAR in physical units; anisotropy is per-axis voxel spacing.
+              SCALAR in physical units. \`anisotropy\` follows the ARRAY axis
+              order (NOT xyz) — for a (Z,Y,X)-shaped array, anisotropy is
+              (sz, sy, sx). Easiest: just pass \`anisotropy=layers["<name>"]["spacing"]\`,
+              which is already in array-axis order. Do NOT rebuild it into xyz
+              order — that produces a wrong structuring element.
               Do NOT pass a per-axis list as radius — that raises a broadcast error.
               Operates DIRECTLY on label volumes: each label is eroded
               independently, fully-eroded labels disappear, labels are
