@@ -292,9 +292,59 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   const showError = (msg: string): void => {
     errEl.hidden = false;
     errEl.textContent = msg;
+    // Drop any previous Fix-with-AI button — caller decides when to add one.
+  };
+  // Show an error AND a "Fix with AI" button, which feeds the error back
+  // to the LLM with the previous question + failed code as context, gets
+  // a corrected version, and replaces the textarea so the user can Run.
+  const showErrorWithFix = (msg: string, failedCode: string): void => {
+    showError(msg);
+    const backend = cb.getBackend();
+    if (!backend.isReady() || !lastAiQuestion) return; // no AI configured / no prior Q
+    const fixBtn = document.createElement("button");
+    fixBtn.className = "btn-secondary btn-fix-ai";
+    fixBtn.type = "button";
+    fixBtn.textContent = "✨ Fix with AI";
+    fixBtn.addEventListener("click", async () => {
+      fixBtn.disabled = true;
+      fixBtn.textContent = "Thinking…";
+      try {
+        const aiUseRemote = !!(analysisBackendUrl && remoteToggle.checked);
+        const systemPrompt = buildSystemPrompt(slots, collectTables(), aiUseRemote);
+        const raw = await backend.complete(
+          [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: lastAiQuestion },
+            { role: "assistant", content: failedCode },
+            {
+              role: "user",
+              content:
+                "Your code raised this error:\n\n```\n" +
+                msg.slice(0, 4000) +
+                "\n```\n\nReturn the corrected Python ONLY — no JSON, no fences, no prose. Use the same _TG_* output channels as before.",
+            },
+          ],
+          { temperature: 0.1, maxTokens: 2000 },
+        );
+        const fixed = extractPythonCode(raw);
+        codeEl.value = fixed;
+        hideError();
+        // Auto-rerun the corrected code so the user doesn't have to click Run.
+        runBtn.click();
+      } catch (err) {
+        showError("Fix-with-AI failed: " + (err as Error).message);
+      } finally {
+        fixBtn.disabled = false;
+        fixBtn.textContent = "✨ Fix with AI";
+      }
+    });
+    // Render below the message but inside the same container.
+    errEl.appendChild(document.createElement("br"));
+    errEl.appendChild(fixBtn);
   };
   const hideError = (): void => {
     errEl.hidden = true;
+    errEl.textContent = "";
   };
   const showProgress = (msg: string): void => {
     progressEl.hidden = false;
@@ -322,6 +372,9 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
 
   // Keep a handle to the most recent code so download buttons work.
   let lastCode: string = "";
+  // Track the last AI question so the "Fix with AI" button can include it
+  // as conversational context when feeding back an error.
+  let lastAiQuestion: string = "";
 
   const renderOutput = (result: CustomAnalysisResult): void => {
     outEl.hidden = false;
@@ -530,7 +583,11 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       renderOutput(result);
     } catch (err) {
       hideProgress();
-      showError((err as Error).message);
+      // Errors from analysis bubble up here (sandbox traceback, fetch failure,
+      // or tunnel timeout). If we have an AI configured + a previous prompt,
+      // surface the "Fix with AI" button so the user can try a one-click
+      // self-correction loop instead of editing the code manually.
+      showErrorWithFix((err as Error).message, codeEl.value);
     } finally {
       tunnel?.close();
       runBtn.disabled = false;
@@ -568,6 +625,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       );
       const code = extractPythonCode(raw);
       codeEl.value = code;
+      lastAiQuestion = question; // remember for the Fix-with-AI loop on errors
     } catch (err) {
       showError("AI request failed: " + (err as Error).message);
     } finally {
@@ -630,7 +688,7 @@ AVAILABLE VARIABLES:
 Layers (numpy ndarrays, already loaded):
 ${layerDescs.join("\n")}
 
-Per-layer metadata is also available as \`layers["<varName>"]\` with keys: array, spacing (nm per voxel, array-axis order), offsets (world origin nm, array-axis order), axes (array-axis-order list of "x"/"y"/"z").
+Per-layer metadata is a Python dict at \`layers["<varName>"]\`. Access via subscript syntax — \`layers["mito"]["spacing"]\`, NOT \`layers["mito"].spacing\` (attribute access raises AttributeError, dicts don't have attributes). Keys: \`array\` (numpy ndarray), \`spacing\` (nm per voxel, array-axis order), \`offsets\` (world origin nm, array-axis order), \`axes\` (array-axis-order list of "x"/"y"/"z").
 
 DataFrames:
 ${tableDescs.join("\n") || "(none)"}

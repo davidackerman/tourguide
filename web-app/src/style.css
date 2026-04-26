@@ -1020,6 +1020,11 @@ button {
   padding: 0.25rem 0.55rem;
 }
 
+.btn-fix-ai {
+  margin-top: 0.45rem;
+  font-size: 0.82rem;
+}
+
 @keyframes progress-indeterminate {
   0% {
     background-position: 100% 0;
