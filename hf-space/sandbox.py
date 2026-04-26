@@ -283,20 +283,32 @@ def run_sandboxed(
     if not verdict.ok:
         return SandboxResult(ok=False, error=verdict.reason)
 
+    import queue as _queue
+
     ctx = multiprocessing.get_context("spawn")
-    queue: "multiprocessing.Queue" = ctx.Queue()
+    q: "multiprocessing.Queue" = ctx.Queue()
     proc = ctx.Process(
         target=_worker_entrypoint,
-        args=(source, globals_dict, queue, mem_bytes, cpu_s),
+        args=(source, globals_dict, q, mem_bytes, cpu_s),
         daemon=True,
     )
     proc.start()
     start = _time.time()
     last_heartbeat = start
+    payload_pair = None
+
+    # Actively drain the queue while the worker runs. multiprocessing.Queue
+    # is backed by a Pipe; if the worker tries to put a sizable result
+    # (DataFrame, numpy array) and the parent is only doing proc.join,
+    # the Pipe buffer fills and the worker blocks on put forever — a
+    # classic deadlock that looked like "still running" via heartbeat
+    # but the script was actually done.
     while True:
-        proc.join(timeout=1)
-        if not proc.is_alive():
+        try:
+            payload_pair = q.get(timeout=1)
             break
+        except _queue.Empty:
+            pass
         elapsed = _time.time() - start
         if elapsed > timeout_s:
             proc.terminate()
@@ -304,18 +316,26 @@ def run_sandboxed(
             if proc.is_alive():
                 proc.kill()
             return SandboxResult(ok=False, error=f"timed out after {timeout_s}s")
+        if not proc.is_alive():
+            # Subprocess exited without producing a result — shouldn't
+            # happen in normal operation, but bail rather than spin.
+            break
         if _time.time() - last_heartbeat >= _HEARTBEAT_S:
             last_heartbeat = _time.time()
             _log.info("sandbox heartbeat: still running, elapsed %.0fs / %ds", elapsed, timeout_s)
 
-    if proc.exitcode != 0 and queue.empty():
-        return SandboxResult(ok=False, error=f"worker exited with code {proc.exitcode}")
+    # Reap the subprocess.
+    proc.join(timeout=5)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
 
-    try:
-        tag, payload = queue.get_nowait()
-    except Exception:  # noqa: BLE001
+    if payload_pair is None:
+        if proc.exitcode != 0:
+            return SandboxResult(ok=False, error=f"worker exited with code {proc.exitcode}")
         return SandboxResult(ok=False, error="worker produced no result")
 
+    tag, payload = payload_pair
     if tag == "ok":
         return SandboxResult(ok=True, outputs=payload)
     return SandboxResult(ok=False, error=payload.get("message"), traceback=payload.get("traceback"))
