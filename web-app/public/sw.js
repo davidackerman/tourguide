@@ -65,7 +65,14 @@ async function resolvePath(rootHandle, path) {
   }
   let dir = rootHandle;
   for (let i = 0; i < parts.length - 1; i++) {
-    dir = await dir.getDirectoryHandle(parts[i]);
+    try {
+      dir = await dir.getDirectoryHandle(parts[i]);
+    } catch (e) {
+      // Sparse zarr volumes legitimately omit directories for all-fill
+      // slabs. Surface those as 404s, not 500s — every consumer (zarrita,
+      // our tunnel reader) already handles 404 == "use fill value".
+      return { kind: "missing", error: e };
+    }
   }
   const last = parts[parts.length - 1];
   // Try as a file first — this is the common case for chunk fetches.
