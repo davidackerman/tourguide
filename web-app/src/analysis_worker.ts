@@ -303,93 +303,155 @@ async function walkMultiscales(
 }
 
 // Build a synthetic OME-NGFF `multiscales` entry for groups that follow N5 /
-// Paintera conventions instead. Probes for child arrays at sN/<int> and reads
-// resolution + offset from group-level and per-scale attrs. Returns null if
-// the group doesn't look like a multiscale.
+// Paintera / cellmap conventions instead. Probes for child arrays at sN/<int>
+// and reads scale + offset from per-array and group-level attrs.
 //
-// Sources of resolution we accept (group-level), in order of preference:
-//   - resolution: [rx, ry, rz]   (Paintera/N5, xyz)
-//   - pixelResolution.dimensions: [rx, ry, rz]  (older N5, xyz)
-//   - scales: [[1,1,1], [2,2,2], ...]  (per-scale relative downsampling, xyz)
-// Per-scale `downsamplingFactors` (xyz), if present, multiply the base
-// resolution; otherwise we infer it from shape ratios at read-time.
+// Per-scale attrs (preferred — these are the absolute physical scale and
+// translation for that array):
+//   - transform: { axes: ["z","y","x"], scale: [sz,sy,sx], translate: [...] }
+//     (cellmap convention; axes give the order of scale/translate).
+//   - resolution: [rx, ry, rz]   (Paintera/N5, xyz absolute at this scale)
+//   - offset:     [ox, oy, oz]   (Paintera/N5, xyz absolute at this scale)
+// Group-level fallbacks (used when per-array info is missing):
+//   - resolution / pixelResolution.dimensions / scales[0] for a base xyz
+//     resolution at s0; per-scale `downsamplingFactors` multiplies it.
+// Returns null if no scale-level child arrays were found.
 async function synthesizeMultiscales(
   group: any,
   groupAttrs: any,
 ): Promise<{ axes: any[]; datasets: any[]; coordinateTransformations?: any[] } | null> {
   const childNames: string[] = [];
-  // Try common scale-level names. We can't list a FetchStore, so probe.
   for (let i = 0; i < 16; i++) childNames.push(`s${i}`);
   for (let i = 0; i < 16; i++) childNames.push(String(i));
-  const datasets: { path: string; coordinateTransformations: any[]; arr: any }[] = [];
+  type ScaleHit = {
+    path: string;
+    arr: any;
+    childAttrs: any;
+    scaleAxisOrder: number[] | null; // [sz, sy, sx] or null if unknown
+    transAxisOrder: number[] | null; // [tz, ty, tx] or null if unknown
+    dsFactorsXYZ: number[] | null;   // relative downsampling [dx,dy,dz]
+  };
+  const hits: ScaleHit[] = [];
   for (const name of childNames) {
     try {
       const arr = await zarr.open(group.resolve(name), { kind: "array" });
-      // Per-scale Paintera/N5 attrs (downsamplingFactors, transform/scale).
       const childAttrs = (arr.attrs as any) || {};
-      let dsFactors: number[] | undefined;
-      if (Array.isArray(childAttrs.downsamplingFactors)) dsFactors = childAttrs.downsamplingFactors;
-      else if (childAttrs.transform && Array.isArray(childAttrs.transform.scale))
-        dsFactors = childAttrs.transform.scale;
-      datasets.push({
+      hits.push({
         path: name,
         arr,
-        coordinateTransformations: dsFactors
-          ? [{ type: "scale", scale: dsFactors }]
-          : [{ type: "scale", scale: [1, 1, 1] }],
+        childAttrs,
+        scaleAxisOrder: extractAxisOrderedScale(childAttrs, arr.shape.length),
+        transAxisOrder: extractAxisOrderedTranslation(childAttrs, arr.shape.length),
+        dsFactorsXYZ: Array.isArray(childAttrs.downsamplingFactors)
+          ? (childAttrs.downsamplingFactors as number[])
+          : null,
       });
     } catch {
-      // missing — common, e.g. only s0..s4 exist; keep probing the rest
+      /* missing scale level — keep probing */
     }
   }
-  if (datasets.length === 0) return null;
-  // Resolve a base resolution (xyz). We'll attach it as a group-level scale
-  // transform; per-scale transforms above carry the relative downsampling.
-  const baseRes: number[] | undefined = Array.isArray(groupAttrs?.resolution)
+  if (hits.length === 0) return null;
+  const ndim = hits[0].arr.shape.length;
+  const inferredAxes = inferAxesFromShape(hits[0].arr.shape);
+  // Group-level fallback resolution/offset (xyz).
+  const groupResXYZ: number[] | undefined = Array.isArray(groupAttrs?.resolution)
     ? groupAttrs.resolution
     : Array.isArray(groupAttrs?.pixelResolution?.dimensions)
       ? groupAttrs.pixelResolution.dimensions
       : Array.isArray(groupAttrs?.scales?.[0])
         ? groupAttrs.scales[0]
         : undefined;
-  const baseOffset: number[] | undefined = Array.isArray(groupAttrs?.offset)
+  const groupOffsetXYZ: number[] | undefined = Array.isArray(groupAttrs?.offset)
     ? groupAttrs.offset
     : Array.isArray(groupAttrs?.translate)
       ? groupAttrs.translate
       : undefined;
-  // N5/Paintera conventions store resolution/offset in xyz order; OME-NGFF
-  // axes are zyx for 3D arrays. Reverse so the per-axis name lookup works.
-  const ndim = datasets[0].arr.shape.length;
-  const inferredAxes = inferAxesFromShape(datasets[0].arr.shape);
-  const groupCT: any[] = [];
-  if (baseRes && baseRes.length >= 3) {
-    const scaleZYX = [...baseRes].slice(0, 3).reverse();
-    // Pad to ndim with 1s for any non-spatial leading axes.
-    while (scaleZYX.length < ndim) scaleZYX.unshift(1);
-    groupCT.push({ type: "scale", scale: scaleZYX });
-  }
-  if (baseOffset && baseOffset.length >= 3) {
-    const transZYX = [...baseOffset].slice(0, 3).reverse();
-    while (transZYX.length < ndim) transZYX.unshift(0);
-    groupCT.push({ type: "translation", translation: transZYX });
-  }
-  // Per-scale CTs: factors as written are xyz; reverse + pad to ndim.
-  const dsOut = datasets.map((d) => {
-    const ct = d.coordinateTransformations.map((t: any) => {
-      if (t.type === "scale" && Array.isArray(t.scale)) {
-        const s = [...t.scale].slice(0, 3).reverse();
-        while (s.length < ndim) s.unshift(1);
-        return { type: "scale", scale: s };
-      }
-      return t;
-    });
-    return { path: d.path, coordinateTransformations: ct };
+  const datasets = hits.map((h) => {
+    // Pick scale (in array-axis order, zyx-ish): prefer per-array, then
+    // group base * downsamplingFactors, else fallback to ratio inferred
+    // later from shapes (we just emit [1,1,...] here).
+    let scaleOrdered: number[] | null = h.scaleAxisOrder;
+    if (!scaleOrdered && groupResXYZ && groupResXYZ.length >= 3) {
+      const ds = h.dsFactorsXYZ ?? [1, 1, 1];
+      const xyz = [groupResXYZ[0] * ds[0], groupResXYZ[1] * ds[1], groupResXYZ[2] * ds[2]];
+      scaleOrdered = padToNdim(xyz.slice().reverse(), ndim, 1);
+    }
+    let transOrdered: number[] | null = h.transAxisOrder;
+    if (!transOrdered && groupOffsetXYZ && groupOffsetXYZ.length >= 3) {
+      transOrdered = padToNdim([...groupOffsetXYZ].slice(0, 3).reverse(), ndim, 0);
+    }
+    const ct: any[] = [
+      { type: "scale", scale: scaleOrdered ?? padToNdim([1, 1, 1], ndim, 1) },
+    ];
+    if (transOrdered) ct.push({ type: "translation", translation: transOrdered });
+    return { path: h.path, coordinateTransformations: ct };
   });
-  return {
-    axes: inferredAxes,
-    datasets: dsOut,
-    coordinateTransformations: groupCT.length ? groupCT : undefined,
-  };
+  return { axes: inferredAxes, datasets };
+}
+
+// Read an array's absolute physical scale and return it in array-axis order
+// (matching arr.shape). Looks at:
+//   - transform.scale + transform.axes (cellmap convention; axes can be in
+//     any order — we permute to match the array's leading axes).
+//   - resolution: [rx, ry, rz] (xyz; reverse for zyx-ordered arrays).
+// Returns null if no usable scale info is present.
+function extractAxisOrderedScale(attrs: any, ndim: number): number[] | null {
+  const t = attrs?.transform;
+  if (t && Array.isArray(t.scale) && Array.isArray(t.axes)) {
+    const ordered = orderByAxes(t.scale, t.axes, ndim, 1);
+    if (ordered) return ordered;
+  }
+  if (Array.isArray(attrs?.resolution) && attrs.resolution.length >= 3) {
+    return padToNdim([...attrs.resolution].slice(0, 3).reverse(), ndim, 1);
+  }
+  if (Array.isArray(attrs?.pixelResolution?.dimensions) && attrs.pixelResolution.dimensions.length >= 3) {
+    return padToNdim([...attrs.pixelResolution.dimensions].slice(0, 3).reverse(), ndim, 1);
+  }
+  return null;
+}
+
+function extractAxisOrderedTranslation(attrs: any, ndim: number): number[] | null {
+  const t = attrs?.transform;
+  if (t && Array.isArray(t.translate) && Array.isArray(t.axes)) {
+    const ordered = orderByAxes(t.translate, t.axes, ndim, 0);
+    if (ordered) return ordered;
+  }
+  if (Array.isArray(attrs?.offset) && attrs.offset.length >= 3) {
+    return padToNdim([...attrs.offset].slice(0, 3).reverse(), ndim, 0);
+  }
+  if (Array.isArray(attrs?.translate) && attrs.translate.length >= 3) {
+    return padToNdim([...attrs.translate].slice(0, 3).reverse(), ndim, 0);
+  }
+  return null;
+}
+
+// Build an ndim-long vector indexed by the spatial axes z/y/x (last 3 dims)
+// from a value array + the axes labels declared in the same metadata. Any
+// non-spatial leading dims get the fill value.
+function orderByAxes(
+  values: number[],
+  axes: string[],
+  ndim: number,
+  fill: number,
+): number[] | null {
+  if (values.length !== axes.length) return null;
+  const map: Record<string, number> = {};
+  for (let i = 0; i < axes.length; i++) map[String(axes[i]).toLowerCase()] = values[i];
+  const spatial = ["z", "y", "x"];
+  const out: number[] = new Array(ndim).fill(fill);
+  const nSpatial = Math.min(3, ndim);
+  for (let i = 0; i < nSpatial; i++) {
+    const axis = spatial[spatial.length - nSpatial + i];
+    const idx = ndim - nSpatial + i;
+    out[idx] = map[axis] ?? fill;
+  }
+  return out;
+}
+
+function padToNdim(arr: number[], ndim: number, fill: number): number[] {
+  const out = arr.slice();
+  while (out.length < ndim) out.unshift(fill);
+  return out.slice(out.length - ndim);
 }
 
 function inferAxesFromShape(shape: number[]): { name: string; type?: string }[] {
