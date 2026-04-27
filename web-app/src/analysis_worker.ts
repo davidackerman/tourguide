@@ -221,22 +221,64 @@ async function walkMultiscales(
     };
   }
   // group — look for multiscales
-  const attrs = node.attrs as any;
-  const ms = attrs?.multiscales as any[] | undefined;
+  let host = node;
+  let attrs = host.attrs as any;
+  let ms = attrs?.multiscales as any[] | undefined;
+  // Path prefix to prepend to per-dataset paths so downstream consumers
+  // (analyze, assembleZarr) can resolve them from the *original* user-typed
+  // URL. Stays empty unless we auto-descend below.
+  let pathPrefix = "";
+  // Paintera-converted zarrs put the multiscales under a `data/` subgroup
+  // and use the parent group for label-block metadata. Auto-descend so the
+  // user can paste the natural `<root>/cells/` path instead of having to
+  // know the convention and append `/data/` themselves.
   if (!ms || ms.length === 0) {
-    throw new Error("Group has no OME-Zarr multiscales metadata. Open the data directly at the array path, or pick a source with multiscales.");
+    try {
+      const dataNode = await zarr.open(node.resolve("data"), { kind: "group" });
+      const dataAttrs = dataNode.attrs as any;
+      const dataMs = dataAttrs?.multiscales as any[] | undefined;
+      if (dataMs && dataMs.length > 0) {
+        host = dataNode;
+        attrs = dataAttrs;
+        ms = dataMs;
+        pathPrefix = "data/";
+      } else {
+        // Native Paintera: data/.zattrs has Paintera/N5 conventions
+        // (resolution, offset, scales) but no OME-NGFF multiscales. Fake one.
+        const synth = await synthesizeMultiscales(dataNode, dataAttrs);
+        if (synth) {
+          host = dataNode;
+          attrs = dataAttrs;
+          ms = [synth];
+          pathPrefix = "data/";
+        }
+      }
+    } catch {
+      // no `data/` subgroup; fall through
+    }
+  }
+  // Also handle the case where the URL itself is a non-OME multiscale group
+  // (children s0, s1, ... ; `resolution` / `pixelResolution` / `scales` in
+  // .zattrs). Common in raw N5 / converted Paintera roots without a data/
+  // wrapper.
+  if (!ms || ms.length === 0) {
+    const synth = await synthesizeMultiscales(node, attrs);
+    if (synth) ms = [synth];
+  }
+  if (!ms || ms.length === 0) {
+    throw new Error("Group has no OME-Zarr multiscales metadata. Open the data directly at the array path (e.g. <group>/s0), or pick a source with multiscales.");
   }
   const topMs = ms[0];
   const axes: { name: string; type?: string }[] = (topMs.axes ?? []).map((a: any) =>
     typeof a === "string" ? { name: a } : { name: a.name, type: a.type },
   );
   // Some older OME-NGFFs don't include axes; fall back to inferred.
-  const effectiveAxes = axes.length ? axes : inferAxesFromShape((await zarr.open(node.resolve(topMs.datasets[0].path), { kind: "array" })).shape);
+  const effectiveAxes = axes.length ? axes : inferAxesFromShape((await zarr.open(host.resolve(topMs.datasets[0].path), { kind: "array" })).shape);
   // Group-level transforms apply *after* per-dataset ones per OME-NGFF spec.
   const groupT = extractTransforms(topMs.coordinateTransformations, effectiveAxes);
   const datasets: MultiscaleInfo["datasets"] = [];
   for (const ds of topMs.datasets) {
-    const arr = await zarr.open(node.resolve(ds.path), { kind: "array" });
+    const arr = await zarr.open(host.resolve(ds.path), { kind: "array" });
     const dsT = extractTransforms(ds.coordinateTransformations, effectiveAxes);
     // Combine: world = groupScale * (dsScale * index + dsTranslation) + groupTranslation
     //        = (groupScale * dsScale) * index + (groupScale * dsTranslation + groupTranslation)
@@ -255,9 +297,99 @@ async function walkMultiscales(
     const offset = pickXYZ(combinedTrans, [0, 0, 0]);
     // If neither dataset nor group had any scale info, scale will fall back
     // to defaultVoxelNm. Offset will be 0.
-    datasets.push({ path: ds.path, arr, scale, offset });
+    datasets.push({ path: pathPrefix + ds.path, arr, scale, offset });
   }
   return { isMultiscale: true, axes: effectiveAxes, datasets };
+}
+
+// Build a synthetic OME-NGFF `multiscales` entry for groups that follow N5 /
+// Paintera conventions instead. Probes for child arrays at sN/<int> and reads
+// resolution + offset from group-level and per-scale attrs. Returns null if
+// the group doesn't look like a multiscale.
+//
+// Sources of resolution we accept (group-level), in order of preference:
+//   - resolution: [rx, ry, rz]   (Paintera/N5, xyz)
+//   - pixelResolution.dimensions: [rx, ry, rz]  (older N5, xyz)
+//   - scales: [[1,1,1], [2,2,2], ...]  (per-scale relative downsampling, xyz)
+// Per-scale `downsamplingFactors` (xyz), if present, multiply the base
+// resolution; otherwise we infer it from shape ratios at read-time.
+async function synthesizeMultiscales(
+  group: any,
+  groupAttrs: any,
+): Promise<{ axes: any[]; datasets: any[]; coordinateTransformations?: any[] } | null> {
+  const childNames: string[] = [];
+  // Try common scale-level names. We can't list a FetchStore, so probe.
+  for (let i = 0; i < 16; i++) childNames.push(`s${i}`);
+  for (let i = 0; i < 16; i++) childNames.push(String(i));
+  const datasets: { path: string; coordinateTransformations: any[]; arr: any }[] = [];
+  for (const name of childNames) {
+    try {
+      const arr = await zarr.open(group.resolve(name), { kind: "array" });
+      // Per-scale Paintera/N5 attrs (downsamplingFactors, transform/scale).
+      const childAttrs = (arr.attrs as any) || {};
+      let dsFactors: number[] | undefined;
+      if (Array.isArray(childAttrs.downsamplingFactors)) dsFactors = childAttrs.downsamplingFactors;
+      else if (childAttrs.transform && Array.isArray(childAttrs.transform.scale))
+        dsFactors = childAttrs.transform.scale;
+      datasets.push({
+        path: name,
+        arr,
+        coordinateTransformations: dsFactors
+          ? [{ type: "scale", scale: dsFactors }]
+          : [{ type: "scale", scale: [1, 1, 1] }],
+      });
+    } catch {
+      // missing — common, e.g. only s0..s4 exist; keep probing the rest
+    }
+  }
+  if (datasets.length === 0) return null;
+  // Resolve a base resolution (xyz). We'll attach it as a group-level scale
+  // transform; per-scale transforms above carry the relative downsampling.
+  const baseRes: number[] | undefined = Array.isArray(groupAttrs?.resolution)
+    ? groupAttrs.resolution
+    : Array.isArray(groupAttrs?.pixelResolution?.dimensions)
+      ? groupAttrs.pixelResolution.dimensions
+      : Array.isArray(groupAttrs?.scales?.[0])
+        ? groupAttrs.scales[0]
+        : undefined;
+  const baseOffset: number[] | undefined = Array.isArray(groupAttrs?.offset)
+    ? groupAttrs.offset
+    : Array.isArray(groupAttrs?.translate)
+      ? groupAttrs.translate
+      : undefined;
+  // N5/Paintera conventions store resolution/offset in xyz order; OME-NGFF
+  // axes are zyx for 3D arrays. Reverse so the per-axis name lookup works.
+  const ndim = datasets[0].arr.shape.length;
+  const inferredAxes = inferAxesFromShape(datasets[0].arr.shape);
+  const groupCT: any[] = [];
+  if (baseRes && baseRes.length >= 3) {
+    const scaleZYX = [...baseRes].slice(0, 3).reverse();
+    // Pad to ndim with 1s for any non-spatial leading axes.
+    while (scaleZYX.length < ndim) scaleZYX.unshift(1);
+    groupCT.push({ type: "scale", scale: scaleZYX });
+  }
+  if (baseOffset && baseOffset.length >= 3) {
+    const transZYX = [...baseOffset].slice(0, 3).reverse();
+    while (transZYX.length < ndim) transZYX.unshift(0);
+    groupCT.push({ type: "translation", translation: transZYX });
+  }
+  // Per-scale CTs: factors as written are xyz; reverse + pad to ndim.
+  const dsOut = datasets.map((d) => {
+    const ct = d.coordinateTransformations.map((t: any) => {
+      if (t.type === "scale" && Array.isArray(t.scale)) {
+        const s = [...t.scale].slice(0, 3).reverse();
+        while (s.length < ndim) s.unshift(1);
+        return { type: "scale", scale: s };
+      }
+      return t;
+    });
+    return { path: d.path, coordinateTransformations: ct };
+  });
+  return {
+    axes: inferredAxes,
+    datasets: dsOut,
+    coordinateTransformations: groupCT.length ? groupCT : undefined,
+  };
 }
 
 function inferAxesFromShape(shape: number[]): { name: string; type?: string }[] {

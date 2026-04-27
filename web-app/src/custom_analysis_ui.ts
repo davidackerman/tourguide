@@ -450,6 +450,11 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         name: result.addSourceLayer.name,
         source: result.addSourceLayer.source,
       });
+      registerLayerInDescriptor(cb, {
+        name: result.addSourceLayer.name,
+        type: result.addSourceLayer.type,
+        source: result.addSourceLayer.source,
+      });
       const info = document.createElement("p");
       info.className = "hint";
       info.textContent = `Added layer '${result.addSourceLayer.name}' from ${result.addSourceLayer.source}.`;
@@ -459,11 +464,13 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       const { synthesizedId, name, type } = result.newLayer;
       // Build an origin-relative URL so NG + the SW can both resolve it.
       const url = new URL(`synthesized/${synthesizedId}/`, window.location.href).toString();
+      const source = `zarr://${url}`;
       cb.viewer.addLayerFromSpec({
         type,
         name,
-        source: `zarr://${url}`,
+        source,
       });
+      registerLayerInDescriptor(cb, { name, type, source });
       const info = document.createElement("p");
       info.className = "hint";
       info.textContent = `Added synthesized ${type} layer '${name}' (${result.newLayer.shape.join("×")} ${result.newLayer.dtype}).`;
@@ -479,7 +486,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
     const scriptRow = makeDownloadRow();
     scriptRow.appendChild(
       makeDownloadButton("Download .py script", () => {
-        const header = buildScriptHeader(slots);
+        const header = buildScriptHeader(slots, lastAiQuestion);
         downloadBlob(
           new Blob([header + "\n" + lastCode + "\n"], { type: "text/x-python" }),
           "analysis.py",
@@ -667,25 +674,31 @@ Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/ski
 - cc3d — connected_components, statistics, dust (remove small components),
          largest_k, each_contiguous_region, each_neighboring_pair.
          Auto-parallelizes via OpenMP; don't bother threading it yourself.
-- fastmorph — spherical_erode(labels, radius, anisotropy=...) /
-              spherical_dilate / spherical_open / spherical_close. radius is a
-              SCALAR in physical units. \`anisotropy\` follows the ARRAY axis
-              order (NOT xyz) — for a (Z,Y,X)-shaped array, anisotropy is
-              (sz, sy, sx). Easiest: just pass \`anisotropy=layers["<name>"]["spacing"]\`,
-              which is already in array-axis order. Do NOT rebuild it into xyz
-              order — that produces a wrong structuring element.
-              Do NOT pass a per-axis list as radius — that raises a broadcast error.
-              Operates DIRECTLY on label volumes: each label is eroded
-              independently, fully-eroded labels disappear, labels are
-              preserved (no relabeling needed). Do NOT loop over np.unique(labels)
-              calling ndi.binary_erosion per-label — one fastmorph call replaces
-              that entire pattern and is 100-1000× faster.
-              **Default the radius to one voxel** when the user doesn't
-              specify a size — i.e. \`radius = max(layers["<name>"]["spacing"])\`.
-              Hard-coded "5 nm" or "10 nm" is meaningless at coarse scales
-              (where one voxel may be 256+ nm) and disappears at fine scales
-              (where one voxel is 2 nm). Scaling to the voxel size makes the
-              operation visible at every level of a multiscale pyramid.
+- fastmorph — operates DIRECTLY on instance-label volumes: each label is
+              eroded/dilated independently, fully-eroded labels disappear,
+              and labels are preserved (no relabeling needed). Do NOT loop
+              over np.unique(labels) calling ndi.binary_erosion per-label —
+              one fastmorph call replaces that entire pattern and is
+              100-1000× faster. Two flavors:
+              • \`fastmorph.erode(labels)\` / \`fastmorph.dilate(labels)\` —
+                **use these for "erode/dilate by one voxel"** (user didn't
+                specify a radius, just said "erode" or "shrink by 1"). Fixed
+                3×3×3 structuring element, no radius/anisotropy args. Fastest
+                path; preferred over spherical_* when the user just wants a
+                one-voxel shrink/grow.
+              • \`fastmorph.spherical_erode(labels, radius, anisotropy=...)\` /
+                \`spherical_dilate\` / \`spherical_open\` / \`spherical_close\` —
+                use when the user specifies a physical radius (e.g. "erode
+                by 50 nm"). \`radius\` is a SCALAR in physical units (do NOT
+                pass a per-axis list — it raises a broadcast error).
+                \`anisotropy\` follows the ARRAY axis order (NOT xyz) — for a
+                (Z,Y,X)-shaped array, anisotropy is (sz, sy, sx). Easiest:
+                pass \`anisotropy=layers["<name>"]["spacing"]\`, which is
+                already in array-axis order. Do NOT rebuild it into xyz order
+                — that produces a wrong structuring element.
+              Picking between them: if the user said "erode by one voxel" or
+              didn't give a size, use \`fastmorph.erode\`. If they gave a
+              physical size, use \`spherical_erode\` with that radius.
 - fastremap — renumber, remap, mask, unique, refit; in-place relabeling at numpy speeds.
 - edt — signed / unsigned Euclidean distance transform.
 - kimimaro — TEASAR skeletonization for neuron/tubule volumes.
@@ -865,6 +878,22 @@ function escapeAttr(s: string): string {
   return escapeHtml(s);
 }
 
+// Push a freshly-created layer into the live descriptor so downstream
+// dialogs (Save zarr in particular) see it. NG state and the descriptor
+// are kept separate elsewhere; without this step, synthesized layers
+// exist in the viewer but the download dialog only iterates the
+// descriptor and never lists them.
+function registerLayerInDescriptor(
+  cb: CustomAnalysisUICallbacks,
+  layer: DatasetLayer,
+): void {
+  const d = cb.getDescriptor();
+  if (!d) return;
+  const i = d.layers.findIndex((l) => l.name === layer.name);
+  if (i >= 0) d.layers[i] = layer;
+  else d.layers.push(layer);
+}
+
 // --- Download helpers -------------------------------------------------------
 
 function makeDownloadButton(label: string, onClick: () => void | Promise<void>): HTMLButtonElement {
@@ -911,13 +940,22 @@ function tableToCsv(tbl: { columns: string[]; rows: (number | string | null)[][]
 
 function buildScriptHeader(
   slots: { varName: string; layer: DatasetLayer; inspection?: LayerInspection; scaleIdx?: number }[],
+  prompt: string,
 ): string {
   const parts = [
     "# Tourguide custom analysis — extracted script",
     "# Generated " + new Date().toISOString(),
+  ];
+  if (prompt.trim()) {
+    parts.push("#", "# Prompt:");
+    for (const line of prompt.split("\n")) {
+      parts.push(`#   ${line}`);
+    }
+  }
+  parts.push(
     "#",
     "# Input layers (already loaded as numpy ndarrays in the tourguide worker):",
-  ];
+  );
   for (const s of slots) {
     const scale = s.inspection?.scales[s.scaleIdx ?? 0];
     parts.push(
