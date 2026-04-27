@@ -45,6 +45,18 @@ async function storeHandle(id: string, handle: FileSystemDirectoryHandle): Promi
   db.close();
 }
 
+/** Read a previously-registered FileSystemDirectoryHandle by its id.
+ *  Returns null if not found. Used by the download flow to walk the
+ *  user's picked folder and ZIP a layer subtree. */
+export async function getStoredHandle(id: string): Promise<FileSystemDirectoryHandle | null> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly").objectStore(STORE).get(id);
+    tx.onsuccess = () => resolve((tx.result as FileSystemDirectoryHandle) || null);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function ensureReadPermission(handle: FileSystemDirectoryHandle): Promise<void> {
   if (!handle.queryPermission || !handle.requestPermission) return;
   const opts = { mode: "read" as const };

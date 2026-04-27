@@ -9,6 +9,10 @@ export interface DetectedMetadata {
   source: string;
   kind: "zarr" | "n5" | "precomputed";
   via: string; // short description of what was parsed
+  // Heuristic guess at whether this is an image or segmentation, derived
+  // from the array's dtype (uint16/32/64 + int* → segmentation; uint8 + float*
+  // → image). Always advisory; the loader UI may override.
+  guessedType?: "image" | "segmentation";
 }
 
 const NM_PER = {
@@ -122,11 +126,13 @@ async function detectZarr(base: string): Promise<DetectedMetadata> {
     if (ms) {
       const parsed = parseMultiscalesVoxelSize(ms);
       if (parsed) {
+        const dpath = ms.datasets?.[0]?.path ?? "";
         return {
           voxel_size_nm: parsed.voxel_size_nm,
           source: `zarr://${base}`,
           kind: "zarr",
           via: `zarr v3: ${parsed.via}`,
+          guessedType: await guessLayerTypeFromZarr(base, dpath),
         };
       }
     }
@@ -136,15 +142,45 @@ async function detectZarr(base: string): Promise<DetectedMetadata> {
   if (zattrs?.multiscales?.[0]) {
     const parsed = parseMultiscalesVoxelSize(zattrs.multiscales[0]);
     if (parsed) {
+      const dpath = zattrs.multiscales[0].datasets?.[0]?.path ?? "";
       return {
         voxel_size_nm: parsed.voxel_size_nm,
         source: `zarr://${base}`,
         kind: "zarr",
         via: `zarr v2 .zattrs: ${parsed.via}`,
+        guessedType: await guessLayerTypeFromZarr(base, dpath),
       };
     }
   }
   throw new Error(`zarr metadata found no parseable multiscales at ${base}`);
+}
+
+/** Peek at the first scale's .zarray and infer image vs segmentation from
+ *  its dtype. uint8/float* → image (intensity); uint16/32/64 + int* →
+ *  segmentation (label volume). Best-effort; returns undefined if the
+ *  metadata can't be fetched. */
+async function guessLayerTypeFromZarr(
+  base: string,
+  scalePath: string,
+): Promise<"image" | "segmentation" | undefined> {
+  const zarrayUrl = scalePath ? `${base}/${scalePath}/.zarray` : `${base}/.zarray`;
+  const z = (await tryJson(zarrayUrl)) as { dtype?: string } | null;
+  const dtype = z?.dtype ?? "";
+  if (!dtype) return undefined;
+  return dtypeToLayerType(dtype);
+}
+
+function dtypeToLayerType(dtype: string): "image" | "segmentation" | undefined {
+  // zarr v2 dtype string format: e.g. "<u4", "|u1", "<f4", "<i8".
+  const m = /([uifb])(\d+)$/.exec(dtype);
+  if (!m) return undefined;
+  const kind = m[1];
+  const bytes = parseInt(m[2], 10);
+  if (kind === "f") return "image"; // float intensities
+  if (kind === "b") return "segmentation"; // bool mask
+  if (kind === "u" && bytes === 1) return "image"; // 8-bit grayscale
+  // u2 / u4 / u8 / i*: label volumes by convention
+  return "segmentation";
 }
 
 interface N5Attrs {

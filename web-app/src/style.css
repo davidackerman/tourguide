@@ -1025,6 +1025,42 @@ button {
   font-size: 0.82rem;
 }
 
+.modal-download {
+  width: min(640px, 92vw);
+}
+
+.download-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+}
+
+.download-layer-row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.download-layer-row:hover {
+  background: var(--bg-elev);
+}
+
+.download-layer-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.download-layer-meta {
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+
 @keyframes progress-indeterminate {
   0% {
     background-position: 100% 0;

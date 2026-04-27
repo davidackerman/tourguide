@@ -7,6 +7,7 @@ import { renderQueryBox } from "./query_ui.js";
 import { openSettingsDialog } from "./settings_ui.js";
 import { openAnalysisDialog } from "./analysis_ui.js";
 import { openCustomAnalysisDialog } from "./custom_analysis_ui.js";
+import { openDownloadDialog } from "./download_ui.js";
 import { loadSettings, backendFromSettings, type LLMBackend } from "./llm.js";
 import { decodeState, buildPermalinkURL } from "./permalink.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
@@ -33,6 +34,7 @@ const select = $<HTMLSelectElement>("dataset-select");
 const loadBtn = $<HTMLButtonElement>("load-data-btn");
 const analyzeBtn = $<HTMLButtonElement>("analyze-btn");
 const customBtn = $<HTMLButtonElement>("custom-btn");
+const downloadBtn = $<HTMLButtonElement>("download-btn");
 const settingsBtn = $<HTMLButtonElement>("settings-btn");
 const shareBtn = $<HTMLButtonElement>("share-btn");
 const backendIndicator = $<HTMLSpanElement>("backend-indicator");
@@ -227,6 +229,10 @@ analyzeBtn.addEventListener("click", () => {
       if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
     },
   });
+});
+
+downloadBtn.addEventListener("click", () => {
+  openDownloadDialog(() => currentDescriptor);
 });
 
 customBtn.addEventListener("click", () => {

@@ -280,7 +280,7 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
           candidates.push({ kind, subpath: sub });
         }
       }
-      const found: Array<{ kind: string; subpath: string; meta: { voxel_size_nm: [number, number, number]; via: string; center_nm?: [number, number, number] } }> = [];
+      const found: Array<{ kind: string; subpath: string; meta: { voxel_size_nm: [number, number, number]; via: string; center_nm?: [number, number, number]; guessedType?: "image" | "segmentation" } }> = [];
       for (const c of candidates) {
         try {
           const url = buildLocalSourceUrl(reg, c.kind, c.subpath);
@@ -306,9 +306,13 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
         `;
         folderDetectedEl.querySelector("[data-action='load-detected']")!.addEventListener("click", () => {
           try {
+            // Use the dtype-derived guess if detect returned one, otherwise
+            // default to image. The user can still toggle in Paste URLs view.
+            const guessed = (f.meta.guessedType ?? "image") as "image" | "segmentation";
+            const baseName = f.subpath ? f.subpath.replace(/[/.]+$/, "") : guessed;
             const layers = [{
-              name: f.subpath ? f.subpath.replace(/[/.]+$/, "") : "image",
-              type: "image" as const,
+              name: baseName || guessed,
+              type: guessed,
               source: url,
             }];
             const descriptor = buildDescriptorFromInput({
