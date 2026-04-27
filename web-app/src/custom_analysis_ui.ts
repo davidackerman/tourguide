@@ -680,6 +680,13 @@ Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/ski
               preserved (no relabeling needed). Do NOT loop over np.unique(labels)
               calling ndi.binary_erosion per-label — one fastmorph call replaces
               that entire pattern and is 100-1000× faster.
+              **Default the radius to ~2× the largest voxel dimension** when
+              the user doesn't specify a size — i.e.
+              \`radius = 2 * max(layers["<name>"]["spacing"])\`. Hard-coded
+              "5 nm" or "10 nm" is meaningless at coarse scales (where one
+              voxel may be 256+ nm) and disappears at fine scales (where
+              one voxel is 2 nm). Scaling to voxel size makes the operation
+              visible across every level of a multiscale pyramid.
 - fastremap — renumber, remap, mask, unique, refit; in-place relabeling at numpy speeds.
 - edt — signed / unsigned Euclidean distance transform.
 - kimimaro — TEASAR skeletonization for neuron/tubule volumes.
