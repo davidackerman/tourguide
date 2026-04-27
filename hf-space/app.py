@@ -498,7 +498,15 @@ def _encode_new_layer_and_write(
     (session_dir / "s0" / chunk_rel).parent.mkdir(parents=True, exist_ok=True)
     (session_dir / "s0" / chunk_rel).write_bytes(arr.tobytes(order="C"))
 
-    base = str(request.url).rsplit("/api/", 1)[0]
+    # HF Spaces (and any reverse-proxied deploy) terminate TLS at the edge,
+    # so request.url here reads as http://... even though the public URL
+    # is https. Honor X-Forwarded-Proto if the proxy set it; otherwise
+    # default to https because *.hf.space is always HTTPS-only on the
+    # public side, and the frontend (on https) cannot fetch http resources.
+    fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    fwd_host = (request.headers.get("x-forwarded-host") or request.url.netloc).split(",")[0].strip()
+    scheme = fwd_proto if fwd_proto in ("http", "https") else "https"
+    base = f"{scheme}://{fwd_host}"
     return {
         "synthesizedId": f"{session_id}/{layer_id}",
         "name": str(nl.get("name", "new_layer")),
