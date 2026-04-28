@@ -223,7 +223,9 @@ async function walkMultiscales(
   // group — look for multiscales
   let host = node;
   let attrs = host.attrs as any;
-  let ms = attrs?.multiscales as any[] | undefined;
+  // OME-NGFF 0.4 puts `multiscales` at the top of attributes; OME 0.5
+  // (zarr v3) nests it under an `ome` namespace. Accept both.
+  let ms = (attrs?.multiscales ?? attrs?.ome?.multiscales) as any[] | undefined;
   // Path prefix to prepend to per-dataset paths so downstream consumers
   // (analyze, assembleZarr) can resolve them from the *original* user-typed
   // URL. Stays empty unless we auto-descend below.
@@ -236,7 +238,7 @@ async function walkMultiscales(
     try {
       const dataNode = await zarr.open(node.resolve("data"), { kind: "group" });
       const dataAttrs = dataNode.attrs as any;
-      const dataMs = dataAttrs?.multiscales as any[] | undefined;
+      const dataMs = (dataAttrs?.multiscales ?? dataAttrs?.ome?.multiscales) as any[] | undefined;
       if (dataMs && dataMs.length > 0) {
         host = dataNode;
         attrs = dataAttrs;
