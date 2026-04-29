@@ -203,14 +203,15 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       <tbody></tbody>
     `;
     const tb = tbl.querySelector("tbody")!;
+    // Pyodide's WASM32 ceiling (~4 GB) only applies to local runs. On the
+    // remote backend the input lives in 16 GB of real RAM, so don't disable
+    // any scale and don't show the cap badges.
+    const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
     insp.scales.forEach((s, i) => {
       const tr = document.createElement("tr");
-      // Warn but don't disable. Pyodide's WASM32 ceiling is ~4 GB, so above
-      // roughly 1.5 GB the analysis *may* OOM — but a pure threshold op on
-      // uint8 at 3 GB can still succeed, so let the user decide.
       const bytes = s.approxBytes;
-      const risky = bytes > SAFE_INPUT_BYTES;
-      const veryRisky = bytes > 3 * SAFE_INPUT_BYTES; // ~4.5 GB → guaranteed OOM
+      const risky = !useRemote && bytes > SAFE_INPUT_BYTES;
+      const veryRisky = !useRemote && bytes > 3 * SAFE_INPUT_BYTES; // ~4.5 GB → guaranteed OOM locally
       const offStr = s.offsetNm.map((v) => format1(v)).join(", ");
       tr.innerHTML = `
         <td><input type="radio" name="scale" value="${i}" ${veryRisky ? "disabled" : ""}></td>
@@ -231,23 +232,32 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     });
     scalesHost.appendChild(tbl);
 
-    // Auto-pick the coarsest scale that fits the safe budget.
-    const coarsestFitIdx = [...insp.scales].reverse().findIndex((s) => s.approxBytes <= SAFE_INPUT_BYTES);
-    if (coarsestFitIdx !== -1) {
-      const realIdx = insp.scales.length - 1 - coarsestFitIdx;
-      selectedScaleIdx = realIdx;
-      const input = tbl.querySelector<HTMLInputElement>(`input[value="${realIdx}"]`);
+    // Auto-pick the coarsest scale that fits the safe budget. On remote,
+    // every scale fits, so default to the *finest* (s0) — that's what the
+    // user wants when they've explicitly opted into the backend.
+    if (useRemote) {
+      selectedScaleIdx = 0;
+      const input = tbl.querySelector<HTMLInputElement>(`input[value="0"]`);
       if (input) input.checked = true;
       runBtn.disabled = false;
     } else {
-      // No scale fits the safe budget — pre-select the smallest that's not
-      // beyond WASM cap, still usable if the user accepts the OOM risk.
-      const idx = insp.scales.findIndex((s) => s.approxBytes <= 3 * SAFE_INPUT_BYTES);
-      if (idx !== -1) {
-        selectedScaleIdx = idx;
-        const input = tbl.querySelector<HTMLInputElement>(`input[value="${idx}"]`);
+      const coarsestFitIdx = [...insp.scales].reverse().findIndex((s) => s.approxBytes <= SAFE_INPUT_BYTES);
+      if (coarsestFitIdx !== -1) {
+        const realIdx = insp.scales.length - 1 - coarsestFitIdx;
+        selectedScaleIdx = realIdx;
+        const input = tbl.querySelector<HTMLInputElement>(`input[value="${realIdx}"]`);
         if (input) input.checked = true;
         runBtn.disabled = false;
+      } else {
+        // No scale fits the safe budget — pre-select the smallest that's not
+        // beyond WASM cap, still usable if the user accepts the OOM risk.
+        const idx = insp.scales.findIndex((s) => s.approxBytes <= 3 * SAFE_INPUT_BYTES);
+        if (idx !== -1) {
+          selectedScaleIdx = idx;
+          const input = tbl.querySelector<HTMLInputElement>(`input[value="${idx}"]`);
+          if (input) input.checked = true;
+          runBtn.disabled = false;
+        }
       }
     }
 
@@ -258,6 +268,13 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       });
     });
   };
+
+  // Re-render the scales table whenever the remote toggle flips, so the
+  // 'beyond WASM cap' chips and disabled radios drop away when the backend
+  // is selected (and reappear on switch back).
+  remoteToggle.addEventListener("change", () => {
+    if (currentInspection) renderScales(currentInspection);
+  });
 
   const inspectLayer = async (layer: DatasetLayer): Promise<void> => {
     clearError();
