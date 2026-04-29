@@ -14,24 +14,31 @@ the browser's service worker can serve it. So the flow is:
            req_id, bytes_b64}   ──→ resolves the future keyed by req_id
                                    returns bytes to zarr loader
 
-We don't try to implement zarr-python's sync Store interface. Instead we
-have a small async loader that reads `.zarray` + all needed chunks and
-reassembles into a numpy array directly. Uses numcodecs to decompress
-(blosc / gzip / zstd / raw). That's all we need for OME-Zarr inputs.
+We expose the per-key fetch as a zarr-python v3 ``Store`` and let
+zarr-python handle metadata parsing, codec decoding, and chunk
+reassembly. v3 supports both zarr v2 and v3 transparently, plus
+sharding and arbitrary v3 codec pipelines (zstd, crc32c, …) — the
+previous hand-rolled v2-only loader is gone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import itertools
-import json
 import logging
 from dataclasses import dataclass
-from math import ceil
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, Optional
 
 import numpy as np
+import zarr.api.asynchronous as zarr_async
+from zarr.abc.store import (
+    ByteRequest,
+    OffsetByteRequest,
+    RangeByteRequest,
+    Store,
+    SuffixByteRequest,
+)
+from zarr.core.buffer import Buffer, BufferPrototype
 
 log = logging.getLogger("browser_store")
 
@@ -109,78 +116,114 @@ class TunnelSession:
 
 
 # ----------------------------------------------------------------------------
-# Minimal zarr v2 reader over any async `read(path) -> bytes | None` coro.
+# zarr-python v3 Store wrapping the tunnel's async read(path) callable.
+# Supports v2 + v3 + sharding + arbitrary codec pipelines via zarr-python.
 # ----------------------------------------------------------------------------
+
+
+class TunnelStore(Store):
+    """Read-only zarr-python v3 ``Store`` backed by an async fetch coroutine.
+
+    The tunnel only exposes a single ``read(key) -> bytes | None`` async
+    operation, so we don't pretend to support listing or writes. Range
+    requests are honored by fetching the whole key and slicing — the
+    tunnel protocol is per-key, not byte-range, so true HTTP-style ranges
+    aren't possible without a protocol change. For sharded inputs this
+    means an entire shard is materialized to extract one inner chunk;
+    correct, just not optimal. Optimization is a follow-up.
+    """
+
+    def __init__(self, read: Callable[[str], Awaitable[Optional[bytes]]]) -> None:
+        super().__init__(read_only=True)
+        self._is_open = True
+        self._read = read
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, TunnelStore) and other._read is self._read
+
+    def __hash__(self) -> int:
+        return id(self._read)
+
+    @property
+    def supports_writes(self) -> bool:
+        return False
+
+    @property
+    def supports_partial_writes(self) -> bool:
+        return False
+
+    @property
+    def supports_deletes(self) -> bool:
+        return False
+
+    @property
+    def supports_listing(self) -> bool:
+        return False
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: Optional[ByteRequest] = None,
+    ) -> Optional[Buffer]:
+        raw = await self._read(key)
+        if raw is None:
+            return None
+        if byte_range is None:
+            data = raw
+        elif isinstance(byte_range, RangeByteRequest):
+            data = raw[byte_range.start : byte_range.end]
+        elif isinstance(byte_range, OffsetByteRequest):
+            data = raw[byte_range.offset :]
+        elif isinstance(byte_range, SuffixByteRequest):
+            data = raw[-byte_range.suffix :]
+        else:
+            raise TypeError(f"unsupported byte range type {type(byte_range).__name__}")
+        return prototype.buffer.from_bytes(data)
+
+    async def get_partial_values(
+        self,
+        prototype: BufferPrototype,
+        key_ranges: Iterable[Any],
+    ) -> "list[Optional[Buffer]]":
+        out: "list[Optional[Buffer]]" = []
+        for key, byte_range in key_ranges:
+            out.append(await self.get(key, prototype, byte_range))
+        return out
+
+    async def exists(self, key: str) -> bool:
+        return (await self._read(key)) is not None
+
+    async def set(self, key: str, value: Buffer) -> None:  # pragma: no cover
+        raise NotImplementedError("TunnelStore is read-only")
+
+    async def delete(self, key: str) -> None:  # pragma: no cover
+        raise NotImplementedError("TunnelStore is read-only")
+
+    async def list(self) -> AsyncIterator[str]:  # pragma: no cover
+        raise NotImplementedError("TunnelStore does not support listing")
+        yield ""  # makes this an async generator
+
+    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:  # pragma: no cover
+        raise NotImplementedError("TunnelStore does not support listing")
+        yield ""
+
+    async def list_dir(self, prefix: str) -> AsyncIterator[str]:  # pragma: no cover
+        raise NotImplementedError("TunnelStore does not support listing")
+        yield ""
 
 
 async def read_zarr_scale(
     read: Callable[[str], Awaitable[Optional[bytes]]],
     scale_path: str,
 ) -> np.ndarray:
-    """Fetch the array at `scale_path` using the given async `read` function.
+    """Open the array at ``scale_path`` via a TunnelStore and materialize as numpy.
 
-    `scale_path` is the subpath under the zarr root (e.g. "s0"). The caller
-    has already resolved any OME-NGFF multiscale nav; we just have to pull
-    `.zarray` + each chunk and stitch them.
+    Works for both zarr v2 (``.zarray`` + chunk files) and zarr v3
+    (``zarr.json``, sharded chunks, arbitrary codec pipelines) —
+    zarr-python v3 auto-detects the format.
     """
-    zarray_raw = await read(f"{scale_path}/.zarray" if scale_path else ".zarray")
-    if zarray_raw is None:
-        raise FileNotFoundError(f"no .zarray at {scale_path or '<root>'}")
-    meta = json.loads(zarray_raw.decode("utf-8"))
-
-    shape: List[int] = list(meta["shape"])
-    chunks: List[int] = list(meta["chunks"])
-    dtype = np.dtype(meta["dtype"])
-    compressor_spec = meta.get("compressor")
-    filters_spec = meta.get("filters") or []
-    fill_value = meta.get("fill_value", 0)
-    dim_sep = meta.get("dimension_separator", ".")
-    order: str = meta.get("order", "C")
-
-    # Allocate the output and fill with fill_value (usually 0).
-    try:
-        fv: Any = dtype.type(fill_value if fill_value is not None else 0)
-    except Exception:  # noqa: BLE001
-        fv = 0
-    out = np.full(shape, fv, dtype=dtype)
-
-    # Import numcodecs lazily so sandbox checks don't flag the import path.
-    import numcodecs  # noqa: WPS433
-
-    codec = numcodecs.get_codec(compressor_spec) if compressor_spec else None
-    filters = [numcodecs.get_codec(f) for f in filters_spec] if filters_spec else []
-
-    n_chunks_per_dim = [ceil(s / c) for s, c in zip(shape, chunks)]
-    # Fetch chunks sequentially. Coalescing in parallel is possible but the
-    # tunnel is already bottlenecked by the per-message WS round-trip, so
-    # we avoid stampeding the browser. For big arrays this is the main
-    # latency cost — noted in the plan.
-    for idx in itertools.product(*(range(n) for n in n_chunks_per_dim)):
-        key_parts = [str(i) for i in idx]
-        chunk_key = (f"{scale_path}/" if scale_path else "") + dim_sep.join(key_parts)
-        raw = await read(chunk_key)
-        if raw is None:
-            # Chunk missing → leave the fill value in place.
-            continue
-        buf = codec.decode(raw) if codec else raw
-        for f in reversed(filters):
-            buf = f.decode(buf)
-        chunk_arr = np.frombuffer(buf, dtype=dtype)
-        expected = int(np.prod(chunks))
-        if chunk_arr.size != expected:
-            raise ValueError(
-                f"chunk {chunk_key} has {chunk_arr.size} elements; expected {expected}"
-            )
-        chunk_arr = chunk_arr.reshape(chunks, order=order)
-        # Compute the destination slab; last chunks along each axis may be
-        # partial when shape isn't a multiple of chunks.
-        dst_slices = tuple(
-            slice(i * c, min((i + 1) * c, s))
-            for i, c, s in zip(idx, chunks, shape)
-        )
-        src_slices = tuple(
-            slice(0, s.stop - s.start) for s in dst_slices
-        )
-        out[dst_slices] = chunk_arr[src_slices]
-
-    return out
+    store = TunnelStore(read)
+    arr = await zarr_async.open_array(store=store, path=scale_path or "")
+    data = await arr.getitem(Ellipsis)
+    return np.asarray(data)
