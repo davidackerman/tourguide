@@ -234,6 +234,15 @@ interface RemoteResponse {
     dtype: string;
     serveUrl?: string;
   };
+  newMeshLayer?: {
+    synthesizedId: string;
+    name: string;
+    type: "segmentation";
+    shape: number[];
+    dtype: string;
+    meshIds: string[];
+    serveUrl?: string;
+  };
 }
 
 function adaptResponse(raw: RemoteResponse, backendUrl: string): CustomAnalysisResult {
@@ -257,6 +266,18 @@ function adaptResponse(raw: RemoteResponse, backendUrl: string): CustomAnalysisR
       source,
       name: raw.newLayer.name,
       type: raw.newLayer.type,
+    };
+  }
+  // Mesh-bearing layers come back as a Neuroglancer precomputed source —
+  // the seg voxels and the legacy mesh dir share one layer artifact, so
+  // NG renders both the labels and the meshes from a single source.
+  if (raw.newMeshLayer) {
+    const url = raw.newMeshLayer.serveUrl
+      || new URL(`api/data/${raw.newMeshLayer.synthesizedId}/`, ensureTrailingSlash(backendUrl)).toString();
+    out.addSourceLayer = {
+      source: `precomputed://${url}`,
+      name: raw.newMeshLayer.name,
+      type: raw.newMeshLayer.type,
     };
   }
   return out;

@@ -955,6 +955,9 @@ _TG_ADD_SOURCE_LAYER = None  # {"source": "zarr://...", "name": "new_layer", "ty
 _TG_NEW_LAYER = None   # {"array": ndarray, "name": "...", "type": "segmentation"|"image",
                        #  "spacing": (sz,sy,sx) nm, "offsets": (oz,oy,ox) nm, "axes": ["z","y","x"]}
                        # - spacing/offsets/axes default to the first selected input layer's values.
+_TG_NEW_MESH_LAYER = None  # HF-only: {"labels": ndarray, "name": "...", "spacing": ..., "offsets": ..., "ids": [...]?}
+                           # - in the local Pyodide runtime zmesh is not available; this var is read by
+                           #   the HF backend only. Setting it here is a no-op.
 
 # Capture print() output without touching sys.stdout (workers don't have one).
 import builtins as _b

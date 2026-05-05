@@ -349,6 +349,7 @@ def _build_globals(
         "_TG_HIGHLIGHT": None,
         "_TG_ADD_SOURCE_LAYER": None,
         "_TG_NEW_LAYER": None,
+        "_TG_NEW_MESH_LAYER": None,
     }
     for name, info in layers.items():
         g[name] = info["array"]
@@ -519,6 +520,153 @@ def _encode_new_layer_and_write(
     }
 
 
+def _encode_new_mesh_layer_and_write(
+    session_id: str,
+    nml: Any,
+    layers: Dict[str, Dict[str, Any]],
+    request: Request,
+) -> Optional[Dict[str, Any]]:
+    """For ``_TG_NEW_MESH_LAYER``: mesh a label volume with zmesh, write a
+    Neuroglancer precomputed segmentation + legacy single-resolution mesh
+    directory under the session dir, and return a spec the frontend can
+    feed to ``addLayerFromSpec`` as a ``precomputed://`` source.
+
+    Mesh-bearing layers are returned alongside (not instead of) the seg
+    voxels — same artifact, ``mesh: "mesh"`` field in ``info`` — so NG
+    renders both, and Save artifact bundles both with one walk of the
+    session dir.
+    """
+    if nml is None or "labels" not in nml:
+        return None
+    labels = nml["labels"]
+    if not isinstance(labels, np.ndarray):
+        labels = np.asarray(labels)
+    if labels.ndim != 3:
+        raise HTTPException(status_code=400, detail=f"_TG_NEW_MESH_LAYER labels must be a 3D (Z, Y, X) array, got shape {labels.shape}")
+    if not np.issubdtype(labels.dtype, np.integer):
+        raise HTTPException(status_code=400, detail=f"_TG_NEW_MESH_LAYER labels dtype must be integer, got {labels.dtype}")
+    # NG precomputed `data_type` accepts uint8/16/32/64 (and signed). zmesh
+    # requires uint32 or uint64; cast up if needed so both code paths agree.
+    if labels.dtype == np.bool_:
+        labels = labels.astype(np.uint8)
+    if str(labels.dtype) not in ("uint8", "uint16", "uint32", "uint64"):
+        labels = labels.astype(np.uint32)
+    labels = np.ascontiguousarray(labels)
+
+    first_layer = next(iter(layers.values())) if layers else None
+    spacing_zyx = list(nml.get("spacing") or (first_layer["spacing"] if first_layer else [1.0, 1.0, 1.0]))[:3]
+    offsets_zyx = list(nml.get("offsets") or (first_layer["offsets"] if first_layer else [0.0, 0.0, 0.0]))[:3]
+    spacing_zyx = [float(v) for v in spacing_zyx]
+    offsets_zyx = [float(v) for v in offsets_zyx]
+
+    name = str(nml.get("name", "new_mesh_layer"))
+    layer_id = f"{name.replace('/', '_')}-{uuid.uuid4().hex[:6]}"
+    out_dir = SESSION_ROOT / session_id / layer_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pick which ids to mesh. Default = every non-zero label in the volume.
+    if nml.get("ids"):
+        ids = [int(i) for i in nml["ids"]]
+    else:
+        ids = [int(i) for i in np.unique(labels) if i != 0]
+    # zmesh `reduction_factor` is "simplify by ~this many ×". 0 disables.
+    reduction = int(nml.get("reduction_factor", 10))
+    max_err = float(nml.get("max_error", 8.0))
+
+    # === Run zmesh per-id ===
+    # zmesh.Mesher takes voxel resolution in array-axis order (zyx for a
+    # (Z,Y,X) array) and emits vertex coords in those same units, in the
+    # same axis order. We then permute zyx → xyz and add the world offset
+    # before writing the precomputed mesh.
+    import zmesh  # noqa: WPS433
+
+    mesher = zmesh.Mesher(spacing_zyx)
+    mesher.mesh(labels)
+    meshes_dir = out_dir / "mesh"
+    meshes_dir.mkdir(exist_ok=True)
+    (meshes_dir / "info").write_text(json.dumps({"@type": "neuroglancer_legacy_mesh"}))
+
+    written_ids: List[int] = []
+    offset_xyz = np.array([offsets_zyx[2], offsets_zyx[1], offsets_zyx[0]], dtype=np.float64)
+    for seg_id in ids:
+        try:
+            mesh = mesher.get(seg_id, normals=False, reduction_factor=reduction, max_error=max_err)
+        except Exception:  # noqa: BLE001
+            continue
+        if mesh.vertices.shape[0] == 0:
+            continue
+        # mesh.vertices is (N, 3) in (z, y, x) nm relative to array origin.
+        verts_xyz_nm = (mesh.vertices.astype(np.float64)[:, [2, 1, 0]] + offset_xyz).astype(np.float32)
+        faces = mesh.faces.astype(np.uint32, copy=False)
+        # Legacy single-resolution mesh fragment binary:
+        #   uint32 num_vertices
+        #   float32 vertices[num_vertices * 3]   (x, y, z, in world nm)
+        #   uint32  triangles[num_triangles * 3] (vertex indices)
+        frag_bytes = (
+            np.array([verts_xyz_nm.shape[0]], dtype="<u4").tobytes()
+            + np.ascontiguousarray(verts_xyz_nm).tobytes()
+            + np.ascontiguousarray(faces).tobytes()
+        )
+        (meshes_dir / f"{seg_id}:0:0").write_bytes(frag_bytes)
+        # Manifest pointing the segment id at its single fragment.
+        (meshes_dir / f"{seg_id}:0").write_text(json.dumps({"fragments": [f"{seg_id}:0:0"]}))
+        written_ids.append(seg_id)
+
+    # === Write the precomputed segmentation alongside the mesh dir ===
+    # NG raw encoding is x-fastest in memory order; numpy (Z, Y, X) C-order
+    # bytes already match that exactly, so we don't transpose.
+    sz, sy, sx = labels.shape
+    size_xyz = [int(sx), int(sy), int(sz)]
+    resolution_xyz = [spacing_zyx[2], spacing_zyx[1], spacing_zyx[0]]
+    # voxel_offset is integer; sub-voxel offsets can't be expressed in
+    # precomputed, so round (worst case: <0.5 voxel of seg/mesh drift,
+    # invisible at typical scales).
+    voxel_offset_xyz = [
+        int(round(offsets_zyx[2] / spacing_zyx[2])) if spacing_zyx[2] else 0,
+        int(round(offsets_zyx[1] / spacing_zyx[1])) if spacing_zyx[1] else 0,
+        int(round(offsets_zyx[0] / spacing_zyx[0])) if spacing_zyx[0] else 0,
+    ]
+    info = {
+        "type": "segmentation",
+        "data_type": str(labels.dtype),
+        "num_channels": 1,
+        "scales": [{
+            "key": "s0",
+            "size": size_xyz,
+            "resolution": resolution_xyz,
+            "voxel_offset": voxel_offset_xyz,
+            "chunk_sizes": [size_xyz],
+            "encoding": "raw",
+        }],
+        "mesh": "mesh",
+    }
+    (out_dir / "info").write_text(json.dumps(info))
+    (out_dir / "s0").mkdir(exist_ok=True)
+    chunk_key = (
+        f"{voxel_offset_xyz[0]}-{voxel_offset_xyz[0] + sx}_"
+        f"{voxel_offset_xyz[1]}-{voxel_offset_xyz[1] + sy}_"
+        f"{voxel_offset_xyz[2]}-{voxel_offset_xyz[2] + sz}"
+    )
+    (out_dir / "s0" / chunk_key).write_bytes(labels.tobytes(order="C"))
+
+    fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    fwd_host = (request.headers.get("x-forwarded-host") or request.url.netloc).split(",")[0].strip()
+    scheme = fwd_proto if fwd_proto in ("http", "https") else "https"
+    base = f"{scheme}://{fwd_host}"
+    return {
+        "synthesizedId": f"{session_id}/{layer_id}",
+        "name": name,
+        "type": "segmentation",
+        "shape": list(labels.shape),
+        "dtype": str(labels.dtype),
+        "meshIds": [str(i) for i in written_ids],
+        # The frontend builds `precomputed://<serveUrl>` and adds an NG
+        # segmentation layer pointing at it. The mesh subdir is read
+        # automatically by NG via the `mesh` field in info above.
+        "serveUrl": f"{base}/api/data/{session_id}/{layer_id}/",
+    }
+
+
 # --- Serve synthesized zarrs -------------------------------------------------
 
 
@@ -631,6 +779,10 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
             if new_layer:
                 out_msg["newLayer"] = new_layer
                 # Ensure this session gets cleaned up eventually.
+                background.add_task(_cleanup_session_later, session_id)
+            new_mesh_layer = _encode_new_mesh_layer_and_write(session_id, outputs.get("_TG_NEW_MESH_LAYER"), layers_info, request)
+            if new_mesh_layer:
+                out_msg["newMeshLayer"] = new_mesh_layer
                 background.add_task(_cleanup_session_later, session_id)
 
             # matplotlib figure capture: if the user code called plt.*, we

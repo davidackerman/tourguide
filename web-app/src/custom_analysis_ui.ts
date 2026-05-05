@@ -702,7 +702,14 @@ Extra Seung-lab libraries (also already imported; 10-100× faster than scipy/ski
 - fastremap — renumber, remap, mask, unique, refit; in-place relabeling at numpy speeds.
 - edt — signed / unsigned Euclidean distance transform.
 - kimimaro — TEASAR skeletonization for neuron/tubule volumes.
-- zmesh — fast multi-resolution meshing from a labeled volume.`
+- zmesh — fast meshing from a labeled volume. \`Mesher(spacing_zyx)\`,
+          then \`mesher.mesh(labels)\`, then per-id \`mesher.get(id,
+          reduction_factor=10, max_error=8)\` returning a mesh with
+          \`.vertices\` (in spacing units, axis-order matching what you
+          passed) and \`.faces\` (uint32 triangles). Prefer the
+          \`_TG_NEW_MESH_LAYER\` output channel below over hand-rolling a
+          mesh export — it does the per-id meshing and writes a
+          Neuroglancer-renderable precomputed mesh layer in one step.`
     : `Libraries (already imported; do NOT reimport):
 - numpy as np, pandas as pd, matplotlib.pyplot as plt
 - scipy.ndimage as ndi
@@ -732,6 +739,7 @@ OUTPUT CONTRACT (set zero or more):
 - \`_TG_HIGHLIGHT\`: \`{"layer": "<existing NG layer name>", "ids": [1, 2, 3, ...]}\` — in a segmentation layer, show only these segment ids. Useful to focus attention on the objects your analysis selected.
 - \`_TG_ADD_SOURCE_LAYER\`: \`{"source": "zarr://...", "name": "new_layer", "type": "segmentation"|"image"}\` — add a pre-existing remote zarr/n5/precomputed source as a new layer.
 - \`_TG_NEW_LAYER\`: \`{"array": <numpy ndarray>, "name": "<name>", "type": "segmentation"|"image", "spacing": [sz,sy,sx]?, "offsets": [oz,oy,ox]?, "axes": ["z","y","x"]?}\` — the array is encoded as a zarr and added as a new layer in the viewer. spacing/offsets/axes default to the first input layer's values. Use this for derived masks (e.g. a contact-site mask).
+- \`_TG_NEW_MESH_LAYER\` (HF backend only — zmesh isn't available in Pyodide): \`{"labels": <3D integer ndarray>, "name": "<name>", "spacing": [sz,sy,sx]?, "offsets": [oz,oy,ox]?, "ids": [1,2,3]?, "reduction_factor": 10?, "max_error": 8.0?}\` — runs zmesh per non-zero label and adds a Neuroglancer precomputed segmentation+mesh layer, so the user immediately sees the eroded/dilated/derived shape as a 3D mesh. Use this when the user asks to "see/show the mesh" or wants a 3D preview of a derived label volume. Same axis conventions as \`_TG_NEW_LAYER\` (array-axis order = zyx for a (Z,Y,X) array). Defaults: every non-zero label is meshed; spacing/offsets fall back to the first input layer.
 - Any matplotlib figure you draw is auto-captured and shown as a PNG.
 
 RULES:
