@@ -6,6 +6,15 @@ interface PermalinkState {
   descriptor?: DatasetDescriptor;
   query?: string;
   catalogIndex?: number;
+  // Full Neuroglancer viewer state (camera position, selected segments,
+  // layout, per-layer visibility) captured via viewer.state.toJSON().
+  // Restored after descriptor load so the recipient lands on the exact
+  // same view the sharer had.
+  viewerState?: Record<string, unknown>;
+  // Recent custom-analysis prompts (most recent first). Populated into
+  // the Custom analysis history dropdown so the recipient can re-run the
+  // sharer's queries with one click.
+  analysisPrompts?: string[];
 }
 
 function base64UrlEncode(s: string): string {
@@ -32,6 +41,12 @@ export function encodeState(state: PermalinkState): string {
     parts.push(`d=${base64UrlEncode(y)}`);
   }
   if (state.query) parts.push(`q=${encodeURIComponent(state.query)}`);
+  if (state.viewerState && Object.keys(state.viewerState).length > 0) {
+    parts.push(`v=${base64UrlEncode(JSON.stringify(state.viewerState))}`);
+  }
+  if (state.analysisPrompts && state.analysisPrompts.length > 0) {
+    parts.push(`p=${base64UrlEncode(JSON.stringify(state.analysisPrompts))}`);
+  }
   return parts.length > 0 ? "#" + parts.join("&") : "";
 }
 
@@ -56,6 +71,23 @@ export function decodeState(hash: string): PermalinkState {
   }
   const q = params.get("q");
   if (q) state.query = q;
+  const v = params.get("v");
+  if (v) {
+    try {
+      state.viewerState = JSON.parse(base64UrlDecode(v));
+    } catch (err) {
+      console.error("Failed to decode permalink viewer state:", err);
+    }
+  }
+  const p = params.get("p");
+  if (p) {
+    try {
+      const parsed = JSON.parse(base64UrlDecode(p));
+      if (Array.isArray(parsed)) state.analysisPrompts = parsed.map(String);
+    } catch (err) {
+      console.error("Failed to decode permalink analysis prompts:", err);
+    }
+  }
   return state;
 }
 

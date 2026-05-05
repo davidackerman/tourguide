@@ -151,6 +151,23 @@ export class BundledViewer {
     return this.viewer;
   }
 
+  // Snapshot the live Neuroglancer state (camera, selected segments,
+  // layout, per-layer visibility) for permalink encoding. Returns null if
+  // the viewer hasn't been mounted yet.
+  getNgState(): Record<string, unknown> | null {
+    if (!this.viewer) return null;
+    return this.viewer.state.toJSON() as Record<string, unknown>;
+  }
+
+  // Apply a previously-captured NG state on top of the current one. Used
+  // by permalink restoration to overlay camera/segments after the
+  // descriptor has set up the layer scaffolding.
+  applyNgState(state: Record<string, unknown>): void {
+    const viewer = this.ensureViewer();
+    viewer.state.restoreState(state);
+    this.currentState = state as any;
+  }
+
   // Merge extra layers into the current NG state (cheapest way to add a
   // new layer without rebuilding the whole viewer). Takes a partial layer
   // spec object.

@@ -10,6 +10,7 @@ import { openCustomAnalysisDialog } from "./custom_analysis_ui.js";
 import { openDownloadDialog } from "./download_ui.js";
 import { loadSettings, backendFromSettings, type LLMBackend } from "./llm.js";
 import { decodeState, buildPermalinkURL } from "./permalink.js";
+import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
@@ -188,6 +189,25 @@ async function init(): Promise<void> {
     const input = document.querySelector<HTMLInputElement>(".query-input");
     if (input) input.value = permalinkState.query;
   }
+  // Merge any shared prompts into the local history dropdown — additive,
+  // so opening someone else's permalink expands your suggestions instead
+  // of replacing them.
+  if (permalinkState.analysisPrompts) {
+    mergePrompts(permalinkState.analysisPrompts);
+  }
+  // Restore the shared NG view state on top of the freshly-initialized
+  // viewer. We defer to the next tick because descriptorToNgState calls
+  // restoreState synchronously inside loadDescriptor, and we need our
+  // overlay to land afterwards.
+  if (permalinkState.viewerState) {
+    setTimeout(() => {
+      try {
+        viewer.applyNgState(permalinkState.viewerState as Record<string, unknown>);
+      } catch (err) {
+        console.error("Failed to apply permalinked viewer state:", err);
+      }
+    }, 100);
+  }
 }
 
 function loadDescriptorDirect(d: DatasetDescriptor): void {
@@ -269,10 +289,17 @@ shareBtn.addEventListener("click", async () => {
   const query = queryInput?.value.trim() || undefined;
   const useCatalogIdx =
     !currentIsCustom && currentCatalogIndex !== null ? currentCatalogIndex : undefined;
+  // Snapshot live NG state (camera + selected segments + layout) so the
+  // recipient lands on the same view, plus the recent Custom analysis
+  // prompts so the dropdown carries over.
+  const viewerState = viewer.getNgState() ?? undefined;
+  const analysisPrompts = loadPromptHistory().slice(0, 10);
   const url = buildPermalinkURL({
     catalogIndex: useCatalogIdx,
     descriptor: useCatalogIdx === undefined ? currentDescriptor : undefined,
     query,
+    viewerState,
+    analysisPrompts: analysisPrompts.length > 0 ? analysisPrompts : undefined,
   });
   try {
     await navigator.clipboard.writeText(url);

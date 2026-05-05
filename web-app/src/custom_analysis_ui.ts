@@ -22,6 +22,7 @@ import {
 import type { LLMBackend } from "./llm.js";
 import { loadSettings } from "./llm.js";
 import type { BundledViewer } from "./bundled_viewer.js";
+import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 import {
   fetchHealth,
   openBrowserTunnel,
@@ -75,7 +76,8 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         <textarea class="custom-code" data-code rows="14" placeholder="# Example: contact sites between two label volumes&#10;from scipy.ndimage import binary_dilation&#10;dilated = binary_dilation(mito > 0)&#10;contacts = dilated & (er > 0)&#10;print(f'{int(contacts.sum())} contact voxels')&#10;&#10;_TG_NARRATION = f'Mito-ER contact voxels: {int(contacts.sum())}'"></textarea>
 
         <div class="custom-ai-row">
-          <input type="text" class="custom-ai-prompt" data-ai-prompt placeholder="Or describe what you want Gemini to compute (e.g. 'surface area of contact between mito and ER')" />
+          <input type="text" class="custom-ai-prompt" data-ai-prompt list="tg-prompt-history" placeholder="Or describe what you want Gemini to compute (e.g. 'surface area of contact between mito and ER')" />
+          <datalist data-prompt-history-list id="tg-prompt-history"></datalist>
           <button class="btn-secondary" data-action="ask-ai" type="button">✨ Ask AI</button>
         </div>
 
@@ -102,6 +104,14 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   const layersHost = $<HTMLDivElement>("[data-layers-host]");
   const codeEl = $<HTMLTextAreaElement>("[data-code]");
   const promptEl = $<HTMLInputElement>("[data-ai-prompt]");
+  const promptHistoryList = $<HTMLDataListElement>("[data-prompt-history-list]");
+  const refreshPromptHistory = (): void => {
+    const history = loadPromptHistory();
+    promptHistoryList.innerHTML = history
+      .map((p) => `<option value="${p.replace(/"/g, "&quot;")}"></option>`)
+      .join("");
+  };
+  refreshPromptHistory();
   const errEl = $<HTMLPreElement>("[data-error]");
   const outEl = $<HTMLDivElement>("[data-output]");
   const progressEl = $<HTMLDivElement>("[data-progress]");
@@ -633,6 +643,8 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       const code = extractPythonCode(raw);
       codeEl.value = code;
       lastAiQuestion = question; // remember for the Fix-with-AI loop on errors
+      recordPrompt(question); // for the Custom analysis history dropdown + Share permalink
+      refreshPromptHistory();
     } catch (err) {
       showError("AI request failed: " + (err as Error).message);
     } finally {
