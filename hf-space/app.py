@@ -536,11 +536,19 @@ def _encode_new_mesh_layer_and_write(
     renders both, and Save artifact bundles both with one walk of the
     session dir.
     """
-    if nml is None or "labels" not in nml:
+    if nml is None:
+        log.info("mesh-layer: _TG_NEW_MESH_LAYER not set, skipping")
+        return None
+    if not isinstance(nml, dict):
+        log.warning("mesh-layer: _TG_NEW_MESH_LAYER is %s, expected dict", type(nml).__name__)
+        return None
+    if "labels" not in nml:
+        log.warning("mesh-layer: dict has keys %s, missing 'labels'", list(nml.keys()))
         return None
     labels = nml["labels"]
     if not isinstance(labels, np.ndarray):
         labels = np.asarray(labels)
+    log.info("mesh-layer: starting zmesh on shape=%s dtype=%s", labels.shape, labels.dtype)
     if labels.ndim != 3:
         raise HTTPException(status_code=400, detail=f"_TG_NEW_MESH_LAYER labels must be a 3D (Z, Y, X) array, got shape {labels.shape}")
     if not np.issubdtype(labels.dtype, np.integer):
@@ -649,6 +657,7 @@ def _encode_new_mesh_layer_and_write(
     )
     (out_dir / "s0" / chunk_key).write_bytes(labels.tobytes(order="C"))
 
+    log.info("mesh-layer: wrote %d meshes (out of %d candidates) to %s", len(written_ids), len(ids), out_dir)
     fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
     fwd_host = (request.headers.get("x-forwarded-host") or request.url.netloc).split(",")[0].strip()
     scheme = fwd_proto if fwd_proto in ("http", "https") else "https"
@@ -780,7 +789,14 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
                 out_msg["newLayer"] = new_layer
                 # Ensure this session gets cleaned up eventually.
                 background.add_task(_cleanup_session_later, session_id)
-            new_mesh_layer = _encode_new_mesh_layer_and_write(session_id, outputs.get("_TG_NEW_MESH_LAYER"), layers_info, request)
+            try:
+                new_mesh_layer = _encode_new_mesh_layer_and_write(
+                    session_id, outputs.get("_TG_NEW_MESH_LAYER"), layers_info, request,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface the error rather than swallowing
+                log.exception("mesh-layer encoder failed")
+                new_mesh_layer = None
+                out_msg["meshLayerError"] = f"{type(exc).__name__}: {exc}"
             if new_mesh_layer:
                 out_msg["newMeshLayer"] = new_mesh_layer
                 background.add_task(_cleanup_session_later, session_id)
