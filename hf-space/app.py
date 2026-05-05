@@ -28,6 +28,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,6 +50,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # --- App setup --------------------------------------------------------------
 
 APP_VERSION = "0.1.0"
+# When the container started, in seconds since epoch. Lets the frontend
+# tell the running build apart from a stale cache without needing the
+# git SHA (which the HF build environment doesn't expose at runtime).
+BUILD_STARTED_AT = time.time()
 SESSION_ROOT = Path(os.environ.get("TG_SESSION_ROOT", "/tmp/tourguide-sessions"))
 SESSION_ROOT.mkdir(parents=True, exist_ok=True)
 SESSION_TTL_SECONDS = 10 * 60
@@ -146,6 +151,14 @@ async def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "version": APP_VERSION,
+        # Container start time so you can tell at a glance whether a push
+        # has actually reached the running Space — compare to the ISO time
+        # of your latest commit. If `started_at` is older than your push,
+        # the Space hasn't rebuilt yet.
+        "started_at": datetime.fromtimestamp(BUILD_STARTED_AT, tz=timezone.utc).isoformat(),
+        # Marker that's only true after the mesh feature lands on the
+        # backend. Cheap deploy probe: `curl /api/health | jq .features`.
+        "features": {"new_mesh_layer": True},
         "python": platform.python_version(),
         "mem_gb_total": _mem_gb_total(),
         "mem_gb_free": _mem_gb_free(),
