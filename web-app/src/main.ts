@@ -228,6 +228,7 @@ analyzeBtn.addEventListener("click", () => {
       });
       if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
     },
+    viewer,
   });
 });
 

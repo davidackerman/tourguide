@@ -4,6 +4,7 @@
 // the structured browser picks it up for free (sort / paginate / fly-to).
 
 import type { Database } from "sql.js";
+import type { BundledViewer } from "./bundled_viewer.js";
 import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
 import type { DatasetDB, IngestedTable } from "./db.js";
 import { loadSqlJs } from "./db.js";
@@ -30,6 +31,7 @@ export interface AnalysisUICallbacks {
   getDB: () => DatasetDB | null;
   setDB: (db: DatasetDB) => void;
   onTableAdded: () => void; // refresh browser UI
+  viewer: BundledViewer; // for adding the optional mesh layer to NG
 }
 
 export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
@@ -74,6 +76,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
               <option value="false">No — run connected-components on mask</option>
             </select>
           </label>
+          <label class="mesh-toggle" data-mesh-row>
+            <input type="checkbox" data-make-meshes />
+            <span>Generate 3D meshes (zmesh, backend only)</span>
+          </label>
         </div>
         <div data-scales-host>
           <p class="hint" data-inspect-status>Pick a layer to list available scales.</p>
@@ -111,6 +117,17 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   const remoteRow = $<HTMLLabelElement>("[data-remote-row]");
   const remoteToggle = $<HTMLInputElement>("[data-remote-toggle]");
   const remoteLabel = $<HTMLSpanElement>("[data-remote-label]");
+  const meshRow = $<HTMLLabelElement>("[data-mesh-row]");
+  const meshCheckbox = $<HTMLInputElement>("[data-make-meshes]");
+  // zmesh ships only on the HF backend; gate the option behind the remote
+  // toggle so the user can't pick it for a Pyodide run that would just
+  // ignore it.
+  const refreshMeshAvailability = (): void => {
+    const remoteOn = !!(analysisBackendUrl && remoteToggle.checked && !remoteToggle.disabled);
+    meshCheckbox.disabled = !remoteOn;
+    meshRow.title = remoteOn ? "" : "Available only when 'Run on backend' is checked.";
+    if (!remoteOn) meshCheckbox.checked = false;
+  };
 
   const client = new AnalysisClient();
 
@@ -133,6 +150,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         remoteToggle.disabled = false;
         remoteLabel.innerHTML = `Run on <code>${escapeHtml(shortUrl)}</code> <span class="remote-warn">● unreachable (click Run to retry)</span>`;
       }
+      refreshMeshAvailability();
     })();
   }
 
@@ -274,7 +292,9 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   // is selected (and reappear on switch back).
   remoteToggle.addEventListener("change", () => {
     if (currentInspection) renderScales(currentInspection);
+    refreshMeshAvailability();
   });
+  refreshMeshAvailability();
 
   const inspectLayer = async (layer: DatasetLayer): Promise<void> => {
     clearError();
@@ -334,7 +354,8 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           await t.ready;
           tunnel = t;
         }
-        showProgress("Running regionprops on backend …");
+        const makeMeshes = meshCheckbox.checked && !meshCheckbox.disabled;
+        showProgress(makeMeshes ? "Running regionprops + zmesh on backend …" : "Running regionprops on backend …");
         const remote: CustomAnalysisResult = await postAnalysisRequest(analysisBackendUrl, {
           layers: [
             {
@@ -347,7 +368,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             },
           ],
           tables: [],
-          code: buildRegionpropsCode(labeledSel.value === "true"),
+          code: buildRegionpropsCode(labeledSel.value === "true", makeMeshes, currentLayer.name),
           timeoutMs: 300_000,
           sessionId,
         });
@@ -364,6 +385,27 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
         await ingestResult(cb, currentLayer, scale, result);
         cb.onTableAdded();
+        // The HF encoder routes a mesh layer through addSourceLayer (with a
+        // precomputed:// URL); attach it to the viewer + descriptor so it
+        // renders alongside the source seg.
+        if (remote.addSourceLayer) {
+          cb.viewer.addLayerFromSpec({
+            type: remote.addSourceLayer.type,
+            name: remote.addSourceLayer.name,
+            source: remote.addSourceLayer.source,
+          });
+          const desc = cb.getDescriptor();
+          if (desc) {
+            const i = desc.layers.findIndex((l) => l.name === remote.addSourceLayer!.name);
+            const layer = {
+              name: remote.addSourceLayer.name,
+              type: remote.addSourceLayer.type,
+              source: remote.addSourceLayer.source,
+            };
+            if (i >= 0) desc.layers[i] = layer;
+            else desc.layers.push(layer);
+          }
+        }
         close();
       } else {
         // Local Pyodide path (unchanged).
@@ -424,7 +466,35 @@ function escapeHtml(s: string): string {
 // analysis_worker.ts so the schema of the returned table matches exactly:
 // object_id, volume, position_xyz, bbox_min/max_xyz, equivalent_diameter,
 // n_voxels. Click-to-fly works out of the box because the columns line up.
-function buildRegionpropsCode(alreadyLabeled: boolean): string {
+function buildRegionpropsCode(
+  alreadyLabeled: boolean,
+  makeMeshes: boolean,
+  layerName: string,
+): string {
+  // The mesh block is appended (rather than nested) so it runs after the
+  // labels variable is already populated by the regionprops step. We hand
+  // the variable straight to _TG_NEW_MESH_LAYER and let the HF encoder
+  // (_encode_new_mesh_layer_and_write) drive zmesh — that keeps the zmesh
+  // API call in one place and avoids the analyze flow reimplementing it.
+  const meshSafeName = layerName.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const meshBlock = makeMeshes
+    ? `
+# Generate 3D meshes for the labeled output.
+# Cast labels for zmesh's preferred dtype range; uint64 is fine, but bool isn't.
+_mesh_labels = labels
+if _mesh_labels.dtype == np.bool_:
+    _mesh_labels = _mesh_labels.astype(np.uint32, copy=False)
+elif str(_mesh_labels.dtype) not in ("uint8","uint16","uint32","uint64"):
+    _mesh_labels = _mesh_labels.astype(np.uint32, copy=False)
+_TG_NEW_MESH_LAYER = {
+    "labels": _mesh_labels,
+    "name": "${meshSafeName}_meshes",
+    "spacing": spacing,
+    "offsets": offsets,
+}
+print(f"queued meshes for {len(np.unique(_mesh_labels)) - 1} segment(s)", flush=True)
+`
+    : "";
   return `
 import time as _t, numpy as np
 spacing = layers["image"]["spacing"]
@@ -480,7 +550,7 @@ df = pd.DataFrame({
 _TG_TABLE = df
 _TG_TABLE_NAME = "regionprops"
 _TG_NARRATION = f"Regionprops on backend: {len(df)} objects."
-`;
+${meshBlock}`;
 }
 
 // Inject the analysis result into the existing DatasetDB as a new table so
