@@ -647,6 +647,23 @@ def _encode_new_mesh_layer_and_write(
         int(round(offsets_zyx[1] / spacing_zyx[1])) if spacing_zyx[1] else 0,
         int(round(offsets_zyx[0] / spacing_zyx[0])) if spacing_zyx[0] else 0,
     ]
+    # Inline segment_properties so the Segments panel is pre-populated with
+    # every meshed id (and a friendly label). Without this the panel is
+    # empty until the user manually types ids — even though the meshes
+    # exist on disk and would render fine if ticked.
+    sp_dir = out_dir / "segment_properties"
+    sp_dir.mkdir(exist_ok=True)
+    (sp_dir / "info").write_text(json.dumps({
+        "@type": "neuroglancer_segment_properties",
+        "inline": {
+            "ids": [str(i) for i in written_ids],
+            "properties": [{
+                "id": "label",
+                "type": "label",
+                "values": [f"{name}_{i}" for i in written_ids],
+            }],
+        },
+    }))
     info = {
         "type": "segmentation",
         "data_type": str(labels.dtype),
@@ -660,6 +677,7 @@ def _encode_new_mesh_layer_and_write(
             "encoding": "raw",
         }],
         "mesh": "mesh",
+        "segment_properties": "segment_properties",
     }
     (out_dir / "info").write_text(json.dumps(info))
     (out_dir / "s0").mkdir(exist_ok=True)
