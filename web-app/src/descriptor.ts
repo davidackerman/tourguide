@@ -20,6 +20,12 @@ export interface DatasetDescriptor {
   cross_section_scale?: number;
   projection_scale?: number;
   layers: DatasetLayer[];
+  // Optional alias → "what folder to pick" hint. When set, the loader
+  // prompts the user to pick each folder in turn and rewrites layer
+  // sources prefixed by `<alias>/...` against the resulting baseUrl.
+  // Lets a single YAML reference data spread across multiple disk
+  // locations without forcing a single common-parent pick.
+  folders?: Record<string, string>;
 }
 
 export interface CatalogEntry {

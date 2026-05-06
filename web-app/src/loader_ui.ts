@@ -67,9 +67,20 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
           <p class="hint warn folder-unsupported" data-folder-unsupported hidden>This browser doesn't support the File System Access API. Use Chrome / Edge, or use the <strong>Local server</strong> tab.</p>
         </section>
         <section class="modal-pane" data-pane="yaml">
-          <p class="hint">Paste a complete dataset descriptor in YAML. Sources can be absolute (<code>zarr://https://…</code>) or — when you've also picked a local folder via the <strong>Local folder</strong> tab — relative paths like <code>cells/data</code> that get resolved against that folder.</p>
-          <p class="hint">Tip: drop a <code>tourguide.yaml</code> next to your data. Picking the folder will auto-load it with relative sources resolved.</p>
-          <textarea class="yaml-input" rows="18" placeholder="name: my_dataset&#10;display_name: My Dataset&#10;voxel_size_nm: [4, 4, 4]&#10;layers:&#10;  - name: image&#10;    type: image&#10;    source: zarr://..."></textarea>
+          <p class="hint">Paste a complete dataset descriptor in YAML. Sources can be absolute (<code>zarr://https://…</code>) or relative to picked local folders.</p>
+          <p class="hint">Two ways to point at local data:</p>
+          <ul class="hint">
+            <li>Drop <code>tourguide.yaml</code> at the root of your data folder → use <strong>Local folder</strong> tab → relative sources resolve against that folder.</li>
+            <li>Or declare multiple folders in YAML — Load prompts you to pick each in turn:
+              <pre class="code-block">folders:
+  em:    Pick the EM folder
+  seg:   Pick the cell-seg folder
+layers:
+  - { name: image, type: image,        source: em/raw.zarr }
+  - { name: cells, type: segmentation, source: seg/cells.zarr }</pre>
+            </li>
+          </ul>
+          <textarea class="yaml-input" rows="14" placeholder="name: my_dataset&#10;display_name: My Dataset&#10;voxel_size_nm: [4, 4, 4]&#10;layers:&#10;  - name: image&#10;    type: image&#10;    source: zarr://..."></textarea>
           <div class="form-actions">
             <button class="btn-primary" data-action="load-yaml">Load</button>
           </div>
@@ -236,13 +247,29 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
     }
   };
 
-  const submitYaml = (): void => {
+  const submitYaml = async (): Promise<void> => {
     setError("");
     try {
       const text = overlay.querySelector<HTMLTextAreaElement>(".yaml-input")!.value;
       if (!text.trim()) throw new Error("Paste a descriptor");
       const descriptor = loadDescriptorFromYaml(text);
-      onLoad(descriptor);
+      // If the descriptor declares a `folders:` block, prompt the user
+      // to pick each folder in turn (with the YAML's hint as a label),
+      // register each, and resolve relative sources against the
+      // resulting base URLs. Any source already absolute passes through.
+      if (descriptor.folders && Object.keys(descriptor.folders).length > 0) {
+        const baseMap: Record<string, string> = {};
+        for (const [alias, hint] of Object.entries(descriptor.folders)) {
+          const friendly = `For folder "${alias}": ${hint || "pick the folder containing this layer's data"}.\n\nClick OK to open the folder picker.`;
+          if (!confirm(friendly)) throw new Error(`Folder pick for '${alias}' cancelled`);
+          const reg = await pickLocalFolder();
+          baseMap[alias] = reg.baseUrl;
+        }
+        const resolved = resolveDescriptorAgainstFolder(descriptor, baseMap);
+        onLoad(resolved);
+      } else {
+        onLoad(descriptor);
+      }
       close();
     } catch (err) {
       setError((err as Error).message);
@@ -250,7 +277,7 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
   };
 
   overlay.querySelector("[data-action='load-form']")!.addEventListener("click", submitForm);
-  overlay.querySelector("[data-action='load-yaml']")!.addEventListener("click", submitYaml);
+  overlay.querySelector("[data-action='load-yaml']")!.addEventListener("click", () => void submitYaml());
 
   // ---- Local folder tab ----
   const folderUnsupported = overlay.querySelector<HTMLElement>("[data-folder-unsupported]")!;

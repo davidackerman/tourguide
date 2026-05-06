@@ -53,21 +53,45 @@ export function descriptorToYaml(d: DatasetDescriptor): string {
 }
 
 // Rewrite layer sources / csv paths that are *relative* (no `://`) so
-// they resolve against a picked-folder base URL. Lets a tourguide.yaml
-// dropped inside a data folder say `source: cells/data` and have it
-// turn into `zarr://<host>/local-data/<id>/cells/data/` at load time.
+// they resolve against picked-folder base URL(s). Two shapes:
 //
-// Sources that already include a scheme (`zarr://https://…`,
-// `precomputed://…`, etc.) pass through untouched, so a YAML that
-// mixes local + remote layers still works.
+// - Single base (back-compat): `resolveDescriptorAgainstFolder(d, baseUrl)`
+//   rewrites every relative source against that one folder. Used when a
+//   `tourguide.yaml` dropped at the root of a picked folder owns all
+//   the layers.
+//
+// - Multi base (per-alias): `resolveDescriptorAgainstFolder(d, {em, seg})`
+//   rewrites `<alias>/<subpath>` sources against the matching folder's
+//   baseUrl. Lets a single YAML reference data spread across multiple
+//   disk locations the user picked separately.
+//
+// Sources that already include a scheme (`zarr://https://…`, etc.)
+// pass through untouched, so a YAML can freely mix local + remote.
 export function resolveDescriptorAgainstFolder(
   d: DatasetDescriptor,
-  baseUrl: string,
+  bases: string | Record<string, string>,
 ): DatasetDescriptor {
-  const base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+  const baseMap: Record<string, string> =
+    typeof bases === "string"
+      ? { "": bases.endsWith("/") ? bases : bases + "/" }
+      : Object.fromEntries(
+          Object.entries(bases).map(([k, v]) => [k, v.endsWith("/") ? v : v + "/"]),
+        );
+  const splitAlias = (path: string): { base: string; rest: string } => {
+    // Strip leading "./" before alias matching.
+    const trimmed = path.replace(/^\.?\/+/, "");
+    if ("" in baseMap) return { base: baseMap[""], rest: trimmed };
+    // Multi-alias: longest-prefix match by alias.
+    const aliases = Object.keys(baseMap).sort((a, b) => b.length - a.length);
+    for (const a of aliases) {
+      if (trimmed === a || trimmed.startsWith(a + "/")) {
+        return { base: baseMap[a], rest: trimmed.slice(a.length).replace(/^\/+/, "") };
+      }
+    }
+    throw new Error(`Layer source '${path}' has no matching folders alias (known: ${aliases.join(", ") || "(none)"})`);
+  };
   const resolveSource = (source: string): string => {
     if (/^[a-z][a-z0-9+]*:\/\//i.test(source)) return source; // already absolute
-    // Allow optional explicit kind prefix without authority, e.g. "n5:./data.n5/".
     const kindMatch = /^(zarr|n5|precomputed):(?:\/\/)?(.*)$/i.exec(source);
     let kind = "zarr";
     let path = source;
@@ -75,19 +99,24 @@ export function resolveDescriptorAgainstFolder(
       kind = kindMatch[1];
       path = kindMatch[2];
     } else {
-      // Sniff kind from extension; default zarr.
       if (/\.n5\/?$/i.test(source) || /\.n5\//i.test(source)) kind = "n5";
       else if (/^precomputed\b/i.test(source) || /\/precomputed\//i.test(source)) kind = "precomputed";
     }
-    const cleaned = path.replace(/^\.?\/+/, "");
-    return `${kind}://${base}${cleaned}`;
+    const { base, rest } = splitAlias(path);
+    return `${kind}://${base}${rest}`;
   };
   const resolveCsv = (csv: string): string => {
     if (/^[a-z][a-z0-9+]*:\/\//i.test(csv)) return csv;
-    return base + csv.replace(/^\.?\/+/, "");
+    const { base, rest } = splitAlias(csv);
+    return base + rest;
   };
+  // The `folders` block is a yaml-time directive only — strip it from
+  // the descriptor we return so downstream code (permalink encode,
+  // viewer, etc.) sees a clean descriptor with absolute sources.
+  const { folders: _strip, ...rest } = d;
+  void _strip;
   return {
-    ...d,
+    ...rest,
     layers: d.layers.map((l) => ({
       ...l,
       source: resolveSource(l.source),
