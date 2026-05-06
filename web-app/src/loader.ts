@@ -41,7 +41,42 @@ export function buildDescriptorFromInput(input: PastedDatasetInput): DatasetDesc
         return layer;
       }),
   };
+  // Resolve any layers that landed with a generic fallback name into a
+  // URL-derived one — but keep names the user explicitly typed.
+  cleaned.layers = cleaned.layers.map((l) => ({
+    ...l,
+    name: l.name === l.type ? defaultLayerName(l.source, l.type) : l.name,
+  }));
+  // Ensure layer names are unique by suffixing duplicates with -2, -3, ...
+  const seen = new Map<string, number>();
+  cleaned.layers = cleaned.layers.map((l) => {
+    const n = (seen.get(l.name) ?? 0) + 1;
+    seen.set(l.name, n);
+    return n === 1 ? l : { ...l, name: `${l.name}-${n}` };
+  });
   return validateDescriptor(cleaned);
+}
+
+// Extract a sensible default layer name from a source URL — the last
+// non-empty path component with .zarr / .n5 / .precomputed extensions
+// stripped. Mirrors what NG does for unnamed layers.
+//   zarr://https://.../recon-1/em/fibsem-int16   → "fibsem-int16"
+//   precomputed://.../mesh/                       → "mesh"
+//   zarr://.../local-data/cell-fqk7gy/data.zarr/  → "data"
+// Returns the fallback when nothing useful can be extracted.
+export function defaultLayerName(source: string, fallback = "layer"): string {
+  if (!source) return fallback;
+  // Strip the tourguide prefix (zarr://, n5://, precomputed://, etc.).
+  const stripped = source.replace(/^[a-z][a-z0-9+]*:\/\//i, "").replace(/^[a-z][a-z0-9+]*:/i, "");
+  // Split on / + remove trailing empties (from a trailing slash).
+  const parts = stripped.split("/").filter(Boolean);
+  if (parts.length === 0) return fallback;
+  let tail = parts[parts.length - 1];
+  // Strip recognized format extensions.
+  tail = tail.replace(/\.(zarr|n5|precomputed)$/i, "");
+  // Sanitize: keep [A-Za-z0-9_-.] only.
+  tail = tail.replace(/[^A-Za-z0-9._-]/g, "_");
+  return tail || fallback;
 }
 
 export function loadDescriptorFromYaml(text: string): DatasetDescriptor {

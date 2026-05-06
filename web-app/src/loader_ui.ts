@@ -3,6 +3,7 @@ import {
   loadDescriptorFromYaml,
   descriptorToYaml,
   resolveDescriptorAgainstFolder,
+  defaultLayerName,
   type PastedDatasetInput,
   type PastedLayerInput,
 } from "./loader.js";
@@ -176,10 +177,11 @@ layers:
     const nameInput = row.querySelector<HTMLInputElement>(`[data-l="name"]`)!;
     sourceInput.addEventListener("blur", () => {
       void tryAutoDetect(sourceInput.value);
-      // Also auto-name the layer if left blank: derive from the URL's last path component.
-      if (!nameInput.value) {
-        const tail = sourceInput.value.replace(/\/+$/, "").split("/").pop() ?? "";
-        if (tail) nameInput.value = tail.replace(/\.(zarr|n5)$/i, "");
+      // Auto-name from URL when the name field is blank — same helper
+      // buildDescriptorFromInput uses, so behavior matches whether the
+      // user blurs the field or not.
+      if (!nameInput.value && sourceInput.value.trim()) {
+        nameInput.value = defaultLayerName(sourceInput.value);
       }
     });
     layersList.appendChild(row);
@@ -361,8 +363,14 @@ layers:
         <p class="hint">No <code>tourguide.yaml</code> in this folder. Trying to auto-detect a dataset under <code>${escapeHtml(reg.name)}</code>…</p>
       `;
       const candidates: Array<{ kind: "zarr" | "n5" | "precomputed"; subpath: string }> = [];
-      // Probe a few common entry-points: root and one level deep.
-      for (const sub of ["", "data.zarr/", "data.n5/", "image/"]) {
+      // Probe a few common entry-points: root, one level deep, and a few
+      // typical precomputed mesh layouts. First hit wins.
+      const subpaths = [
+        "",
+        "data.zarr/", "data.n5/", "image/",
+        "mesh/", "meshes/", "segmentation/", "segmentations/",
+      ];
+      for (const sub of subpaths) {
         for (const kind of ["zarr", "n5", "precomputed"] as const) {
           candidates.push({ kind, subpath: sub });
         }
@@ -396,9 +404,11 @@ layers:
             // Use the dtype-derived guess if detect returned one, otherwise
             // default to image. The user can still toggle in Paste URLs view.
             const guessed = (f.meta.guessedType ?? "image") as "image" | "segmentation";
-            const baseName = f.subpath ? f.subpath.replace(/[/.]+$/, "") : guessed;
+            // Prefer a name derived from the URL's tail (matches NG's own
+            // unnamed-layer behavior) so the layer comes out as e.g.
+            // "fibsem-int16" instead of "image".
             const layers = [{
-              name: baseName || guessed,
+              name: defaultLayerName(url, guessed),
               type: guessed,
               source: url,
             }];
