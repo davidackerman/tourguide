@@ -248,25 +248,64 @@ export class BundledViewer {
     }
     layers[idx] = layer;
     state.layers = layers;
+    const navState = viewer.navigationState as any;
+    const positionBefore = navState?.position?.value ? Array.from(navState.position.value as Float32Array) : null;
+    const csScaleBefore = navState?.zoomFactor?.value as number | undefined;
+    const projScaleBefore = navState?.depthRange?.value as number | undefined;
     viewer.state.restoreState(state);
+    try {
+      if (positionBefore && positionBefore.length > 0) {
+        navState.position.value = Float32Array.from(positionBefore);
+      }
+      if (csScaleBefore !== undefined && navState?.zoomFactor) {
+        navState.zoomFactor.value = csScaleBefore;
+      }
+      if (projScaleBefore !== undefined && navState?.depthRange) {
+        navState.depthRange.value = projScaleBefore;
+      }
+    } catch {
+      /* non-fatal */
+    }
     this.currentState = state as any;
     return true;
   }
 
   // Merge extra layers into the current NG state (cheapest way to add a
   // new layer without rebuilding the whole viewer). Takes a partial layer
-  // spec object.
+  // spec object. Preserves the camera state across the call — adding a
+  // mesh / synth layer is purely additive UX, so we don't want NG to
+  // re-fit on the new bounds (which can pop the user out of whatever
+  // they were inspecting).
   addLayerFromSpec(layer: Record<string, unknown>): void {
     const viewer = this.ensureViewer();
     const state = viewer.state.toJSON() as { layers?: Array<Record<string, unknown>> } & Record<string, unknown>;
     const layers = Array.isArray(state.layers) ? state.layers.slice() : [];
-    // Drop any existing layer with the same name, so re-running an analysis
-    // replaces rather than duplicates.
     const name = String(layer.name ?? "");
     const filtered = name ? layers.filter((l) => String(l.name) !== name) : layers;
     filtered.push(layer);
     state.layers = filtered;
+    // Snapshot camera-side state so restoreState doesn't drop or
+    // re-fit it. NG's state.toJSON includes position/scale already,
+    // so just re-asserting the existing values is enough.
+    const navState = viewer.navigationState as any;
+    const positionBefore = navState?.position?.value ? Array.from(navState.position.value as Float32Array) : null;
+    const csScaleBefore = navState?.zoomFactor?.value as number | undefined;
+    const projScaleBefore = navState?.depthRange?.value as number | undefined;
     viewer.state.restoreState(state);
+    // Re-pin the camera if NG nudged it.
+    try {
+      if (positionBefore && positionBefore.length > 0) {
+        navState.position.value = Float32Array.from(positionBefore);
+      }
+      if (csScaleBefore !== undefined && navState?.zoomFactor) {
+        navState.zoomFactor.value = csScaleBefore;
+      }
+      if (projScaleBefore !== undefined && navState?.depthRange) {
+        navState.depthRange.value = projScaleBefore;
+      }
+    } catch {
+      /* NG internals shifted between versions; non-fatal */
+    }
     this.currentState = state as any;
   }
 

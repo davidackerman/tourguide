@@ -349,6 +349,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     clearError();
     const scale: LayerScaleInfo = currentInspection.scales[selectedScaleIdx];
     const useRemote = analysisBackendUrl && remoteToggle.checked;
+    let progressTimer = 0;
 
     // WASM-cap warning only matters for the local Pyodide path. Backend
     // has 16 GB real RAM; skip the prompt there.
@@ -382,7 +383,34 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           tunnel = t;
         }
         const makeMeshes = meshCheckbox.checked && !meshCheckbox.disabled;
-        showProgress(makeMeshes ? "Running regionprops + zmesh on backend …" : "Running regionprops on backend …");
+        // Rotate the progress label based on elapsed time so the bar
+        // at least narrates roughly which phase is running. Backend
+        // doesn't stream real progress (would need SSE), but the
+        // phase boundaries are predictable enough that calendar-
+        // estimating them gives the user some signal.
+        const t0 = performance.now();
+        const phases: Array<[number, string]> = makeMeshes
+          ? [
+              [0, "Loading layer from zarr …"],
+              [3, "Connected components + regionprops on backend …"],
+              [12, "Computing region properties …"],
+              [22, "Generating 3D meshes (zmesh) …"],
+              [60, "Still meshing (large input) …"],
+            ]
+          : [
+              [0, "Loading layer from zarr …"],
+              [3, "Connected components + regionprops on backend …"],
+              [12, "Computing region properties …"],
+              [30, "Still running (large input) …"],
+            ];
+        const tickProgress = (): void => {
+          const dt = (performance.now() - t0) / 1000;
+          let label = phases[0][1];
+          for (const [t, msg] of phases) if (dt >= t) label = msg;
+          showProgress(label);
+        };
+        tickProgress();
+        progressTimer = window.setInterval(tickProgress, 1000);
         const remote: CustomAnalysisResult = await postAnalysisRequest(analysisBackendUrl, {
           layers: [
             {
@@ -404,6 +432,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           timeoutMs: 300_000,
           sessionId,
         });
+        window.clearInterval(progressTimer);
         if (!remote.table) throw new Error("Backend returned no table.");
         // Adapt the {table: {columns, rows}} response into the AnalysisResult
         // shape that ingestResult already knows how to consume.
@@ -479,6 +508,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       showError((err as Error).message);
       runBtn.disabled = false;
     } finally {
+      if (progressTimer) window.clearInterval(progressTimer);
       tunnel?.close();
     }
   });
