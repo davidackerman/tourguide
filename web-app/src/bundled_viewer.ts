@@ -66,25 +66,30 @@ export class BundledViewer {
   }
 
   loadDescriptor(d: DatasetDescriptor): void {
+    // restoreState replaces declared layers but NG keeps its in-memory
+    // navigation state (camera position, zoom, layout) across the call.
+    // That's why a dataset switch leaves the camera pointing at the
+    // *previous* dataset's center: NG never auto-fits because it
+    // already has a position. The cleanest match for "user picked a
+    // new dataset" semantics is to make NG see this as a fresh page
+    // load — tear down the existing viewer and recreate it. NG's
+    // standard auto-fit-to-layer-bounds then runs naturally and we
+    // don't have to bolt on flyTo / setTimeout / state-reset hacks.
+    if (this.viewer) {
+      try {
+        (this.viewer as unknown as { dispose?: () => void }).dispose?.();
+      } catch (err) {
+        console.warn("[viewer] dispose failed:", (err as Error).message);
+      }
+      this.viewer = null;
+      // Clear NG's mount before re-mounting so we don't end up with
+      // two stacked viewers in the DOM.
+      while (this.container.firstChild) this.container.removeChild(this.container.firstChild);
+    }
     const viewer = this.ensureViewer();
     const state = descriptorToNgState(d);
     this.currentState = state;
     viewer.state.restoreState(state as unknown as Record<string, unknown>);
-    // restoreState replaces declared layers but keeps NG's *in-memory*
-    // navigation position, so switching datasets leaves the camera
-    // pointed at the previous dataset's center. Re-fly via flyTo (which
-    // converts nm → NG-units against the live coordinate space) once
-    // NG has had a tick to register the new layers' dim space.
-    if (d.initial_position) {
-      const target = d.initial_position;
-      setTimeout(() => {
-        try {
-          this.flyTo(target);
-        } catch (err) {
-          console.warn("[viewer] post-load recenter skipped:", (err as Error).message);
-        }
-      }, 600);
-    }
   }
 
   flyTo(
