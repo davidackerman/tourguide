@@ -56,17 +56,24 @@ export function descriptorToNgState(d: DatasetDescriptor): NgState {
   // first data source resolves, NG centers on the layer extent in its
   // own units automatically.
   if (d.projection_orientation) state.projectionOrientation = d.projection_orientation;
-  // Only forward explicit cross-section / projection scales when the
-  // descriptor pinned one. Without them, Neuroglancer auto-fits to the
-  // layer bounds when the first data source resolves — which is what we
-  // want by default. The previous "max-voxel" default landed at
-  // 1 voxel per pixel, which is way too zoomed in for typical EM
-  // datasets.
-  if (d.cross_section_scale !== undefined) state.crossSectionScale = d.cross_section_scale;
+  // Cross-section default: NG's own default lands at ~1 voxel/pixel
+  // (i.e. crossSectionScale ≈ voxel_size in NG units), which is way
+  // too tight for typical EM volumes — the panel only shows a few
+  // hundred nm of a multi-µm dataset. Seed a coarser default
+  // (~64x voxel size) so the panels fit a usefully large slab on
+  // first paint. NG's projection-fit handles the 3D camera on its
+  // own. User can mousewheel-zoom from there.
+  //
+  // Caveat: this value is in NG's *runtime* unit (which inherits the
+  // layer source's per-axis scale). At descriptor build time we don't
+  // know NG's runtime unit, so we set a constant that's a multiple of
+  // the descriptor's declared voxel size — close enough for typical
+  // OME-Zarr datasets where NG's runtime unit ends up being the same
+  // physical voxel size.
+  const ZOOM_OUT_FACTOR = 64;
+  const defaultCross = Math.max(vx, vy, vz) * ZOOM_OUT_FACTOR;
+  state.crossSectionScale = d.cross_section_scale ?? defaultCross;
   if (d.projection_scale !== undefined) state.projectionScale = d.projection_scale;
-  // vx is read above but no longer used in defaulting; keep refs alive
-  // for code-readers — voxel sizes still influence flyTo conversions.
-  void vx; void vy; void vz;
   const firstImage = d.layers.find((l) => l.type === "image");
   if (firstImage) {
     state.selectedLayer = { visible: true, layer: firstImage.name };

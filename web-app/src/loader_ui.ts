@@ -393,7 +393,7 @@ layers:
         // type can't be changed once the layer is in NG.
         folderDetectedEl.innerHTML = `
           <p class="hint" style="margin:0 0 8px;">✓ ${f.kind} at <code>${escapeHtml(sub)}</code> — voxel ${f.meta.voxel_size_nm.join(" × ")} nm.</p>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <label style="display:flex;gap:6px;align-items:center;">
               <span>Load as:</span>
               <select data-load-type>
@@ -401,8 +401,8 @@ layers:
                 <option value="segmentation"${guessed === "segmentation" ? " selected" : ""}>segmentation (labels)</option>
               </select>
             </label>
-            <span class="hint" style="opacity:0.7;">guessed: ${guessed}</span>
-            <button class="btn-primary" data-action="load-detected" style="margin-left:auto;">Load</button>
+            <button class="btn-primary" data-action="load-detected">Load</button>
+            <span class="hint" style="opacity:0.6;">(guessed: ${guessed})</span>
           </div>
         `;
         folderDetectedEl.querySelector("[data-action='load-detected']")!.addEventListener("click", () => {
