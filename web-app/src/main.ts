@@ -89,19 +89,25 @@ async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
   await applyDescriptor(descriptor, baseUrl);
 }
 
+// True while the very first applyDescriptor call (from permalink or default
+// catalog entry on page boot) is in flight. Lets us preserve the URL hash
+// so NG can restore its state from it; cleared after the first apply, so
+// later user-initiated dataset switches strip the (now-stale) hash.
+let initialApplyDone = false;
+
 async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Promise<void> {
-  // NG auto-syncs its viewer state (camera, segments, layout) to the URL
-  // hash on every interaction. When the user picks a new dataset, the
-  // *previous* dataset's hash is still there — and NG restores its
-  // position/segments from it before auto-fitting, leaving the camera
-  // pointing at coords that meant something for the old layers but
-  // nothing for the new ones. Strip the hash here so each fresh
-  // dataset load starts NG with a clean slate. (Permalinks pasted in
-  // the URL still work — main.init reads the hash *once* on initial
-  // page load, before this function ever runs.)
-  if (window.location.hash) {
+  // NG auto-syncs its viewer state to the URL hash on every interaction.
+  // For *subsequent* dataset switches we strip the hash so a leftover
+  // position/segments set from a previous dataset doesn't apply to the
+  // wrong layers. But on initial load we MUST keep the hash — that's
+  // where a pasted permalink's NG state lives, and stripping it here
+  // is what was breaking permalinked centering: NG's setupDefaultViewer
+  // reads the hash on mount; if we'd already wiped it, the recipient
+  // got default-fit instead of the shared view.
+  if (initialApplyDone && window.location.hash) {
     history.replaceState(null, "", window.location.pathname + window.location.search);
   }
+  initialApplyDone = true;
   currentDescriptor = d;
   viewer.loadDescriptor(d);
   renderMeta(d);
