@@ -69,10 +69,22 @@ export class BundledViewer {
     const viewer = this.ensureViewer();
     const state = descriptorToNgState(d);
     this.currentState = state;
-    // Neuroglancer accepts a JSON state object via `state.restoreState`.
-    // The shape we already build in viewer.ts (descriptorToNgState) matches
-    // Neuroglancer's URL state format exactly.
     viewer.state.restoreState(state as unknown as Record<string, unknown>);
+    // restoreState replaces declared layers but keeps NG's *in-memory*
+    // navigation position, so switching datasets leaves the camera
+    // pointed at the previous dataset's center. Re-fly via flyTo (which
+    // converts nm → NG-units against the live coordinate space) once
+    // NG has had a tick to register the new layers' dim space.
+    if (d.initial_position) {
+      const target = d.initial_position;
+      setTimeout(() => {
+        try {
+          this.flyTo(target);
+        } catch (err) {
+          console.warn("[viewer] post-load recenter skipped:", (err as Error).message);
+        }
+      }, 600);
+    }
   }
 
   flyTo(

@@ -392,16 +392,18 @@ layers:
         // dtype is uint8 (e.g. paintera intermediate exports), and the
         // type can't be changed once the layer is in NG.
         folderDetectedEl.innerHTML = `
-          <p class="hint">✓ Detected ${f.kind} at <code>${escapeHtml(sub)}</code> — voxel ${f.meta.voxel_size_nm.join(" × ")} nm.</p>
-          <label class="form-row" style="gap:8px;align-items:center;">
-            <span>Load as:</span>
-            <select data-load-type>
-              <option value="image"${guessed === "image" ? " selected" : ""}>image (intensity)</option>
-              <option value="segmentation"${guessed === "segmentation" ? " selected" : ""}>segmentation (labels)</option>
-            </select>
-            <span class="hint" style="margin-left:8px;">guessed: ${guessed}</span>
-          </label>
-          <button class="btn-primary" data-action="load-detected">Load this dataset</button>
+          <p class="hint" style="margin:0 0 8px;">✓ ${f.kind} at <code>${escapeHtml(sub)}</code> — voxel ${f.meta.voxel_size_nm.join(" × ")} nm.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <label style="display:flex;gap:6px;align-items:center;">
+              <span>Load as:</span>
+              <select data-load-type>
+                <option value="image"${guessed === "image" ? " selected" : ""}>image (intensity)</option>
+                <option value="segmentation"${guessed === "segmentation" ? " selected" : ""}>segmentation (labels)</option>
+              </select>
+            </label>
+            <span class="hint" style="opacity:0.7;">guessed: ${guessed}</span>
+            <button class="btn-primary" data-action="load-detected" style="margin-left:auto;">Load</button>
+          </div>
         `;
         folderDetectedEl.querySelector("[data-action='load-detected']")!.addEventListener("click", () => {
           try {
