@@ -77,15 +77,30 @@ export function validateDescriptor(value: unknown): DatasetDescriptor {
   if (!Array.isArray(d.layers) || d.layers.length === 0) {
     throw new Error("layers must be a non-empty array");
   }
+  // Auto-fill layer names from source URL tails when omitted, mirroring
+  // what defaultLayerName / NG do — so a YAML can be just `type +
+  // source` per layer with no explicit names.
+  const used = new Set<string>();
   for (const layer of d.layers as DatasetLayer[]) {
-    if (!layer.name || !layer.type || !layer.source) {
+    if (!layer.type || !layer.source) {
       throw new Error(
-        `Each layer needs name, type, and source — got ${JSON.stringify(layer)}`,
+        `Each layer needs type and source — got ${JSON.stringify(layer)}`,
       );
     }
     if (layer.type !== "image" && layer.type !== "segmentation") {
       throw new Error(`Layer type must be image or segmentation — got ${layer.type}`);
     }
+    if (!layer.name) {
+      const tail = layer.source.split("/").filter(Boolean).pop() ?? layer.type;
+      let derived = tail.replace(/\.(zarr|n5|precomputed)$/i, "").replace(/[^A-Za-z0-9._-]/g, "_") || layer.type;
+      // Dedupe across layers in the same descriptor.
+      let n = derived;
+      let i = 2;
+      while (used.has(n)) n = `${derived}-${i++}`;
+      derived = n;
+      layer.name = derived;
+    }
+    used.add(layer.name);
   }
   return d as unknown as DatasetDescriptor;
 }
