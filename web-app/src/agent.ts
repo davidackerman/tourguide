@@ -19,6 +19,7 @@ export interface AgentCallbacks {
   onAnswer?: (text: string) => void;
   onPlot?: (pngDataUrl: string, code: string, title?: string, explanation?: string) => void;
   onFly?: (position: [number, number, number], layer: string, objectId?: string) => void;
+  onHighlight?: (layer: string, ids: string[]) => void;
 }
 
 export interface AgentContext {
@@ -74,6 +75,12 @@ TOOLS:
     layer, and highlight object_id if given. Use position_x/position_y/
     position_z values from run_sql results AS-IS — no scaling.
 
+  highlight_segments(layer: string, ids: number[] | string[])
+    In a SEGMENTATION layer, show only these segment ids — everything
+    else fades to background. Use this for "show me only the …" or
+    "select these segments" requests. ids can be the object_id values
+    from a run_sql result, or specific numeric ids the user named.
+
   make_plot(python: string, title?: string, explanation?: string)
     Run Python via Pyodide (numpy, pandas, matplotlib already imported).
     You get df_<class> DataFrames as globals. Produce exactly ONE matplotlib
@@ -93,6 +100,7 @@ TYPICAL FLOWS:
   "how many nuclei are there?"     -> run_sql (COUNT) -> answer -> done
   "plot mitochondrion volumes"     -> make_plot -> done
   "fly through the 3 biggest mitos" -> run_sql (LIMIT 3) -> fly_to (first) -> fly_to (second) -> fly_to (third) -> done
+  "show only the largest 10 mitos" -> run_sql (ORDER BY volume DESC LIMIT 10) -> highlight_segments -> done
 
 Pick the minimum tool calls needed. Never repeat the same query. If a tool errors, read the error and adjust.
 `.trim();
@@ -164,6 +172,22 @@ async function execFlyTo(
   ctx.viewer.flyTo(pos as [number, number, number], objectId, layer);
   ctx.callbacks.onFly?.(pos as [number, number, number], layer, objectId);
   return { ok: true };
+}
+
+async function execHighlight(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<{ ok: boolean; count: number }> {
+  const layer = String(args.layer ?? "").trim();
+  if (!layer) throw new Error("highlight_segments requires 'layer'");
+  const idsRaw = args.ids;
+  if (!Array.isArray(idsRaw) || idsRaw.length === 0) {
+    throw new Error("highlight_segments requires non-empty 'ids' array");
+  }
+  const ids = idsRaw.map((v) => String(v));
+  ctx.viewer.highlightSegments(layer, ids);
+  ctx.callbacks.onHighlight?.(layer, ids);
+  return { ok: true, count: ids.length };
 }
 
 async function execMakePlot(
@@ -247,6 +271,7 @@ const TOOL_EXECUTORS: Record<
 > = {
   run_sql: execRunSql,
   fly_to: execFlyTo,
+  highlight_segments: execHighlight,
   make_plot: execMakePlot,
   answer: execAnswer,
 };
@@ -339,7 +364,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       messages.push({ role: "assistant", content: JSON.stringify(call) });
       messages.push({
         role: "user",
-        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, fly_to, make_plot, answer, done.`,
+        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, fly_to, highlight_segments, make_plot, answer, done.`,
       });
       continue;
     }

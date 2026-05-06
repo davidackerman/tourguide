@@ -138,6 +138,10 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
             setStatus(`Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
             answeredOrFlew = true;
           },
+          onHighlight: (layer, ids) => {
+            setStatus(`Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
+            answeredOrFlew = true;
+          },
         },
       });
       if (!answeredOrFlew) {
