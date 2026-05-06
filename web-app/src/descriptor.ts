@@ -58,10 +58,17 @@ export function validateDescriptor(value: unknown): DatasetDescriptor {
   // omitted. We default-fill here so downstream code (descriptorToNgState)
   // always sees a 3-element array.
   if (!d.voxel_size_nm) d.voxel_size_nm = [1, 1, 1];
-  for (const field of ["name", "display_name", "layers"]) {
-    if (!(field in d)) {
-      throw new Error(`Descriptor missing required field: ${field}`);
-    }
+  // `name` and `display_name` are auto-filled when omitted — name comes
+  // from the first layer's source URL tail, display_name falls back to
+  // name. Lets the YAML really be just `folders + layers`.
+  if (!d.name) {
+    const firstLayer = (d.layers as Array<{ source?: string }> | undefined)?.[0];
+    const tail = firstLayer?.source?.split("/").filter(Boolean).pop() ?? "dataset";
+    d.name = tail.replace(/\.(zarr|n5|precomputed)$/i, "").replace(/[^A-Za-z0-9._-]/g, "_") || "dataset";
+  }
+  if (!d.display_name) d.display_name = d.name;
+  if (!("layers" in d)) {
+    throw new Error(`Descriptor missing required field: layers`);
   }
   const voxel = d.voxel_size_nm;
   if (!Array.isArray(voxel) || voxel.length !== 3) {

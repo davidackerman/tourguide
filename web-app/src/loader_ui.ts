@@ -80,7 +80,9 @@ layers:
   - { type: segmentation, source: recon/labels/inference/segmentations/mito }</pre>
           <p class="hint"><code>voxel_size_nm</code> and layer <code>name</code> are auto-detected when omitted.</p>
           <textarea class="yaml-input" rows="14" placeholder="name: my_dataset&#10;layers:&#10;  - type: image&#10;    source: zarr://..."></textarea>
-          <div class="form-actions">
+          <input type="file" data-yaml-file accept=".yaml,.yml,application/yaml,text/yaml,text/plain" hidden />
+          <div class="form-actions" style="display:flex;gap:8px;align-items:center;">
+            <button class="btn-secondary" data-action="pick-yaml-file" type="button">Open YAML file…</button>
             <button class="btn-primary" data-action="load-yaml">Load</button>
           </div>
         </section>
@@ -297,6 +299,22 @@ layers:
 
   overlay.querySelector("[data-action='load-form']")!.addEventListener("click", submitForm);
   overlay.querySelector("[data-action='load-yaml']")!.addEventListener("click", () => void submitYaml());
+  // Open-file → read text → drop into the textarea so the user can
+  // visually confirm before clicking Load. Means a YAML stored next to
+  // the data (or in your home dir as a saved descriptor) loads with
+  // two clicks: pick file, hit Load.
+  const yamlFileInput = overlay.querySelector<HTMLInputElement>("[data-yaml-file]")!;
+  overlay.querySelector("[data-action='pick-yaml-file']")!.addEventListener("click", () => yamlFileInput.click());
+  yamlFileInput.addEventListener("change", async () => {
+    const f = yamlFileInput.files?.[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      overlay.querySelector<HTMLTextAreaElement>(".yaml-input")!.value = text;
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  });
 
   // ---- Local folder tab ----
   const folderUnsupported = overlay.querySelector<HTMLElement>("[data-folder-unsupported]")!;
