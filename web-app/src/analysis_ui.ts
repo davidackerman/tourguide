@@ -78,7 +78,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           </label>
           <label class="mesh-toggle" data-mesh-row>
             <input type="checkbox" data-make-meshes />
-            <span>Generate 3D meshes (zmesh, backend only)</span>
+            <span>Generate 3D meshes (zmesh, backend only) <em data-mesh-hint class="hint" style="font-style:italic;opacity:0.75;"></em></span>
           </label>
         </div>
         <div data-scales-host>
@@ -119,6 +119,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   const remoteLabel = $<HTMLSpanElement>("[data-remote-label]");
   const meshRow = $<HTMLLabelElement>("[data-mesh-row]");
   const meshCheckbox = $<HTMLInputElement>("[data-make-meshes]");
+  const meshHint = $<HTMLElement>("[data-mesh-hint]");
   // zmesh ships only on the HF backend; gate the option behind the remote
   // toggle so the user can't pick it for a Pyodide run that would just
   // ignore it.
@@ -127,6 +128,30 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     meshCheckbox.disabled = !remoteOn;
     meshRow.title = remoteOn ? "" : "Available only when 'Run on backend' is checked.";
     if (!remoteOn) meshCheckbox.checked = false;
+  };
+  // Auto-coarsen meshing for big inputs so zmesh stays under ~30 s.
+  // Targets ≤32 M voxels of mesh input regardless of analyze scale.
+  // Returned factor is 1/2/4/8 — applied as labels[::n,::n,::n] before
+  // zmesh, with mesh spacing scaled by n. Meshes look smoother and
+  // generate faster; regionprops is unaffected (analyze scale is
+  // independent).
+  const chooseMeshDownsample = (shape: number[]): number => {
+    const nvox = shape.reduce((a, b) => a * b, 1);
+    if (nvox <= 8e6) return 1;
+    if (nvox <= 64e6) return 2;
+    if (nvox <= 512e6) return 4;
+    return 8;
+  };
+  const refreshMeshHint = (): void => {
+    if (selectedScaleIdx == null || !currentInspection) {
+      meshHint.textContent = "";
+      return;
+    }
+    const sc = currentInspection.scales[selectedScaleIdx];
+    const f = chooseMeshDownsample(sc.shape);
+    meshHint.textContent = f === 1
+      ? "— meshes at full analyze resolution"
+      : `— meshes at ${f}× downsample (auto, for speed)`;
   };
 
   const client = new AnalysisClient();
@@ -283,8 +308,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       inp.addEventListener("change", () => {
         selectedScaleIdx = Number(inp.value);
         runBtn.disabled = false;
+        refreshMeshHint();
       });
     });
+    refreshMeshHint();
   };
 
   // Re-render the scales table whenever the remote toggle flips, so the
@@ -368,7 +395,12 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             },
           ],
           tables: [],
-          code: buildRegionpropsCode(labeledSel.value === "true", makeMeshes, currentLayer.name),
+          code: buildRegionpropsCode(
+            labeledSel.value === "true",
+            makeMeshes,
+            currentLayer.name,
+            chooseMeshDownsample(scale.shape),
+          ),
           timeoutMs: 300_000,
           sessionId,
         });
@@ -485,6 +517,7 @@ function buildRegionpropsCode(
   alreadyLabeled: boolean,
   makeMeshes: boolean,
   layerName: string,
+  meshDownsample: number,
 ): string {
   // The mesh block is appended (rather than nested) so it runs after the
   // labels variable is already populated by the regionprops step. We hand
@@ -494,25 +527,30 @@ function buildRegionpropsCode(
   const meshSafeName = layerName.replace(/[^a-zA-Z0-9_-]/g, "_");
   const meshBlock = makeMeshes
     ? `
-# Generate 3D meshes for the labeled output.
-# Default to one tier coarser than the analyze scale: down-sample the labels
-# by 2 in each axis. zmesh runs ~8× faster, meshes are smoother to look at,
-# and regionprops on the analyze scale stays accurate. The original
-# 'labels' is left untouched; only '_mesh_labels' is the downsampled copy.
+# Generate 3D meshes for the labeled output. We auto-coarsen for speed:
+# meshes are derived from a labels[::n, ::n, ::n] downsample, with mesh
+# spacing scaled by n. zmesh runs faster and meshes look smoother;
+# regionprops on the analyze scale stays accurate (analyze and meshing
+# are independent). n is picked by tourguide based on the analyze
+# scale's voxel count: 1× ≤8 M, 2× ≤64 M, 4× ≤512 M, 8× above.
+_mesh_n = ${meshDownsample}
 _mesh_labels = labels
 if _mesh_labels.dtype == np.bool_:
     _mesh_labels = _mesh_labels.astype(np.uint32, copy=False)
 elif str(_mesh_labels.dtype) not in ("uint8","uint16","uint32","uint64"):
     _mesh_labels = _mesh_labels.astype(np.uint32, copy=False)
-_mesh_labels = np.ascontiguousarray(_mesh_labels[::2, ::2, ::2])
-_mesh_spacing = [s * 2 for s in spacing]
+if _mesh_n > 1:
+    _mesh_labels = np.ascontiguousarray(_mesh_labels[::_mesh_n, ::_mesh_n, ::_mesh_n])
+    _mesh_spacing = [s * _mesh_n for s in spacing]
+else:
+    _mesh_spacing = list(spacing)
 _TG_NEW_MESH_LAYER = {
     "labels": _mesh_labels,
     "name": "${meshSafeName}_meshes",
     "spacing": _mesh_spacing,
     "offsets": offsets,
 }
-print(f"queued meshes for {len(np.unique(_mesh_labels)) - 1} segment(s) at 2x downsample", flush=True)
+print(f"queued meshes for {len(np.unique(_mesh_labels)) - 1} segment(s) at {_mesh_n}x downsample", flush=True)
 `
     : "";
   return `
@@ -569,7 +607,7 @@ df = pd.DataFrame({
 })
 _TG_TABLE = df
 _TG_TABLE_NAME = "regionprops"
-_TG_NARRATION = f"Regionprops on backend: {len(df)} objects."
+_TG_NARRATION = f"Regionprops on backend: {len(df)} objects.${makeMeshes ? ` Meshes at ${meshDownsample}x downsample.` : ""}"
 ${meshBlock}`;
 }
 
