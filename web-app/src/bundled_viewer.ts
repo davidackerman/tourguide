@@ -49,6 +49,12 @@ import type { Viewer as NgViewer } from "neuroglancer/unstable/viewer.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import { descriptorToNgState } from "./viewer.js";
 
+function sameArray(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export class BundledViewer {
   private viewer: NgViewer | null = null;
   private container: HTMLElement;
@@ -248,24 +254,9 @@ export class BundledViewer {
     }
     layers[idx] = layer;
     state.layers = layers;
-    const navState = viewer.navigationState as any;
-    const positionBefore = navState?.position?.value ? Array.from(navState.position.value as Float32Array) : null;
-    const csScaleBefore = navState?.zoomFactor?.value as number | undefined;
-    const projScaleBefore = navState?.depthRange?.value as number | undefined;
+    const release = this.lockCamera();
     viewer.state.restoreState(state);
-    try {
-      if (positionBefore && positionBefore.length > 0) {
-        navState.position.value = Float32Array.from(positionBefore);
-      }
-      if (csScaleBefore !== undefined && navState?.zoomFactor) {
-        navState.zoomFactor.value = csScaleBefore;
-      }
-      if (projScaleBefore !== undefined && navState?.depthRange) {
-        navState.depthRange.value = projScaleBefore;
-      }
-    } catch {
-      /* non-fatal */
-    }
+    release(1500);
     this.currentState = state as any;
     return true;
   }
@@ -284,39 +275,69 @@ export class BundledViewer {
     const filtered = name ? layers.filter((l) => String(l.name) !== name) : layers;
     filtered.push(layer);
     state.layers = filtered;
-    // Snapshot camera-side state so restoreState doesn't drop or
-    // re-fit it. NG's state.toJSON includes position/scale already,
-    // so just re-asserting the existing values is enough.
-    const navState = viewer.navigationState as any;
-    const positionBefore = navState?.position?.value ? Array.from(navState.position.value as Float32Array) : null;
-    const csScaleBefore = navState?.zoomFactor?.value as number | undefined;
-    const projScaleBefore = navState?.depthRange?.value as number | undefined;
+    const release = this.lockCamera();
     viewer.state.restoreState(state);
-    // Re-pin the camera. NG runs an "auto-fit on new layer bounds" pass
-    // *asynchronously* after restoreState — a same-tick write here gets
-    // overwritten on the next render. Defer to a microtask + a
-    // requestAnimationFrame so we beat NG's fit. We also re-write
-    // for ~500 ms to handle slow-resolving data sources.
-    const repin = (): void => {
+    release(1500);
+    this.currentState = state as any;
+  }
+
+  // Hold the camera at its current position/scale for `holdMs` after the
+  // returned `release(holdMs)` is called. Implemented by subscribing to
+  // NG's nav-state `changed` signals and reverting any value that drifts
+  // from the snapshot. Catches NG's async auto-fit-on-new-bounds pass,
+  // which fires at unpredictable times after a layer is added — anywhere
+  // from the next animation frame to several hundred ms later (depends on
+  // how fast the new data source resolves its bounds). Once `holdMs`
+  // elapses the listeners detach and the user can pan/zoom normally.
+  private lockCamera(): (holdMs?: number) => void {
+    const viewer = this.ensureViewer();
+    const navState = viewer.navigationState as any;
+    const snap = {
+      position: navState?.position?.value
+        ? Array.from(navState.position.value as Float32Array)
+        : null,
+      cs: navState?.zoomFactor?.value as number | undefined,
+      proj: navState?.depthRange?.value as number | undefined,
+    };
+    let active = true;
+    const restore = (): void => {
+      if (!active) return;
       try {
-        if (positionBefore && positionBefore.length > 0) {
-          navState.position.value = Float32Array.from(positionBefore);
+        if (snap.position && snap.position.length > 0) {
+          const cur = navState.position?.value as Float32Array | undefined;
+          if (cur && !sameArray(cur, snap.position)) {
+            navState.position.value = Float32Array.from(snap.position);
+          }
         }
-        if (csScaleBefore !== undefined && navState?.zoomFactor) {
-          navState.zoomFactor.value = csScaleBefore;
+        if (snap.cs !== undefined && navState?.zoomFactor && navState.zoomFactor.value !== snap.cs) {
+          navState.zoomFactor.value = snap.cs;
         }
-        if (projScaleBefore !== undefined && navState?.depthRange) {
-          navState.depthRange.value = projScaleBefore;
+        if (snap.proj !== undefined && navState?.depthRange && navState.depthRange.value !== snap.proj) {
+          navState.depthRange.value = snap.proj;
         }
       } catch {
-        /* NG internals shifted between versions; non-fatal */
+        /* NG internals shifted; non-fatal */
       }
     };
-    repin();
-    requestAnimationFrame(repin);
-    setTimeout(repin, 100);
-    setTimeout(repin, 400);
-    this.currentState = state as any;
+    const subs: Array<() => void> = [];
+    const sub = (signal: { add?: (cb: () => void) => void; remove?: (cb: () => void) => void }): void => {
+      if (signal && typeof signal.add === "function") {
+        signal.add(restore);
+        subs.push(() => signal.remove?.(restore));
+      }
+    };
+    sub(navState?.position?.changed);
+    sub(navState?.zoomFactor?.changed);
+    sub(navState?.depthRange?.changed);
+    return (holdMs = 1500): void => {
+      restore();
+      requestAnimationFrame(restore);
+      setTimeout(() => {
+        restore();
+        active = false;
+        for (const u of subs) u();
+      }, holdMs);
+    };
   }
 
   // Add an in-memory annotation layer with a list of points (world nm).
