@@ -46,6 +46,8 @@ import "neuroglancer/unstable/layer/single_mesh/index.js";
 
 import { setupDefaultViewer } from "neuroglancer/unstable/ui/default_viewer_setup.js";
 import type { Viewer as NgViewer } from "neuroglancer/unstable/viewer.js";
+import { makeLayer } from "neuroglancer/unstable/layer/index.js";
+import { layerDataSourceSpecificationFromJson } from "neuroglancer/unstable/layer/layer_data_source.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import { descriptorToNgState } from "./viewer.js";
 
@@ -228,57 +230,64 @@ export class BundledViewer {
     segments?: string[];
   }): boolean {
     const viewer = this.ensureViewer();
-    const state = viewer.state.toJSON() as { layers?: Array<Record<string, unknown>> } & Record<string, unknown>;
-    const layers = Array.isArray(state.layers) ? state.layers.slice() : [];
-    const idx = layers.findIndex((l) => String(l.name) === spec.layerName);
-    if (idx < 0) return false;
-    const layer = { ...layers[idx] };
-    if (layer.type !== "segmentation") return false;
-    // Normalize layer.source to an array of source-spec objects so we
-    // can append cleanly.
-    const sources: Array<Record<string, unknown> | string> = [];
-    const orig = layer.source;
-    if (typeof orig === "string") sources.push({ url: orig });
-    else if (Array.isArray(orig)) sources.push(...orig);
-    else if (orig && typeof orig === "object") sources.push(orig as Record<string, unknown>);
-    sources.push({
+    const managedLayer = viewer.layerManager.getLayerByName(spec.layerName);
+    if (!managedLayer) return false;
+    const userLayer = managedLayer.layer as
+      | {
+          type?: string;
+          addDataSource?: (source: ReturnType<typeof layerDataSourceSpecificationFromJson>) => unknown;
+          displayState?: {
+            segmentationGroupState?: {
+              value?: { visibleSegments?: { add: (id: bigint) => void } };
+            };
+          };
+        }
+      | null;
+    if (!userLayer || userLayer.type !== "segmentation" || typeof userLayer.addDataSource !== "function") {
+      return false;
+    }
+    const release = this.lockCamera();
+    userLayer.addDataSource(layerDataSourceSpecificationFromJson({
       url: spec.meshSource,
       enableDefaultSubsources: false,
       subsources: { mesh: true, segment_properties: true },
-    });
-    layer.source = sources;
-    if (spec.segments && spec.segments.length > 0) {
-      const existingSegments = Array.isArray(layer.segments) ? (layer.segments as string[]) : [];
-      const merged = Array.from(new Set<string>([...existingSegments, ...spec.segments]));
-      layer.segments = merged;
+    }));
+    const visible = userLayer.displayState?.segmentationGroupState?.value?.visibleSegments;
+    if (visible && spec.segments) {
+      for (const id of spec.segments) {
+        try {
+          visible.add(BigInt(id));
+        } catch {
+          /* skip invalid ids */
+        }
+      }
     }
-    layers[idx] = layer;
-    state.layers = layers;
-    const release = this.lockCamera();
-    viewer.state.restoreState(state);
-    release(1500);
-    this.currentState = state as any;
+    release(10000);
     return true;
   }
 
-  // Merge extra layers into the current NG state (cheapest way to add a
-  // new layer without rebuilding the whole viewer). Takes a partial layer
-  // spec object. Preserves the camera state across the call — adding a
-  // mesh / synth layer is purely additive UX, so we don't want NG to
-  // re-fit on the new bounds (which can pop the user out of whatever
-  // they were inspecting).
+  // Add or replace a single NG layer without restoring the whole viewer
+  // state. A full `viewer.state.restoreState` also rewrites dimensions
+  // and position; while async sources are resolving that can rebase the
+  // camera through a temporary coordinate space and produce huge
+  // position values. Layer-only mutation keeps global navigation stable.
   addLayerFromSpec(layer: Record<string, unknown>): void {
     const viewer = this.ensureViewer();
-    const state = viewer.state.toJSON() as { layers?: Array<Record<string, unknown>> } & Record<string, unknown>;
-    const layers = Array.isArray(state.layers) ? state.layers.slice() : [];
     const name = String(layer.name ?? "");
-    const filtered = name ? layers.filter((l) => String(l.name) !== name) : layers;
-    filtered.push(layer);
-    state.layers = filtered;
+    if (!name) {
+      console.warn("[viewer] addLayerFromSpec: layer spec has no name", layer);
+      return;
+    }
     const release = this.lockCamera();
-    viewer.state.restoreState(state);
-    release(1500);
-    this.currentState = state as any;
+    const existing = viewer.layerManager.getLayerByName(name);
+    let index: number | undefined;
+    if (existing) {
+      index = viewer.layerManager.managedLayers.indexOf(existing);
+      viewer.layerManager.removeManagedLayer(existing);
+    }
+    const managedLayer = makeLayer(viewer.layerSpecification, name, layer);
+    viewer.layerSpecification.add(managedLayer, index);
+    release(10000);
   }
 
   // Hold the camera at its current world position for `holdMs` after the
