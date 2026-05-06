@@ -145,9 +145,14 @@ export function descriptorWithoutLocalLayers(d: DatasetDescriptor): {
     ...d,
     layers: d.layers.filter((l) => {
       const sources = Array.isArray(l.source) ? l.source : [l.source];
-      const localHit = sources.find((s) => /\/local-data\//.test(s));
-      if (localHit) removed.push({ name: l.name, source: localHit });
-      return !localHit;
+      // Both `local-data/` (FileSystemHandle URLs) and `api/data/<sess>/`
+      // (HF Space synthesized session artifacts) are bound to one
+      // user / one container and don't survive a permalink. Strip both.
+      const ephemeralHit = sources.find(
+        (s) => /\/local-data\//.test(s) || /\.hf\.space\/api\/data\//.test(s),
+      );
+      if (ephemeralHit) removed.push({ name: l.name, source: ephemeralHit });
+      return !ephemeralHit;
     }),
   };
   return { cleaned, removed };

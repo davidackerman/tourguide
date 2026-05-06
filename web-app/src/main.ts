@@ -317,11 +317,13 @@ shareBtn.addEventListener("click", async () => {
   let useCatalogIdx =
     !currentIsCustom && currentCatalogIndex !== null ? currentCatalogIndex : undefined;
   if (removed.length > 0) {
-    const names = removed.map((l) => l.name).join(", ");
+    const reasons = removed.map((l) =>
+      /\.hf\.space\/api\/data\//.test(l.source)
+        ? `${l.name} (synthesized — expires when the analysis Space restarts)`
+        : `${l.name} (local-folder pick — only works on your machine)`,
+    ).join("\n  ");
     const ok = confirm(
-      `${removed.length} layer(s) (${names}) live in a local folder you picked ` +
-        `with the file picker. Those URLs only work on this machine — your ` +
-        `recipient will see broken layers.\n\n` +
+      `${removed.length} layer(s) won't survive a share link:\n  ${reasons}\n\n` +
         `OK = strip those layers from the share link.\n` +
         `Cancel = include them anyway (recipient will see errors).`,
     );

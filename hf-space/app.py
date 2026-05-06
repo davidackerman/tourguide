@@ -56,7 +56,11 @@ APP_VERSION = "0.1.0"
 BUILD_STARTED_AT = time.time()
 SESSION_ROOT = Path(os.environ.get("TG_SESSION_ROOT", "/tmp/tourguide-sessions"))
 SESSION_ROOT.mkdir(parents=True, exist_ok=True)
-SESSION_TTL_SECONDS = 10 * 60
+SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days; survives idle Space sleep
+                                          # only if the container hasn't been
+                                          # cycled by HF — synthesized
+                                          # artifacts in /tmp are best-effort
+                                          # persistence, not durable storage.
 
 # Caps exposed to the frontend via /health — match the plan.
 MAX_CONCURRENT_ANALYSES = 2
