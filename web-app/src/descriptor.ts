@@ -14,6 +14,10 @@ export interface DatasetDescriptor {
   name: string;
   display_name: string;
   description?: string;
+  // Required for the NG dim setup, but optional in the YAML — the
+  // loader auto-fills this from the first OME-Zarr layer's metadata
+  // when omitted. After loadDescriptorFromYaml + autofill, this is
+  // always populated downstream.
   voxel_size_nm: [number, number, number];
   initial_position?: [number, number, number];
   projection_orientation?: [number, number, number, number];
@@ -49,15 +53,19 @@ export function validateDescriptor(value: unknown): DatasetDescriptor {
     throw new Error("Descriptor must be a YAML object");
   }
   const d = value as Record<string, unknown>;
-  const required = ["name", "display_name", "voxel_size_nm", "layers"];
-  for (const field of required) {
+  // voxel_size_nm is no longer required at YAML time — the loader fills
+  // it from the first OME-Zarr layer's coordinateTransformations when
+  // omitted. We default-fill here so downstream code (descriptorToNgState)
+  // always sees a 3-element array.
+  if (!d.voxel_size_nm) d.voxel_size_nm = [1, 1, 1];
+  for (const field of ["name", "display_name", "layers"]) {
     if (!(field in d)) {
       throw new Error(`Descriptor missing required field: ${field}`);
     }
   }
   const voxel = d.voxel_size_nm;
   if (!Array.isArray(voxel) || voxel.length !== 3) {
-    throw new Error("voxel_size_nm must be an array of 3 numbers");
+    throw new Error("voxel_size_nm must be an array of 3 numbers when set");
   }
   if (!Array.isArray(d.layers) || d.layers.length === 0) {
     throw new Error("layers must be a non-empty array");

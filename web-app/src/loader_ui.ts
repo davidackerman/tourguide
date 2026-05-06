@@ -71,13 +71,14 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
           <p class="hint">Two ways to point at local data:</p>
           <ul class="hint">
             <li>Drop <code>tourguide.yaml</code> at the root of your data folder → use <strong>Local folder</strong> tab → relative sources resolve against that folder.</li>
-            <li>Or declare multiple folders in YAML — Load prompts you to pick each in turn:
-              <pre class="code-block">folders:
-  em:    Pick the EM folder
-  seg:   Pick the cell-seg folder
+            <li>Or declare folders in YAML — Load prompts you to pick each in turn:
+              <pre class="code-block">name: jrc_c-elegans-bw-1
+folders:
+  recon: Pick recon-1/ inside the .zarr
 layers:
-  - { name: image, type: image,        source: em/raw.zarr }
-  - { name: cells, type: segmentation, source: seg/cells.zarr }</pre>
+  - { name: em,   type: image,        source: recon/em/fibsem-int16 }
+  - { name: mito, type: segmentation, source: recon/labels/inference/segmentations/mito }</pre>
+              <code>voxel_size_nm</code> is auto-detected from the first OME-Zarr layer if omitted.
             </li>
           </ul>
           <textarea class="yaml-input" rows="14" placeholder="name: my_dataset&#10;display_name: My Dataset&#10;voxel_size_nm: [4, 4, 4]&#10;layers:&#10;  - name: image&#10;    type: image&#10;    source: zarr://..."></textarea>
@@ -253,6 +254,7 @@ layers:
       const text = overlay.querySelector<HTMLTextAreaElement>(".yaml-input")!.value;
       if (!text.trim()) throw new Error("Paste a descriptor");
       const descriptor = loadDescriptorFromYaml(text);
+      let resolved = descriptor;
       // If the descriptor declares a `folders:` block, prompt the user
       // to pick each folder in turn (with the YAML's hint as a label),
       // register each, and resolve relative sources against the
@@ -265,14 +267,38 @@ layers:
           const reg = await pickLocalFolder();
           baseMap[alias] = reg.baseUrl;
         }
-        const resolved = resolveDescriptorAgainstFolder(descriptor, baseMap);
-        onLoad(resolved);
-      } else {
-        onLoad(descriptor);
+        resolved = resolveDescriptorAgainstFolder(descriptor, baseMap);
       }
+      resolved = await autofillVoxelFromFirstSource(resolved);
+      onLoad(resolved);
       close();
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  // Read voxel size + center from the first zarr/n5/precomputed layer's
+  // metadata when the descriptor either omitted voxel_size_nm or left
+  // it at the validateDescriptor placeholder [1,1,1]. Lets users drop
+  // 'voxel_size_nm' from their YAML entirely for OME-Zarr datasets.
+  const autofillVoxelFromFirstSource = async (
+    d: DatasetDescriptor,
+  ): Promise<DatasetDescriptor> => {
+    const v = d.voxel_size_nm;
+    const isPlaceholder = v && v[0] === 1 && v[1] === 1 && v[2] === 1;
+    if (!isPlaceholder) return d;
+    const first = d.layers[0];
+    if (!first) return d;
+    try {
+      const meta = await detectSourceMetadata(first.source);
+      return {
+        ...d,
+        voxel_size_nm: meta.voxel_size_nm,
+        initial_position: d.initial_position ?? meta.center_nm,
+      };
+    } catch (err) {
+      console.warn("[loader] auto-detect voxel size failed; keeping [1,1,1]:", (err as Error).message);
+      return d;
     }
   };
 
