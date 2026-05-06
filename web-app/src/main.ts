@@ -142,21 +142,48 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
       voxelNm: finest.voxelNm,
       offsetNm: finest.offsetNm,
       extent_nm,
-      center_nm,
+      center_xyz_nm: center_nm,
       cross_section_scale: cross,
       projection_scale: proj,
     });
-    // NG fits-to-bounds only after each layer's data source resolves its
-    // own bounds, which can race the first applyNgState. Apply at three
-    // moments — immediately, after 800 ms, and after 2.4 s — so whichever
-    // wins last is the correct framing. If the user has touched the
-    // viewer in the meantime we bail (don't yank the camera away).
+    // NG fits-to-bounds only after each layer's data source resolves
+    // its own bounds, which can race the first applyNgState call. Apply
+    // at three moments — 0/800/2400 ms — and on each retry re-read NG's
+    // runtime dim order and per-axis scale so the position lands on the
+    // right axes. NG inherits axes from the OME-Zarr source (typically
+    // z,y,x), so position[0] there is z, not x; without permuting we'd
+    // be aiming the camera at swapped coordinates. This mirrors the
+    // (x,y,z)-nm → ng-units logic in BundledViewer.flyTo.
+    const ngViewer = viewer.getNgViewer();
+    const xyzNmByName: Record<string, number> = {
+      x: center_nm[0],
+      y: center_nm[1],
+      z: center_nm[2],
+    };
     const apply = (): boolean => {
       const cur = viewer.getNgState();
       if (!cur) return false;
+      const cs = (ngViewer?.navigationState as any)?.coordinateSpace?.value as
+        | { names?: string[]; scales?: Float64Array | number[]; units?: string[] }
+        | undefined;
+      const names = cs?.names ?? ["x", "y", "z"];
+      const scales = cs?.scales ?? [1e-9, 1e-9, 1e-9];
+      const units = cs?.units ?? ["m", "m", "m"];
+      const orderedPos = names.map((n, i) => {
+        const nmValue = xyzNmByName[n] ?? 0;
+        const scale = Number(scales[i]);
+        const unit = units[i];
+        const nmToBase =
+          unit === "m" ? 1e-9
+            : unit === "µm" || unit === "um" || unit === "micrometer" ? 1e-3
+            : unit === "nm" || unit === "nanometer" ? 1
+            : unit === "" ? scale
+            : 1;
+        return scale > 0 ? (nmValue * nmToBase) / scale : nmValue;
+      });
       viewer.applyNgState({
         ...cur,
-        position: center_nm,
+        position: orderedPos,
         crossSectionScale: cross,
         projectionScale: proj,
       });
