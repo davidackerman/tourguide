@@ -70,7 +70,7 @@ export function descriptorToNgState(d: DatasetDescriptor): NgState {
   // the descriptor's declared voxel size — close enough for typical
   // OME-Zarr datasets where NG's runtime unit ends up being the same
   // physical voxel size.
-  const ZOOM_OUT_FACTOR = 64;
+  const ZOOM_OUT_FACTOR = 4;
   const defaultCross = Math.max(vx, vy, vz) * ZOOM_OUT_FACTOR;
   state.crossSectionScale = d.cross_section_scale ?? defaultCross;
   if (d.projection_scale !== undefined) state.projectionScale = d.projection_scale;
