@@ -46,11 +46,17 @@ export function descriptorToNgState(d: DatasetDescriptor): NgState {
   };
   if (d.initial_position) state.position = d.initial_position;
   if (d.projection_orientation) state.projectionOrientation = d.projection_orientation;
-  // Default cross-section scale: ~1 voxel per pixel. Scale is in physical
-  // units per pixel — with nm dimensions, that's just the voxel size in nm.
-  const defaultScale = Math.max(vx, vy, vz);
-  state.crossSectionScale = d.cross_section_scale ?? defaultScale;
+  // Only forward explicit cross-section / projection scales when the
+  // descriptor pinned one. Without them, Neuroglancer auto-fits to the
+  // layer bounds when the first data source resolves — which is what we
+  // want by default. The previous "max-voxel" default landed at
+  // 1 voxel per pixel, which is way too zoomed in for typical EM
+  // datasets.
+  if (d.cross_section_scale !== undefined) state.crossSectionScale = d.cross_section_scale;
   if (d.projection_scale !== undefined) state.projectionScale = d.projection_scale;
+  // vx is read above but no longer used in defaulting; keep refs alive
+  // for code-readers — voxel sizes still influence flyTo conversions.
+  void vx; void vy; void vz;
   const firstImage = d.layers.find((l) => l.type === "image");
   if (firstImage) {
     state.selectedLayer = { visible: true, layer: firstImage.name };

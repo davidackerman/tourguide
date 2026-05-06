@@ -131,20 +131,6 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
       finest.offsetNm[1] + extent_nm[1] / 2,
       finest.offsetNm[2] + extent_nm[2] / 2,
     ];
-    // Pick a cross-section scale that frames the volume in whatever
-    // pixel space NG actually has on screen, not a hardcoded 512 px.
-    // 4-panel layout gives each cross-section ~half the viewer's width
-    // and ~half its height, so we use min(half-w, half-h) as the panel
-    // budget and scale to ~85% of it (leaves margin around the volume).
-    // Also clamp to the layer's native voxel size — never zoom past
-    // 1 voxel/pixel, which would just show interpolated mush.
-    const hostRect = ngHost.getBoundingClientRect();
-    const panelPx = Math.max(256, Math.min(hostRect.width, hostRect.height) / 2);
-    const max_in_plane = Math.max(extent_nm[0], extent_nm[1]);
-    const nativeNmPerPx = Math.max(...finest.voxelNm);
-    const cross = Math.max(nativeNmPerPx, max_in_plane / (panelPx * 0.85));
-    const diag = Math.hypot(extent_nm[0], extent_nm[1], extent_nm[2]);
-    const proj = diag * 1.5;
     console.log("[auto-frame] computed", {
       layer: target.name,
       scale: finest.path,
@@ -153,28 +139,25 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
       offsetNm: finest.offsetNm,
       extent_nm,
       center_xyz_nm: center_nm,
-      panel_px: panelPx,
-      native_nm_per_px: nativeNmPerPx,
-      cross_section_scale: cross,
-      projection_scale: proj,
     });
-    // NG fits-to-bounds only after each layer's data source resolves
-    // its own bounds, which can race the first applyNgState call. Apply
-    // at three moments — 0/800/2400 ms — and on each retry re-read NG's
-    // runtime dim order and per-axis scale so the position lands on the
-    // right axes. NG inherits axes from the OME-Zarr source (typically
-    // z,y,x), so position[0] there is z, not x; without permuting we'd
-    // be aiming the camera at swapped coordinates. This mirrors the
-    // (x,y,z)-nm → ng-units logic in BundledViewer.flyTo.
+    // Set position only — NG fits the cross-section + projection scale
+    // to the layer's bounds on its own once data sources resolve, and
+    // overriding it from us makes the camera fight NG's auto-fit. Apply
+    // once after a short delay so NG has its coordinate space ready
+    // (otherwise we hit "Cannot set properties of undefined"). Position
+    // gets permuted into NG's runtime axis order — NG inherits axes
+    // from the OME-Zarr source (typically z,y,x) so position[0] there
+    // is z, not x; without permuting we'd aim the camera at swapped
+    // coordinates. Same logic as BundledViewer.flyTo.
     const ngViewer = viewer.getNgViewer();
     const xyzNmByName: Record<string, number> = {
       x: center_nm[0],
       y: center_nm[1],
       z: center_nm[2],
     };
-    const apply = (): boolean => {
+    setTimeout(() => {
       const cur = viewer.getNgState();
-      if (!cur) return false;
+      if (!cur) return;
       const cs = (ngViewer?.navigationState as any)?.coordinateSpace?.value as
         | { names?: string[]; scales?: Float64Array | number[]; units?: string[] }
         | undefined;
@@ -193,17 +176,16 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
             : 1;
         return scale > 0 ? (nmValue * nmToBase) / scale : nmValue;
       });
-      viewer.applyNgState({
-        ...cur,
-        position: orderedPos,
-        crossSectionScale: cross,
-        projectionScale: proj,
-      });
-      return true;
-    };
-    apply();
-    setTimeout(() => apply(), 800);
-    setTimeout(() => apply(), 2400);
+      const next = { ...cur, position: orderedPos };
+      // Strip any pre-set scales so NG's bounds-fit wins on first paint.
+      delete (next as any).crossSectionScale;
+      delete (next as any).projectionScale;
+      try {
+        viewer.applyNgState(next);
+      } catch (err) {
+        console.warn("[auto-frame] apply failed:", (err as Error).message);
+      }
+    }, 600);
   } catch (err) {
     console.warn("[auto-frame] skipped:", (err as Error).message);
   }
