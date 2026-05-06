@@ -26,72 +26,63 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
         <button class="modal-tab active" data-tab="form" role="tab">Paste URLs</button>
         <button class="modal-tab" data-tab="folder" role="tab">Local folder</button>
         <button class="modal-tab" data-tab="yaml" role="tab">YAML</button>
-        <button class="modal-tab" data-tab="server" role="tab">Local server</button>
       </div>
       <div class="modal-body">
         <section class="modal-pane active" data-pane="form">
-          <p class="hint">Point at data your browser can already reach (public S3, lab server, etc). Paste a source URL and tourguide will auto-detect voxel size and dataset center from its metadata.</p>
+          <p class="hint">Paste a source URL — tourguide auto-detects voxel size and dataset center from its OME-Zarr / N5 / precomputed metadata. Works for public S3, your lab server, or <code>localhost</code> via <code>npx http-server --cors -p 8080</code> in your data dir.</p>
           <div class="form-row">
             <label>Name <input data-field="name" placeholder="my_dataset" /></label>
-            <label>Voxel size (nm, auto-detected)
-              <span class="voxel-row">
-                <input type="number" step="any" data-field="vx" placeholder="x" />
-                <input type="number" step="any" data-field="vy" placeholder="y" />
-                <input type="number" step="any" data-field="vz" placeholder="z" />
-              </span>
-            </label>
-          </div>
-          <div class="form-row">
-            <label>Initial position (nm, auto-detected from dataset center)
-              <span class="voxel-row">
-                <input type="number" step="any" data-field="px" placeholder="x" />
-                <input type="number" step="any" data-field="py" placeholder="y" />
-                <input type="number" step="any" data-field="pz" placeholder="z" />
-              </span>
-            </label>
           </div>
           <h3>Layers</h3>
           <div class="layers-list" data-layers></div>
           <button class="btn-secondary" data-add-layer>+ Add layer</button>
+          <details class="loader-advanced">
+            <summary>Override voxel size / position (auto-detected from metadata otherwise)</summary>
+            <div class="form-row">
+              <label>Voxel size (nm)
+                <span class="voxel-row">
+                  <input type="number" step="any" data-field="vx" placeholder="x" />
+                  <input type="number" step="any" data-field="vy" placeholder="y" />
+                  <input type="number" step="any" data-field="vz" placeholder="z" />
+                </span>
+              </label>
+              <label>Initial position (nm)
+                <span class="voxel-row">
+                  <input type="number" step="any" data-field="px" placeholder="x" />
+                  <input type="number" step="any" data-field="py" placeholder="y" />
+                  <input type="number" step="any" data-field="pz" placeholder="z" />
+                </span>
+              </label>
+            </div>
+          </details>
           <div class="detect-status" data-detect-status></div>
           <div class="form-actions">
             <button class="btn-primary" data-action="load-form">Load</button>
           </div>
         </section>
         <section class="modal-pane" data-pane="folder">
-          <p class="hint">Pick a folder from your computer. Tourguide reads files directly via the File System Access API — nothing uploads anywhere, nothing leaves your machine. Works in Chrome / Edge / Brave (Chromium-based browsers).</p>
+          <p class="hint">Pick a folder from your computer. Tourguide reads files directly via the File System Access API — nothing uploads, nothing leaves your machine. Chromium-based browsers only (Chrome / Edge / Brave).</p>
           <div class="folder-pick-row">
             <button class="btn-primary" data-action="pick-folder">Open folder…</button>
             <span class="folder-pick-status" data-folder-status></span>
           </div>
           <div class="folder-detected" data-folder-detected hidden></div>
-          <p class="hint warn folder-unsupported" data-folder-unsupported hidden>This browser doesn't support the File System Access API. Use Chrome / Edge, or use the <strong>Local server</strong> tab.</p>
+          <p class="hint warn folder-unsupported" data-folder-unsupported hidden>This browser doesn't support the File System Access API. Use Chrome / Edge, or run <code>npx http-server --cors -p 8080</code> in your data dir and use <strong>Paste URLs</strong>.</p>
         </section>
         <section class="modal-pane" data-pane="yaml">
-          <p class="hint">Paste a complete dataset descriptor in YAML. Sources can be absolute (<code>zarr://https://…</code>) or relative to picked local folders.</p>
-          <p class="hint">Two ways to point at local data:</p>
-          <ul class="hint">
-            <li>Drop <code>tourguide.yaml</code> at the root of your data folder → use <strong>Local folder</strong> tab → relative sources resolve against that folder.</li>
-            <li>Or declare folders in YAML — Load prompts you to pick each in turn:
-              <pre class="code-block">name: jrc_c-elegans-bw-1
+          <p class="hint">Paste a YAML descriptor. Sources can be absolute (<code>zarr://https://…</code>, <code>precomputed://https://…</code>) or relative to picked local folders.</p>
+          <p class="hint">Pointing at local data: declare a <code>folders:</code> block — Load prompts for each folder pick.</p>
+          <pre class="code-block">name: jrc_c-elegans-bw-1
 folders:
   recon: Pick recon-1/ inside the .zarr
 layers:
-  - { name: em,   type: image,        source: recon/em/fibsem-int16 }
-  - { name: mito, type: segmentation, source: recon/labels/inference/segmentations/mito }</pre>
-              <code>voxel_size_nm</code> is auto-detected from the first OME-Zarr layer if omitted.
-            </li>
-          </ul>
-          <textarea class="yaml-input" rows="14" placeholder="name: my_dataset&#10;display_name: My Dataset&#10;voxel_size_nm: [4, 4, 4]&#10;layers:&#10;  - name: image&#10;    type: image&#10;    source: zarr://..."></textarea>
+  - { type: image,        source: recon/em/fibsem-int16 }
+  - { type: segmentation, source: recon/labels/inference/segmentations/mito }</pre>
+          <p class="hint"><code>voxel_size_nm</code> and layer <code>name</code> are auto-detected when omitted.</p>
+          <textarea class="yaml-input" rows="14" placeholder="name: my_dataset&#10;layers:&#10;  - type: image&#10;    source: zarr://..."></textarea>
           <div class="form-actions">
             <button class="btn-primary" data-action="load-yaml">Load</button>
           </div>
-        </section>
-        <section class="modal-pane" data-pane="server">
-          <p class="hint">For data on your laptop. Run this in the data directory:</p>
-          <pre class="code-block">npx http-server --cors -p 8080</pre>
-          <p class="hint">Then go to the <strong>Paste URLs</strong> tab and use sources like <code>zarr://http://localhost:8080/my-data.zarr/</code>.</p>
-          <p class="hint warn">Permalinks for <code>localhost</code> URLs only work for you — to share, your data needs a public URL.</p>
         </section>
       </div>
       <div class="modal-error" data-error></div>
@@ -395,21 +386,30 @@ layers:
         const f = found[0];
         const sub = f.subpath ? f.subpath : "(root)";
         const url = buildLocalSourceUrl(reg, f.kind as "zarr" | "n5" | "precomputed", f.subpath);
+        const guessed = (f.meta.guessedType ?? "image") as "image" | "segmentation";
+        // Show the dtype-based guess but let the user override before
+        // loading — auto-detection is wrong for label volumes whose
+        // dtype is uint8 (e.g. paintera intermediate exports), and the
+        // type can't be changed once the layer is in NG.
         folderDetectedEl.innerHTML = `
           <p class="hint">✓ Detected ${f.kind} at <code>${escapeHtml(sub)}</code> — voxel ${f.meta.voxel_size_nm.join(" × ")} nm.</p>
+          <label class="form-row" style="gap:8px;align-items:center;">
+            <span>Load as:</span>
+            <select data-load-type>
+              <option value="image"${guessed === "image" ? " selected" : ""}>image (intensity)</option>
+              <option value="segmentation"${guessed === "segmentation" ? " selected" : ""}>segmentation (labels)</option>
+            </select>
+            <span class="hint" style="margin-left:8px;">guessed: ${guessed}</span>
+          </label>
           <button class="btn-primary" data-action="load-detected">Load this dataset</button>
         `;
         folderDetectedEl.querySelector("[data-action='load-detected']")!.addEventListener("click", () => {
           try {
-            // Use the dtype-derived guess if detect returned one, otherwise
-            // default to image. The user can still toggle in Paste URLs view.
-            const guessed = (f.meta.guessedType ?? "image") as "image" | "segmentation";
-            // Prefer a name derived from the URL's tail (matches NG's own
-            // unnamed-layer behavior) so the layer comes out as e.g.
-            // "fibsem-int16" instead of "image".
+            const sel = folderDetectedEl.querySelector<HTMLSelectElement>("[data-load-type]");
+            const chosenType = (sel?.value as "image" | "segmentation") ?? guessed;
             const layers = [{
-              name: defaultLayerName(url, guessed),
-              type: guessed,
+              name: defaultLayerName(url, chosenType),
+              type: chosenType,
               source: url,
             }];
             const descriptor = buildDescriptorFromInput({
