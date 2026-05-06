@@ -9,7 +9,7 @@ import { openAnalysisDialog } from "./analysis_ui.js";
 import { openCustomAnalysisDialog } from "./custom_analysis_ui.js";
 import { openDownloadDialog } from "./download_ui.js";
 import { loadSettings, backendFromSettings, type LLMBackend } from "./llm.js";
-import { decodeState, buildPermalinkURL } from "./permalink.js";
+import { decodeState, buildPermalinkURL, descriptorWithoutLocalLayers } from "./permalink.js";
 import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
@@ -110,37 +110,61 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
     const insp = await client.inspect(normalizeZarrUrl(target.source), d.voxel_size_nm);
     client.terminate();
     if (!insp.scales.length) return;
-    // Use the finest scale for tight bounds; voxelNm + offsetNm are world nm.
-    const s0 = insp.scales[0];
-    // shape comes back in array-axis order matching insp.axes.
+    // Cellmap descriptors usually list scales coarse-first; pick the
+    // finest (largest shape) regardless of order so the camera bounds
+    // are tight, not pyramid-coarse.
+    const finest = [...insp.scales].sort((a, b) => {
+      const va = a.shape.reduce((p, n) => p * n, 1);
+      const vb = b.shape.reduce((p, n) => p * n, 1);
+      return vb - va;
+    })[0];
     const axisIdx = (name: string): number => insp.axes.findIndex((a) => a.name === name);
     const ix = axisIdx("x"), iy = axisIdx("y"), iz = axisIdx("z");
     if (ix < 0 || iy < 0 || iz < 0) return;
     const extent_nm: [number, number, number] = [
-      s0.shape[ix] * s0.voxelNm[0],
-      s0.shape[iy] * s0.voxelNm[1],
-      s0.shape[iz] * s0.voxelNm[2],
+      finest.shape[ix] * finest.voxelNm[0],
+      finest.shape[iy] * finest.voxelNm[1],
+      finest.shape[iz] * finest.voxelNm[2],
     ];
     const center_nm: [number, number, number] = [
-      s0.offsetNm[0] + extent_nm[0] / 2,
-      s0.offsetNm[1] + extent_nm[1] / 2,
-      s0.offsetNm[2] + extent_nm[2] / 2,
+      finest.offsetNm[0] + extent_nm[0] / 2,
+      finest.offsetNm[1] + extent_nm[1] / 2,
+      finest.offsetNm[2] + extent_nm[2] / 2,
     ];
-    // Cross-section scale = nm per pixel that fits the longer in-plane
-    // axis into ~512 px. Projection scale ~1.5× the volume diagonal so
-    // the 3D panel frames the whole thing comfortably.
     const max_in_plane = Math.max(extent_nm[0], extent_nm[1]);
     const cross = max_in_plane / 512;
     const diag = Math.hypot(extent_nm[0], extent_nm[1], extent_nm[2]);
     const proj = diag * 1.5;
-    const cur = viewer.getNgState();
-    if (!cur) return;
-    viewer.applyNgState({
-      ...cur,
-      position: center_nm,
-      crossSectionScale: cross,
-      projectionScale: proj,
+    console.log("[auto-frame] computed", {
+      layer: target.name,
+      scale: finest.path,
+      shape: finest.shape,
+      voxelNm: finest.voxelNm,
+      offsetNm: finest.offsetNm,
+      extent_nm,
+      center_nm,
+      cross_section_scale: cross,
+      projection_scale: proj,
     });
+    // NG fits-to-bounds only after each layer's data source resolves its
+    // own bounds, which can race the first applyNgState. Apply at three
+    // moments — immediately, after 800 ms, and after 2.4 s — so whichever
+    // wins last is the correct framing. If the user has touched the
+    // viewer in the meantime we bail (don't yank the camera away).
+    const apply = (): boolean => {
+      const cur = viewer.getNgState();
+      if (!cur) return false;
+      viewer.applyNgState({
+        ...cur,
+        position: center_nm,
+        crossSectionScale: cross,
+        projectionScale: proj,
+      });
+      return true;
+    };
+    apply();
+    setTimeout(() => apply(), 800);
+    setTimeout(() => apply(), 2400);
   } catch (err) {
     console.warn("[auto-frame] skipped:", (err as Error).message);
   }
@@ -226,7 +250,7 @@ async function init(): Promise<void> {
     if (entry) void loadEntry(entry, idx);
   });
 
-  const permalinkState = decodeState(window.location.hash);
+  const permalinkState = decodeState(window.location.search, window.location.hash);
   if (permalinkState.descriptor) {
     loadDescriptorDirect(permalinkState.descriptor);
   } else if (
@@ -338,10 +362,31 @@ shareBtn.addEventListener("click", async () => {
     alert("Load a dataset first");
     return;
   }
+  // Detect layers whose source only resolves on the sharer's machine
+  // (FileSystemDirectoryHandle URLs). The recipient won't be able to load
+  // them, so we either drop them or bail entirely. Default: ask the user.
+  const { cleaned, removed } = descriptorWithoutLocalLayers(currentDescriptor);
+  let descriptorForShare: DatasetDescriptor = currentDescriptor;
+  let useCatalogIdx =
+    !currentIsCustom && currentCatalogIndex !== null ? currentCatalogIndex : undefined;
+  if (removed.length > 0) {
+    const names = removed.map((l) => l.name).join(", ");
+    const ok = confirm(
+      `${removed.length} layer(s) (${names}) live in a local folder you picked ` +
+        `with the file picker. Those URLs only work on this machine — your ` +
+        `recipient will see broken layers.\n\n` +
+        `OK = strip those layers from the share link.\n` +
+        `Cancel = include them anyway (recipient will see errors).`,
+    );
+    if (ok) {
+      descriptorForShare = cleaned;
+      // Catalog-index path implies the original descriptor is hosted; if
+      // we cleaned, force inline the trimmed descriptor instead.
+      useCatalogIdx = undefined;
+    }
+  }
   const queryInput = document.querySelector<HTMLInputElement>(".query-input");
   const query = queryInput?.value.trim() || undefined;
-  const useCatalogIdx =
-    !currentIsCustom && currentCatalogIndex !== null ? currentCatalogIndex : undefined;
   // Snapshot live NG state (camera + selected segments + layout) so the
   // recipient lands on the same view, plus the recent Custom analysis
   // prompts so the dropdown carries over.
@@ -349,7 +394,7 @@ shareBtn.addEventListener("click", async () => {
   const analysisPrompts = loadPromptHistory().slice(0, 10);
   const url = buildPermalinkURL({
     catalogIndex: useCatalogIdx,
-    descriptor: useCatalogIdx === undefined ? currentDescriptor : undefined,
+    descriptor: useCatalogIdx === undefined ? descriptorForShare : undefined,
     query,
     viewerState,
     analysisPrompts: analysisPrompts.length > 0 ? analysisPrompts : undefined,

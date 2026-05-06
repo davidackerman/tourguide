@@ -193,6 +193,49 @@ export class BundledViewer {
     });
   }
 
+  // Attach a precomputed mesh source to an existing NG layer instead of
+  // creating a separate mesh layer. Valid when the labeled volume the
+  // meshes describe shares the same id space as the existing layer
+  // (i.e. the user analyzed an already-labeled seg layer). Falls back
+  // to false if the named layer doesn't exist or isn't a segmentation,
+  // letting the caller add a standalone mesh layer instead.
+  attachMeshSourceToLayer(spec: {
+    layerName: string;
+    meshSource: string; // precomputed://<url>
+    segments?: string[];
+  }): boolean {
+    const viewer = this.ensureViewer();
+    const state = viewer.state.toJSON() as { layers?: Array<Record<string, unknown>> } & Record<string, unknown>;
+    const layers = Array.isArray(state.layers) ? state.layers.slice() : [];
+    const idx = layers.findIndex((l) => String(l.name) === spec.layerName);
+    if (idx < 0) return false;
+    const layer = { ...layers[idx] };
+    if (layer.type !== "segmentation") return false;
+    // Normalize layer.source to an array of source-spec objects so we
+    // can append cleanly.
+    const sources: Array<Record<string, unknown> | string> = [];
+    const orig = layer.source;
+    if (typeof orig === "string") sources.push({ url: orig });
+    else if (Array.isArray(orig)) sources.push(...orig);
+    else if (orig && typeof orig === "object") sources.push(orig as Record<string, unknown>);
+    sources.push({
+      url: spec.meshSource,
+      enableDefaultSubsources: false,
+      subsources: { mesh: true, segment_properties: true },
+    });
+    layer.source = sources;
+    if (spec.segments && spec.segments.length > 0) {
+      const existingSegments = Array.isArray(layer.segments) ? (layer.segments as string[]) : [];
+      const merged = Array.from(new Set<string>([...existingSegments, ...spec.segments]));
+      layer.segments = merged;
+    }
+    layers[idx] = layer;
+    state.layers = layers;
+    viewer.state.restoreState(state);
+    this.currentState = state as any;
+    return true;
+  }
+
   // Merge extra layers into the current NG state (cheapest way to add a
   // new layer without rebuilding the whole viewer). Takes a partial layer
   // spec object.

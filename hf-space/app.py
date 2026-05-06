@@ -680,13 +680,12 @@ def _encode_new_mesh_layer_and_write(
         "segment_properties": "segment_properties",
     }
     (out_dir / "info").write_text(json.dumps(info))
+    # No `s0/<chunk>` file: the frontend mounts this layer with the
+    # default subsource disabled, so NG never requests the seg slab. We
+    # keep `scales` populated for accurate camera-bounds computation but
+    # skip writing the (potentially large) volume bytes. If a future
+    # consumer wants the seg slab too we'd add a flag to opt back in.
     (out_dir / "s0").mkdir(exist_ok=True)
-    chunk_key = (
-        f"{voxel_offset_xyz[0]}-{voxel_offset_xyz[0] + sx}_"
-        f"{voxel_offset_xyz[1]}-{voxel_offset_xyz[1] + sy}_"
-        f"{voxel_offset_xyz[2]}-{voxel_offset_xyz[2] + sz}"
-    )
-    (out_dir / "s0" / chunk_key).write_bytes(labels.tobytes(order="C"))
 
     log.info("mesh-layer: wrote %d meshes (out of %d candidates) to %s", len(written_ids), len(ids), out_dir)
     fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()

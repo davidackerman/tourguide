@@ -385,25 +385,40 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
         await ingestResult(cb, currentLayer, scale, result);
         cb.onTableAdded();
-        // Mesh layer (if the meshes checkbox was on) renders as a
-        // mesh-only NG layer — meshes + segment list, no duplicate seg
-        // slab next to the user's source layer.
+        // Mesh layer (if the meshes checkbox was on). When the input was
+        // already-labeled AND it's a segmentation layer in NG, the mesh
+        // ids share the input layer's id space — attach the meshes to
+        // that layer directly instead of creating a separate one. For
+        // all other cases (cc3d-derived ids, image-typed inputs) fall
+        // back to a standalone mesh-only layer to avoid mis-mapping ids.
         if (remote.meshLayer) {
-          cb.viewer.addMeshOnlyLayer({
-            name: remote.meshLayer.name,
-            source: remote.meshLayer.source,
-            segments: remote.meshLayer.meshIds,
-          });
-          const desc = cb.getDescriptor();
-          if (desc) {
-            const i = desc.layers.findIndex((l) => l.name === remote.meshLayer!.name);
-            const layer = {
+          const isAlreadyLabeled = labeledSel.value === "true";
+          const canAttach = isAlreadyLabeled && currentLayer.type === "segmentation";
+          let attached = false;
+          if (canAttach) {
+            attached = cb.viewer.attachMeshSourceToLayer({
+              layerName: currentLayer.name,
+              meshSource: remote.meshLayer.source,
+              segments: remote.meshLayer.meshIds,
+            });
+          }
+          if (!attached) {
+            cb.viewer.addMeshOnlyLayer({
               name: remote.meshLayer.name,
-              type: "segmentation" as const,
               source: remote.meshLayer.source,
-            };
-            if (i >= 0) desc.layers[i] = layer;
-            else desc.layers.push(layer);
+              segments: remote.meshLayer.meshIds,
+            });
+            const desc = cb.getDescriptor();
+            if (desc) {
+              const i = desc.layers.findIndex((l) => l.name === remote.meshLayer!.name);
+              const layer = {
+                name: remote.meshLayer.name,
+                type: "segmentation" as const,
+                source: remote.meshLayer.source,
+              };
+              if (i >= 0) desc.layers[i] = layer;
+              else desc.layers.push(layer);
+            }
           }
         }
         close();
