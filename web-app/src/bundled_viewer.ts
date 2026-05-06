@@ -281,44 +281,82 @@ export class BundledViewer {
     this.currentState = state as any;
   }
 
-  // Hold the camera at its current position/scale for `holdMs` after the
-  // returned `release(holdMs)` is called. Implemented by subscribing to
-  // NG's nav-state `changed` signals and reverting any value that drifts
-  // from the snapshot. Catches NG's async auto-fit-on-new-bounds pass,
-  // which fires at unpredictable times after a layer is added — anywhere
-  // from the next animation frame to several hundred ms later (depends on
-  // how fast the new data source resolves its bounds). Once `holdMs`
-  // elapses the listeners detach and the user can pan/zoom normally.
+  // Hold the camera at its current world position for `holdMs` after the
+  // returned `release(holdMs)` is called. NG's coordinate space (per-axis
+  // scale + dim order) can change when a new layer's data source
+  // resolves — at that point the OLD numerical position values mean a
+  // different physical location, so a naive snapshot-and-revert lands
+  // somewhere wildly wrong (the user reported "extremely off + crazy
+  // zoom", with displayed coords reaching trillions: NG-units × ratio).
+  //
+  // Capture the camera in **world nm** (xyz) before the layer add by
+  // reading the live coord space and converting NG-units → nm. After
+  // any drift (caught via the .changed signal AND a few timed retries
+  // for paths that bypass the signal), re-apply by reading the *new*
+  // coord space and converting nm → new-NG-units. This way the camera
+  // lands at the same physical place even if the units shifted.
   private lockCamera(): (holdMs?: number) => void {
     const viewer = this.ensureViewer();
     const navState = viewer.navigationState as any;
-    const snap = {
-      position: navState?.position?.value
-        ? Array.from(navState.position.value as Float32Array)
-        : null,
-      cs: navState?.zoomFactor?.value as number | undefined,
-      proj: navState?.depthRange?.value as number | undefined,
-    };
+    const cs0 = navState?.coordinateSpace?.value as
+      | { names?: string[]; scales?: ArrayLike<number>; units?: string[] }
+      | undefined;
+    const positionNgBefore: number[] = navState?.position?.value
+      ? Array.from(navState.position.value as Float32Array)
+      : [];
+    // Convert ng-units → world nm via the *current* coord space.
+    const xyzNmBefore: Record<string, number> = {};
+    if (cs0?.names && cs0?.scales && cs0?.units) {
+      for (let i = 0; i < cs0.names.length; i++) {
+        const name = cs0.names[i];
+        const scale = Number(cs0.scales[i]);
+        const unit = cs0.units[i];
+        const baseToNm =
+          unit === "m" ? 1e9
+            : unit === "µm" || unit === "um" || unit === "micrometer" ? 1e3
+            : unit === "nm" || unit === "nanometer" ? 1
+            : unit === "" ? 1 / Math.max(scale, 1e-12)
+            : 1;
+        xyzNmBefore[name] = (positionNgBefore[i] ?? 0) * scale * baseToNm;
+      }
+    }
+    const csScaleBefore = navState?.zoomFactor?.value as number | undefined;
+    const projScaleBefore = navState?.depthRange?.value as number | undefined;
     let active = true;
+
     const restore = (): void => {
       if (!active) return;
       try {
-        if (snap.position && snap.position.length > 0) {
-          const cur = navState.position?.value as Float32Array | undefined;
-          if (cur && !sameArray(cur, snap.position)) {
-            navState.position.value = Float32Array.from(snap.position);
+        const cs = navState?.coordinateSpace?.value as typeof cs0;
+        if (cs?.names && cs?.scales && cs?.units && navState?.position) {
+          const ordered = cs.names.map((n: string, i: number) => {
+            const nm = xyzNmBefore[n] ?? 0;
+            const scale = Number(cs.scales![i]);
+            const unit = cs.units![i];
+            const nmToBase =
+              unit === "m" ? 1e-9
+                : unit === "µm" || unit === "um" || unit === "micrometer" ? 1e-3
+                : unit === "nm" || unit === "nanometer" ? 1
+                : unit === "" ? scale
+                : 1;
+            return scale > 0 ? (nm * nmToBase) / scale : nm;
+          });
+          const cur = navState.position.value as Float32Array | undefined;
+          if (!cur || !sameArray(cur, ordered)) {
+            navState.position.value = Float32Array.from(ordered);
           }
         }
-        if (snap.cs !== undefined && navState?.zoomFactor && navState.zoomFactor.value !== snap.cs) {
-          navState.zoomFactor.value = snap.cs;
+        if (csScaleBefore !== undefined && navState?.zoomFactor && navState.zoomFactor.value !== csScaleBefore) {
+          navState.zoomFactor.value = csScaleBefore;
         }
-        if (snap.proj !== undefined && navState?.depthRange && navState.depthRange.value !== snap.proj) {
-          navState.depthRange.value = snap.proj;
+        if (projScaleBefore !== undefined && navState?.depthRange && navState.depthRange.value !== projScaleBefore) {
+          navState.depthRange.value = projScaleBefore;
         }
       } catch {
         /* NG internals shifted; non-fatal */
       }
     };
+
     const subs: Array<() => void> = [];
     const sub = (signal: { add?: (cb: () => void) => void; remove?: (cb: () => void) => void }): void => {
       if (signal && typeof signal.add === "function") {
@@ -329,9 +367,14 @@ export class BundledViewer {
     sub(navState?.position?.changed);
     sub(navState?.zoomFactor?.changed);
     sub(navState?.depthRange?.changed);
-    return (holdMs = 1500): void => {
+    sub(navState?.coordinateSpace?.changed);
+
+    return (holdMs = 2000): void => {
       restore();
       requestAnimationFrame(restore);
+      setTimeout(restore, 100);
+      setTimeout(restore, 400);
+      setTimeout(restore, 1000);
       setTimeout(() => {
         restore();
         active = false;
