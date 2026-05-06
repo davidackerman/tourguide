@@ -55,6 +55,14 @@ export interface CustomAnalysisResult {
     shape: number[];
     dtype: string;
   };
+  // Mesh-only precomputed layer: render only the mesh subsource, not the
+  // (full-resolution duplicate) seg slab. Segment ids come from
+  // segment_properties so the user can still pick which to render.
+  meshLayer?: {
+    source: string; // precomputed:// URL pointing at the serve dir
+    name: string;
+    meshIds: string[];
+  };
 }
 
 export type ProgressCallback = (message: string, phase?: string) => void;

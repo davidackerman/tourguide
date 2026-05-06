@@ -168,6 +168,31 @@ export class BundledViewer {
     this.currentState = state as any;
   }
 
+  // Add a Neuroglancer segmentation layer that only renders the mesh
+  // subsource of a precomputed source — i.e. shows 3D meshes plus the
+  // segment_properties list, but not the volume slab. Used for analysis
+  // outputs where the user already has the source seg in another layer
+  // and just wants meshes overlaid.
+  addMeshOnlyLayer(spec: {
+    name: string;
+    source: string; // precomputed://<url>
+    segments?: string[];
+  }): void {
+    this.addLayerFromSpec({
+      type: "segmentation",
+      name: spec.name,
+      source: {
+        url: spec.source,
+        // Disable the volume subsource (the seg slab); keep mesh +
+        // segment_properties enabled so the user sees the segments panel
+        // and the 3D meshes only.
+        enableDefaultSubsources: false,
+        subsources: { mesh: true, segment_properties: true },
+      },
+      segments: spec.segments ?? [],
+    });
+  }
+
   // Merge extra layers into the current NG state (cheapest way to add a
   // new layer without rebuilding the whole viewer). Takes a partial layer
   // spec object.

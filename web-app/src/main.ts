@@ -91,6 +91,59 @@ async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Pr
   viewer.loadDescriptor(d);
   renderMeta(d);
   await ingestAndRender(d, baseUrl);
+  // Auto-frame the viewer on the first zarr layer's bounding box, but only
+  // when the descriptor didn't already pin a view. We do this in the
+  // background — NG renders its default state immediately and snaps to
+  // the centered view once inspect resolves (~0.5-2s).
+  if (!d.initial_position && !d.cross_section_scale) {
+    void autoFrame(d);
+  }
+}
+
+async function autoFrame(d: DatasetDescriptor): Promise<void> {
+  const target = d.layers.find((l) => /^zarr/.test(l.source));
+  if (!target) return;
+  try {
+    const { AnalysisClient, normalizeZarrUrl, isZarrSource } = await import("./analysis.js");
+    if (!isZarrSource(target.source)) return;
+    const client = new AnalysisClient();
+    const insp = await client.inspect(normalizeZarrUrl(target.source), d.voxel_size_nm);
+    client.terminate();
+    if (!insp.scales.length) return;
+    // Use the finest scale for tight bounds; voxelNm + offsetNm are world nm.
+    const s0 = insp.scales[0];
+    // shape comes back in array-axis order matching insp.axes.
+    const axisIdx = (name: string): number => insp.axes.findIndex((a) => a.name === name);
+    const ix = axisIdx("x"), iy = axisIdx("y"), iz = axisIdx("z");
+    if (ix < 0 || iy < 0 || iz < 0) return;
+    const extent_nm: [number, number, number] = [
+      s0.shape[ix] * s0.voxelNm[0],
+      s0.shape[iy] * s0.voxelNm[1],
+      s0.shape[iz] * s0.voxelNm[2],
+    ];
+    const center_nm: [number, number, number] = [
+      s0.offsetNm[0] + extent_nm[0] / 2,
+      s0.offsetNm[1] + extent_nm[1] / 2,
+      s0.offsetNm[2] + extent_nm[2] / 2,
+    ];
+    // Cross-section scale = nm per pixel that fits the longer in-plane
+    // axis into ~512 px. Projection scale ~1.5× the volume diagonal so
+    // the 3D panel frames the whole thing comfortably.
+    const max_in_plane = Math.max(extent_nm[0], extent_nm[1]);
+    const cross = max_in_plane / 512;
+    const diag = Math.hypot(extent_nm[0], extent_nm[1], extent_nm[2]);
+    const proj = diag * 1.5;
+    const cur = viewer.getNgState();
+    if (!cur) return;
+    viewer.applyNgState({
+      ...cur,
+      position: center_nm,
+      crossSectionScale: cross,
+      projectionScale: proj,
+    });
+  } catch (err) {
+    console.warn("[auto-frame] skipped:", (err as Error).message);
+  }
 }
 
 async function ingestAndRender(d: DatasetDescriptor, baseUrl: string | null): Promise<void> {

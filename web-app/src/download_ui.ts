@@ -65,19 +65,20 @@ export function openDownloadDialog(getDescriptor: () => DatasetDescriptor | null
     if (e.target === overlay) close();
   });
 
-  // Render checkboxes per layer.
-  const layers = d.layers.filter((l) => /^zarr/.test(l.source));
+  // Show every zarr OR precomputed source — both are downloadable now.
+  const layers = d.layers.filter((l) => /^(zarr|precomputed)/.test(l.source));
   if (layers.length === 0) {
-    layerList.innerHTML = `<p class="hint">This dataset has no zarr layers to download.</p>`;
+    layerList.innerHTML = `<p class="hint">This dataset has no zarr or precomputed layers to download.</p>`;
   } else {
     for (const l of layers) {
       const row = document.createElement("label");
       row.className = "download-layer-row";
       const kind = classifySource(l.source);
+      const fmt = /^precomputed/.test(l.source) ? "precomputed" : "zarr";
       row.innerHTML = `
-        <input type="checkbox" data-source="${escapeAttr(l.source)}" data-name="${escapeAttr(l.name)}" ${kind === "remote" ? "" : "checked"} />
+        <input type="checkbox" data-source="${escapeAttr(l.source)}" data-name="${escapeAttr(l.name)}" data-format="${fmt}" ${kind === "remote" ? "" : "checked"} />
         <span class="download-layer-name">${escapeHtml(l.name)}</span>
-        <span class="download-layer-meta">${l.type} · ${kind}</span>
+        <span class="download-layer-meta">${l.type} · ${fmt} · ${kind}</span>
       `;
       layerList.appendChild(row);
     }
@@ -100,17 +101,19 @@ export function openDownloadDialog(getDescriptor: () => DatasetDescriptor | null
       for (const row of checkedRows) {
         const layerName = row.dataset.name || "layer";
         const source = row.dataset.source || "";
+        const format = row.dataset.format === "precomputed" ? "precomputed" : "zarr";
         progressText.textContent = `Downloading ${layerName}…`;
-        const entries = await collectEntries(source, (msg) => {
+        const entries = await collectEntries(source, format, (msg) => {
           progressText.textContent = `${layerName}: ${msg}`;
         });
         if (!entries.length) {
           throw new Error(`Nothing fetched for layer ${layerName}`);
         }
         const zipBytes = buildZip(entries);
+        const ext = format === "precomputed" ? "precomputed.zip" : "zarr.zip";
         triggerDownload(
           new Blob([zipBytes as BlobPart], { type: "application/zip" }),
-          `${safeFilename(layerName)}.zarr.zip`,
+          `${safeFilename(layerName)}.${ext}`,
         );
       }
       progressEl.hidden = true;
@@ -128,21 +131,26 @@ export function openDownloadDialog(getDescriptor: () => DatasetDescriptor | null
 // --- source classification + dispatch ---------------------------------------
 
 function classifySource(source: string): "local" | "synth" | "remote" {
-  // Strip zarr:// prefix.
-  const url = source.replace(/^zarr(?:\d?):\/\//, "");
+  const url = source.replace(/^(zarr\d?|precomputed):\/\//, "");
   if (url.includes("/local-data/")) return "local";
+  // /synthesized/ is the browser's IndexedDB-served synthetic zarrs.
+  // /api/data/ is the HF Space serving session-scoped synth artifacts —
+  // treat as remote (we fetch over HTTP); the precomputed walker handles
+  // the layout.
   if (url.includes("/synthesized/")) return "synth";
   return "remote";
 }
 
 async function collectEntries(
   source: string,
+  format: "zarr" | "precomputed",
   onProgress: (msg: string) => void,
 ): Promise<FileEntry[]> {
-  const url = source.replace(/^zarr(?:\d?):\/\//, "");
+  const url = source.replace(/^(zarr\d?|precomputed):\/\//, "");
   const kind = classifySource(source);
   if (kind === "local") return collectLocal(url, onProgress);
   if (kind === "synth") return collectSynthesized(url, onProgress);
+  if (format === "precomputed") return collectRemotePrecomputed(url, onProgress);
   return collectRemote(url, onProgress);
 }
 
@@ -221,6 +229,117 @@ async function collectSynthesized(url: string, _onProgress: (msg: string) => voi
     cursor.onerror = () => reject(cursor.error);
   });
   db.close();
+  return entries;
+}
+
+// --- remote precomputed walk -----------------------------------------------
+// Walks a Neuroglancer precomputed segmentation source (the format our HF
+// mesh-layer encoder writes). Reads top-level info, fetches each scale's
+// chunk file (single-chunk in our case), pulls mesh/info, walks each
+// mesh/<id>:0 manifest + fragments, and includes segment_properties/info.
+// We can't list HTTP directories, so the manifest-driven walk is the only
+// reliable path.
+
+async function collectRemotePrecomputed(
+  url: string,
+  onProgress: (msg: string) => void,
+): Promise<FileEntry[]> {
+  const base = url.endsWith("/") ? url : url + "/";
+  const entries: FileEntry[] = [];
+  const fetchOne = async (rel: string, optional = false): Promise<Uint8Array | null> => {
+    const res = await fetch(base + rel);
+    if (!res.ok) {
+      if (optional || res.status === 404) return null;
+      throw new Error(`Failed ${rel}: HTTP ${res.status}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  };
+  const infoBytes = await fetchOne("info");
+  if (!infoBytes) throw new Error("precomputed info missing");
+  entries.push({ path: "info", bytes: infoBytes });
+  const info = JSON.parse(new TextDecoder().decode(infoBytes)) as {
+    scales?: Array<{ key: string; size: number[]; chunk_sizes: number[][]; voxel_offset?: number[] }>;
+    mesh?: string;
+    segment_properties?: string;
+  };
+
+  // Pull every chunk file referenced by each scale. Our encoder writes a
+  // single chunk per scale so this is fast.
+  for (const sc of info.scales ?? []) {
+    onProgress(`scale ${sc.key}: enumerating chunks`);
+    const chunk = sc.chunk_sizes[0] ?? sc.size;
+    const off = sc.voxel_offset ?? [0, 0, 0];
+    const nx = Math.ceil(sc.size[0] / chunk[0]);
+    const ny = Math.ceil(sc.size[1] / chunk[1]);
+    const nz = Math.ceil(sc.size[2] / chunk[2]);
+    for (let zi = 0; zi < nz; zi++) {
+      for (let yi = 0; yi < ny; yi++) {
+        for (let xi = 0; xi < nx; xi++) {
+          const x0 = off[0] + xi * chunk[0];
+          const y0 = off[1] + yi * chunk[1];
+          const z0 = off[2] + zi * chunk[2];
+          const x1 = Math.min(x0 + chunk[0], off[0] + sc.size[0]);
+          const y1 = Math.min(y0 + chunk[1], off[1] + sc.size[1]);
+          const z1 = Math.min(z0 + chunk[2], off[2] + sc.size[2]);
+          const key = `${sc.key}/${x0}-${x1}_${y0}-${y1}_${z0}-${z1}`;
+          const bytes = await fetchOne(key, true);
+          if (bytes) entries.push({ path: key, bytes });
+        }
+      }
+    }
+  }
+
+  // segment_properties — single inline `info` file.
+  if (info.segment_properties) {
+    onProgress("segment_properties");
+    const sp = await fetchOne(`${info.segment_properties}/info`, true);
+    if (sp) entries.push({ path: `${info.segment_properties}/info`, bytes: sp });
+  }
+
+  // Mesh dir: pull mesh/info, then iterate ids from segment_properties (or
+  // from manifest probing if absent), fetching each manifest + every
+  // fragment it lists.
+  if (info.mesh) {
+    onProgress("mesh manifests + fragments");
+    const meshInfoRel = `${info.mesh}/info`;
+    const meshInfoBytes = await fetchOne(meshInfoRel, true);
+    if (meshInfoBytes) {
+      entries.push({ path: meshInfoRel, bytes: meshInfoBytes });
+    }
+    // Enumerate ids: prefer segment_properties since we wrote it; fall
+    // back to scanning manifest probes if a foreign source omitted it.
+    let ids: string[] = [];
+    if (info.segment_properties) {
+      const sp = await fetchOne(`${info.segment_properties}/info`, true);
+      if (sp) {
+        try {
+          const spJson = JSON.parse(new TextDecoder().decode(sp)) as { inline?: { ids?: string[] } };
+          ids = spJson.inline?.ids ?? [];
+        } catch {
+          /* tolerate */
+        }
+      }
+    }
+    let fetched = 0;
+    for (const id of ids) {
+      const manifestKey = `${info.mesh}/${id}:0`;
+      const manifestBytes = await fetchOne(manifestKey, true);
+      if (!manifestBytes) continue;
+      entries.push({ path: manifestKey, bytes: manifestBytes });
+      try {
+        const m = JSON.parse(new TextDecoder().decode(manifestBytes)) as { fragments?: string[] };
+        for (const frag of m.fragments ?? []) {
+          const fragKey = `${info.mesh}/${frag}`;
+          const fragBytes = await fetchOne(fragKey, true);
+          if (fragBytes) entries.push({ path: fragKey, bytes: fragBytes });
+        }
+      } catch {
+        /* tolerate */
+      }
+      fetched += 1;
+      if (fetched % 25 === 0) onProgress(`meshes: ${fetched}/${ids.length}`);
+    }
+  }
   return entries;
 }
 

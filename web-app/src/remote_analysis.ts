@@ -268,16 +268,17 @@ function adaptResponse(raw: RemoteResponse, backendUrl: string): CustomAnalysisR
       type: raw.newLayer.type,
     };
   }
-  // Mesh-bearing layers come back as a Neuroglancer precomputed source —
-  // the seg voxels and the legacy mesh dir share one layer artifact, so
-  // NG renders both the labels and the meshes from a single source.
+  // Mesh-bearing layers come back as a Neuroglancer precomputed source.
+  // Surfaced as `meshLayer` (not addSourceLayer) so the consumer can build
+  // a layer spec that disables the default (volume) subsource — meshes
+  // render alongside the user's existing seg without a duplicate slab.
   if (raw.newMeshLayer) {
     const url = raw.newMeshLayer.serveUrl
       || new URL(`api/data/${raw.newMeshLayer.synthesizedId}/`, ensureTrailingSlash(backendUrl)).toString();
-    out.addSourceLayer = {
+    out.meshLayer = {
       source: `precomputed://${url}`,
       name: raw.newMeshLayer.name,
-      type: raw.newMeshLayer.type,
+      meshIds: raw.newMeshLayer.meshIds,
     };
   }
   return out;

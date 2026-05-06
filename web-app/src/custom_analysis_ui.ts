@@ -470,6 +470,22 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       info.textContent = `Added layer '${result.addSourceLayer.name}' from ${result.addSourceLayer.source}.`;
       outEl.appendChild(info);
     }
+    if (result.meshLayer) {
+      cb.viewer.addMeshOnlyLayer({
+        name: result.meshLayer.name,
+        source: result.meshLayer.source,
+        segments: result.meshLayer.meshIds,
+      });
+      registerLayerInDescriptor(cb, {
+        name: result.meshLayer.name,
+        type: "segmentation",
+        source: result.meshLayer.source,
+      });
+      const info = document.createElement("p");
+      info.className = "hint";
+      info.textContent = `Added mesh layer '${result.meshLayer.name}' (${result.meshLayer.meshIds.length} segments).`;
+      outEl.appendChild(info);
+    }
     if (result.newLayer) {
       const { synthesizedId, name, type } = result.newLayer;
       // Build an origin-relative URL so NG + the SW can both resolve it.

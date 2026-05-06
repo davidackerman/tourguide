@@ -385,22 +385,22 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
         await ingestResult(cb, currentLayer, scale, result);
         cb.onTableAdded();
-        // The HF encoder routes a mesh layer through addSourceLayer (with a
-        // precomputed:// URL); attach it to the viewer + descriptor so it
-        // renders alongside the source seg.
-        if (remote.addSourceLayer) {
-          cb.viewer.addLayerFromSpec({
-            type: remote.addSourceLayer.type,
-            name: remote.addSourceLayer.name,
-            source: remote.addSourceLayer.source,
+        // Mesh layer (if the meshes checkbox was on) renders as a
+        // mesh-only NG layer — meshes + segment list, no duplicate seg
+        // slab next to the user's source layer.
+        if (remote.meshLayer) {
+          cb.viewer.addMeshOnlyLayer({
+            name: remote.meshLayer.name,
+            source: remote.meshLayer.source,
+            segments: remote.meshLayer.meshIds,
           });
           const desc = cb.getDescriptor();
           if (desc) {
-            const i = desc.layers.findIndex((l) => l.name === remote.addSourceLayer!.name);
+            const i = desc.layers.findIndex((l) => l.name === remote.meshLayer!.name);
             const layer = {
-              name: remote.addSourceLayer.name,
-              type: remote.addSourceLayer.type,
-              source: remote.addSourceLayer.source,
+              name: remote.meshLayer.name,
+              type: "segmentation" as const,
+              source: remote.meshLayer.source,
             };
             if (i >= 0) desc.layers[i] = layer;
             else desc.layers.push(layer);
@@ -480,19 +480,24 @@ function buildRegionpropsCode(
   const meshBlock = makeMeshes
     ? `
 # Generate 3D meshes for the labeled output.
-# Cast labels for zmesh's preferred dtype range; uint64 is fine, but bool isn't.
+# Default to one tier coarser than the analyze scale: down-sample the labels
+# by 2 in each axis. zmesh runs ~8× faster, meshes are smoother to look at,
+# and regionprops on the analyze scale stays accurate. The original
+# 'labels' is left untouched; only '_mesh_labels' is the downsampled copy.
 _mesh_labels = labels
 if _mesh_labels.dtype == np.bool_:
     _mesh_labels = _mesh_labels.astype(np.uint32, copy=False)
 elif str(_mesh_labels.dtype) not in ("uint8","uint16","uint32","uint64"):
     _mesh_labels = _mesh_labels.astype(np.uint32, copy=False)
+_mesh_labels = np.ascontiguousarray(_mesh_labels[::2, ::2, ::2])
+_mesh_spacing = [s * 2 for s in spacing]
 _TG_NEW_MESH_LAYER = {
     "labels": _mesh_labels,
     "name": "${meshSafeName}_meshes",
-    "spacing": spacing,
+    "spacing": _mesh_spacing,
     "offsets": offsets,
 }
-print(f"queued meshes for {len(np.unique(_mesh_labels)) - 1} segment(s)", flush=True)
+print(f"queued meshes for {len(np.unique(_mesh_labels)) - 1} segment(s) at 2x downsample", flush=True)
 `
     : "";
   return `
