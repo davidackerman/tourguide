@@ -90,6 +90,18 @@ async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
 }
 
 async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Promise<void> {
+  // NG auto-syncs its viewer state (camera, segments, layout) to the URL
+  // hash on every interaction. When the user picks a new dataset, the
+  // *previous* dataset's hash is still there — and NG restores its
+  // position/segments from it before auto-fitting, leaving the camera
+  // pointing at coords that meant something for the old layers but
+  // nothing for the new ones. Strip the hash here so each fresh
+  // dataset load starts NG with a clean slate. (Permalinks pasted in
+  // the URL still work — main.init reads the hash *once* on initial
+  // page load, before this function ever runs.)
+  if (window.location.hash) {
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+  }
   currentDescriptor = d;
   viewer.loadDescriptor(d);
   renderMeta(d);
