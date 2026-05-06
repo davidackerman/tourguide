@@ -285,7 +285,10 @@ layers:
     const first = d.layers[0];
     if (!first) return d;
     try {
-      const meta = await detectSourceMetadata(first.source);
+      // Multi-source layers: probe the first source for metadata (the
+      // others are usually mesh/skeleton attachments without volume).
+      const probeUrl = Array.isArray(first.source) ? first.source[0] : first.source;
+      const meta = await detectSourceMetadata(probeUrl);
       return {
         ...d,
         voxel_size_nm: meta.voxel_size_nm,

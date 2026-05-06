@@ -65,20 +65,37 @@ export function openDownloadDialog(getDescriptor: () => DatasetDescriptor | null
     if (e.target === overlay) close();
   });
 
-  // Show every zarr OR precomputed source — both are downloadable now.
-  const layers = d.layers.filter((l) => /^(zarr|precomputed)/.test(l.source));
-  if (layers.length === 0) {
-    layerList.innerHTML = `<p class="hint">This dataset has no zarr or precomputed layers to download.</p>`;
+  // Flatten each layer's source(s) into one row per downloadable URL.
+  // Multi-source layers (e.g. zarr volume + precomputed mesh +
+  // precomputed skeletons combined) thus get one checkbox per
+  // underlying URL; the user can grab any subset.
+  type DownloadRow = { layerName: string; rowName: string; source: string };
+  const rows: DownloadRow[] = [];
+  for (const l of d.layers) {
+    const sources = Array.isArray(l.source) ? l.source : [l.source];
+    sources
+      .filter((s) => /^(zarr|precomputed)/.test(s))
+      .forEach((s, i) => {
+        const tail = s.replace(/\/+$/, "").split("/").pop() ?? "src";
+        rows.push({
+          layerName: l.name,
+          rowName: sources.length === 1 ? l.name : `${l.name} · ${tail || `src${i + 1}`}`,
+          source: s,
+        });
+      });
+  }
+  if (rows.length === 0) {
+    layerList.innerHTML = `<p class="hint">This dataset has no zarr or precomputed sources to download.</p>`;
   } else {
-    for (const l of layers) {
+    for (const r of rows) {
       const row = document.createElement("label");
       row.className = "download-layer-row";
-      const kind = classifySource(l.source);
-      const fmt = /^precomputed/.test(l.source) ? "precomputed" : "zarr";
+      const kind = classifySource(r.source);
+      const fmt = /^precomputed/.test(r.source) ? "precomputed" : "zarr";
       row.innerHTML = `
-        <input type="checkbox" data-source="${escapeAttr(l.source)}" data-name="${escapeAttr(l.name)}" data-format="${fmt}" ${kind === "remote" ? "" : "checked"} />
-        <span class="download-layer-name">${escapeHtml(l.name)}</span>
-        <span class="download-layer-meta">${l.type} · ${fmt} · ${kind}</span>
+        <input type="checkbox" data-source="${escapeAttr(r.source)}" data-name="${escapeAttr(r.rowName)}" data-format="${fmt}" ${kind === "remote" ? "" : "checked"} />
+        <span class="download-layer-name">${escapeHtml(r.rowName)}</span>
+        <span class="download-layer-meta">${fmt} · ${kind}</span>
       `;
       layerList.appendChild(row);
     }

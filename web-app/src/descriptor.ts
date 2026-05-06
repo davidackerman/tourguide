@@ -5,7 +5,12 @@ export type LayerType = "image" | "segmentation";
 export interface DatasetLayer {
   name: string;
   type: LayerType;
-  source: string;
+  // Single URL (`zarr://…`, `precomputed://…`, etc.) or an array of
+  // URLs that NG combines on one layer. Array form is how you get a
+  // segmentation layer that draws its volume from a zarr while taking
+  // meshes from a separate precomputed source and skeletons from
+  // another.
+  source: string | string[];
   organelle_class?: string;
   csv?: string;
 }
@@ -82,7 +87,7 @@ export function validateDescriptor(value: unknown): DatasetDescriptor {
   // source` per layer with no explicit names.
   const used = new Set<string>();
   for (const layer of d.layers as DatasetLayer[]) {
-    if (!layer.type || !layer.source) {
+    if (!layer.type || !layer.source || (Array.isArray(layer.source) && layer.source.length === 0)) {
       throw new Error(
         `Each layer needs type and source — got ${JSON.stringify(layer)}`,
       );
@@ -91,7 +96,8 @@ export function validateDescriptor(value: unknown): DatasetDescriptor {
       throw new Error(`Layer type must be image or segmentation — got ${layer.type}`);
     }
     if (!layer.name) {
-      const tail = layer.source.split("/").filter(Boolean).pop() ?? layer.type;
+      const sourceForName = Array.isArray(layer.source) ? layer.source[0] : layer.source;
+      const tail = sourceForName.split("/").filter(Boolean).pop() ?? layer.type;
       let derived = tail.replace(/\.(zarr|n5|precomputed)$/i, "").replace(/[^A-Za-z0-9._-]/g, "_") || layer.type;
       // Dedupe across layers in the same descriptor.
       let n = derived;

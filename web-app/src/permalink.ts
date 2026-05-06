@@ -144,9 +144,10 @@ export function descriptorWithoutLocalLayers(d: DatasetDescriptor): {
   const cleaned: DatasetDescriptor = {
     ...d,
     layers: d.layers.filter((l) => {
-      const isLocal = /\/local-data\//.test(l.source);
-      if (isLocal) removed.push({ name: l.name, source: l.source });
-      return !isLocal;
+      const sources = Array.isArray(l.source) ? l.source : [l.source];
+      const localHit = sources.find((s) => /\/local-data\//.test(s));
+      if (localHit) removed.push({ name: l.name, source: localHit });
+      return !localHit;
     }),
   };
   return { cleaned, removed };

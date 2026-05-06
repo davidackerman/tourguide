@@ -9,7 +9,7 @@ interface NgDimensions {
 interface NgLayer {
   type: "image" | "segmentation";
   name: string;
-  source: string;
+  source: string | string[];
   visible?: boolean;
 }
 

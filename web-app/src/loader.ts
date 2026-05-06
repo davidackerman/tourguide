@@ -25,36 +25,38 @@ export interface PastedDatasetInput {
 }
 
 export function buildDescriptorFromInput(input: PastedDatasetInput): DatasetDescriptor {
-  const cleaned: PastedDatasetInput = {
-    ...input,
-    display_name: input.display_name?.trim() || input.name.trim(),
-    layers: input.layers
-      .filter((l) => l.name.trim() && l.source.trim())
-      .map((l) => {
-        const layer: DatasetLayer = {
-          name: l.name.trim(),
-          type: l.type,
-          source: l.source.trim(),
-        };
-        if (l.organelle_class?.trim()) layer.organelle_class = l.organelle_class.trim();
-        if (l.csv?.trim()) layer.csv = l.csv.trim();
-        return layer;
-      }),
-  };
+  let layers: DatasetLayer[] = input.layers
+    .filter((l) => l.name.trim() && l.source.trim())
+    .map((l) => {
+      const layer: DatasetLayer = {
+        name: l.name.trim(),
+        type: l.type,
+        source: l.source.trim(),
+      };
+      if (l.organelle_class?.trim()) layer.organelle_class = l.organelle_class.trim();
+      if (l.csv?.trim()) layer.csv = l.csv.trim();
+      return layer;
+    });
   // Resolve any layers that landed with a generic fallback name into a
   // URL-derived one — but keep names the user explicitly typed.
-  cleaned.layers = cleaned.layers.map((l) => ({
+  layers = layers.map((l) => ({
     ...l,
-    name: l.name === l.type ? defaultLayerName(l.source, l.type) : l.name,
+    name: l.name === l.type
+      ? defaultLayerName(Array.isArray(l.source) ? l.source[0] : l.source, l.type)
+      : l.name,
   }));
   // Ensure layer names are unique by suffixing duplicates with -2, -3, ...
   const seen = new Map<string, number>();
-  cleaned.layers = cleaned.layers.map((l) => {
+  layers = layers.map((l) => {
     const n = (seen.get(l.name) ?? 0) + 1;
     seen.set(l.name, n);
     return n === 1 ? l : { ...l, name: `${l.name}-${n}` };
   });
-  return validateDescriptor(cleaned);
+  return validateDescriptor({
+    ...input,
+    display_name: input.display_name?.trim() || input.name.trim(),
+    layers,
+  });
 }
 
 // Extract a sensible default layer name from a source URL — the last
@@ -154,7 +156,7 @@ export function resolveDescriptorAgainstFolder(
     ...rest,
     layers: d.layers.map((l) => ({
       ...l,
-      source: resolveSource(l.source),
+      source: Array.isArray(l.source) ? l.source.map(resolveSource) : resolveSource(l.source),
       csv: l.csv ? resolveCsv(l.csv) : l.csv,
     })),
   };
