@@ -76,11 +76,32 @@ export async function registerServiceWorker(): Promise<void> {
   if (!("serviceWorker" in navigator)) {
     throw new Error("Service Worker not supported in this browser — local-folder loading disabled.");
   }
-  // Resolve sw.js relative to the document so it works at any base path
-  // (Cloudflare project subpath, GH Pages, localhost).
   const swUrl = new URL("./sw.js", window.location.href);
   await navigator.serviceWorker.register(swUrl, { scope: "./" });
   await navigator.serviceWorker.ready;
+  // `ready` resolves once the SW is *active*, but that's not the same
+  // as *controlling* the page — a fresh page load (or hard refresh)
+  // can be uncontrolled even when an active SW exists, because the
+  // page was loaded before the SW took over. If the page isn't
+  // controlled yet, our /local-data/<id>/... fetches bypass the SW
+  // and 404. Listen for controllerchange and resolve when we
+  // genuinely have one. (The SW does skipWaiting + clients.claim, so
+  // controllerchange fires within ~tens of ms in practice.)
+  if (!navigator.serviceWorker.controller) {
+    await new Promise<void>((resolve) => {
+      const onChange = (): void => {
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      };
+      navigator.serviceWorker.addEventListener("controllerchange", onChange);
+      // Safety timeout — if the SW already became controller between
+      // our `ready` await and this listener attach, controllerchange
+      // won't fire again. 1.5 s lets the natural flow resolve;
+      // anything slower we fall through and let downstream code
+      // surface a clearer error.
+      setTimeout(resolve, 1500);
+    });
+  }
 }
 
 export async function pickLocalFolder(): Promise<LocalFolderRegistration> {

@@ -44,7 +44,17 @@ export function descriptorToNgState(d: DatasetDescriptor): NgState {
     })),
     layout: "4panel",
   };
-  if (d.initial_position) state.position = d.initial_position;
+  // Intentionally NOT forwarding d.initial_position into state.position.
+  // The descriptor stores positions in world nm, but NG's runtime
+  // coordinate space comes from the *layer's* source (OME-Zarr scale,
+  // n5 resolution, etc.) — for a 4 nm voxel layer NG's units are 4 nm,
+  // not 1 nm, so a position value of 16000 (meant as 16000 nm) gets
+  // read as 16000 × 4 nm = 64000 nm. Off by the resolution factor.
+  // flyTo handles the conversion at runtime; descriptor-init can't,
+  // because the layer hasn't loaded yet and its scale is unknown.
+  // NG's own auto-fit-to-bounds is the right default here — when the
+  // first data source resolves, NG centers on the layer extent in its
+  // own units automatically.
   if (d.projection_orientation) state.projectionOrientation = d.projection_orientation;
   // Only forward explicit cross-section / projection scales when the
   // descriptor pinned one. Without them, Neuroglancer auto-fits to the
