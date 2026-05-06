@@ -44,6 +44,9 @@ const browserHost = $<HTMLDivElement>("browser-host");
 const queryHost = $<HTMLDivElement>("query-host");
 const ngHost = $<HTMLDivElement>("ng-host");
 const viewer = new BundledViewer(ngHost);
+// Expose for ad-hoc devtools debugging:
+//   __tg.viewer.getNgState() / .getNgViewer().navigationState.coordinateSpace.value
+(window as unknown as { __tg?: unknown }).__tg = { viewer };
 
 let entries: CatalogEntry[] = [];
 let currentDB: DatasetDB | null = null;
