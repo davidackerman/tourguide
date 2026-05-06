@@ -131,8 +131,18 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
       finest.offsetNm[1] + extent_nm[1] / 2,
       finest.offsetNm[2] + extent_nm[2] / 2,
     ];
+    // Pick a cross-section scale that frames the volume in whatever
+    // pixel space NG actually has on screen, not a hardcoded 512 px.
+    // 4-panel layout gives each cross-section ~half the viewer's width
+    // and ~half its height, so we use min(half-w, half-h) as the panel
+    // budget and scale to ~85% of it (leaves margin around the volume).
+    // Also clamp to the layer's native voxel size — never zoom past
+    // 1 voxel/pixel, which would just show interpolated mush.
+    const hostRect = ngHost.getBoundingClientRect();
+    const panelPx = Math.max(256, Math.min(hostRect.width, hostRect.height) / 2);
     const max_in_plane = Math.max(extent_nm[0], extent_nm[1]);
-    const cross = max_in_plane / 512;
+    const nativeNmPerPx = Math.max(...finest.voxelNm);
+    const cross = Math.max(nativeNmPerPx, max_in_plane / (panelPx * 0.85));
     const diag = Math.hypot(extent_nm[0], extent_nm[1], extent_nm[2]);
     const proj = diag * 1.5;
     console.log("[auto-frame] computed", {
@@ -143,6 +153,8 @@ async function autoFrame(d: DatasetDescriptor): Promise<void> {
       offsetNm: finest.offsetNm,
       extent_nm,
       center_xyz_nm: center_nm,
+      panel_px: panelPx,
+      native_nm_per_px: nativeNmPerPx,
       cross_section_scale: cross,
       projection_scale: proj,
     });
