@@ -91,105 +91,16 @@ async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Pr
   viewer.loadDescriptor(d);
   renderMeta(d);
   await ingestAndRender(d, baseUrl);
-  // Auto-frame the viewer on the first zarr layer's bounding box, but only
-  // when the descriptor didn't already pin a view. We do this in the
-  // background — NG renders its default state immediately and snaps to
-  // the centered view once inspect resolves (~0.5-2s).
-  if (!d.initial_position && !d.cross_section_scale) {
-    void autoFrame(d);
-  }
+  // Intentionally no auto-frame: Neuroglancer fits its camera to the
+  // first layer's bounds the moment the data source resolves, which is
+  // exactly the framing the user expects. Forcing a position from our
+  // side races NG's init and triggers 'Cannot set properties of
+  // undefined (localPositionValid)' on some loads. The previous
+  // over-zoom we were trying to fix came from descriptorToNgState
+  // pre-setting crossSectionScale = max(voxel_nm); that default is
+  // gone, so NG handles it correctly with no help from us.
 }
 
-async function autoFrame(d: DatasetDescriptor): Promise<void> {
-  const target = d.layers.find((l) => /^zarr/.test(l.source));
-  if (!target) return;
-  try {
-    const { AnalysisClient, normalizeZarrUrl, isZarrSource } = await import("./analysis.js");
-    if (!isZarrSource(target.source)) return;
-    const client = new AnalysisClient();
-    const insp = await client.inspect(normalizeZarrUrl(target.source), d.voxel_size_nm);
-    client.terminate();
-    if (!insp.scales.length) return;
-    // Cellmap descriptors usually list scales coarse-first; pick the
-    // finest (largest shape) regardless of order so the camera bounds
-    // are tight, not pyramid-coarse.
-    const finest = [...insp.scales].sort((a, b) => {
-      const va = a.shape.reduce((p, n) => p * n, 1);
-      const vb = b.shape.reduce((p, n) => p * n, 1);
-      return vb - va;
-    })[0];
-    const axisIdx = (name: string): number => insp.axes.findIndex((a) => a.name === name);
-    const ix = axisIdx("x"), iy = axisIdx("y"), iz = axisIdx("z");
-    if (ix < 0 || iy < 0 || iz < 0) return;
-    const extent_nm: [number, number, number] = [
-      finest.shape[ix] * finest.voxelNm[0],
-      finest.shape[iy] * finest.voxelNm[1],
-      finest.shape[iz] * finest.voxelNm[2],
-    ];
-    const center_nm: [number, number, number] = [
-      finest.offsetNm[0] + extent_nm[0] / 2,
-      finest.offsetNm[1] + extent_nm[1] / 2,
-      finest.offsetNm[2] + extent_nm[2] / 2,
-    ];
-    console.log("[auto-frame] computed", {
-      layer: target.name,
-      scale: finest.path,
-      shape: finest.shape,
-      voxelNm: finest.voxelNm,
-      offsetNm: finest.offsetNm,
-      extent_nm,
-      center_xyz_nm: center_nm,
-    });
-    // Set position only — NG fits the cross-section + projection scale
-    // to the layer's bounds on its own once data sources resolve, and
-    // overriding it from us makes the camera fight NG's auto-fit. Apply
-    // once after a short delay so NG has its coordinate space ready
-    // (otherwise we hit "Cannot set properties of undefined"). Position
-    // gets permuted into NG's runtime axis order — NG inherits axes
-    // from the OME-Zarr source (typically z,y,x) so position[0] there
-    // is z, not x; without permuting we'd aim the camera at swapped
-    // coordinates. Same logic as BundledViewer.flyTo.
-    const ngViewer = viewer.getNgViewer();
-    const xyzNmByName: Record<string, number> = {
-      x: center_nm[0],
-      y: center_nm[1],
-      z: center_nm[2],
-    };
-    setTimeout(() => {
-      const cur = viewer.getNgState();
-      if (!cur) return;
-      const cs = (ngViewer?.navigationState as any)?.coordinateSpace?.value as
-        | { names?: string[]; scales?: Float64Array | number[]; units?: string[] }
-        | undefined;
-      const names = cs?.names ?? ["x", "y", "z"];
-      const scales = cs?.scales ?? [1e-9, 1e-9, 1e-9];
-      const units = cs?.units ?? ["m", "m", "m"];
-      const orderedPos = names.map((n, i) => {
-        const nmValue = xyzNmByName[n] ?? 0;
-        const scale = Number(scales[i]);
-        const unit = units[i];
-        const nmToBase =
-          unit === "m" ? 1e-9
-            : unit === "µm" || unit === "um" || unit === "micrometer" ? 1e-3
-            : unit === "nm" || unit === "nanometer" ? 1
-            : unit === "" ? scale
-            : 1;
-        return scale > 0 ? (nmValue * nmToBase) / scale : nmValue;
-      });
-      const next = { ...cur, position: orderedPos };
-      // Strip any pre-set scales so NG's bounds-fit wins on first paint.
-      delete (next as any).crossSectionScale;
-      delete (next as any).projectionScale;
-      try {
-        viewer.applyNgState(next);
-      } catch (err) {
-        console.warn("[auto-frame] apply failed:", (err as Error).message);
-      }
-    }, 600);
-  } catch (err) {
-    console.warn("[auto-frame] skipped:", (err as Error).message);
-  }
-}
 
 async function ingestAndRender(d: DatasetDescriptor, baseUrl: string | null): Promise<void> {
   // Reset DB for every dataset switch, so a previous dataset's CSV tables
