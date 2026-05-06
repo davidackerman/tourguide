@@ -292,20 +292,30 @@ export class BundledViewer {
     const csScaleBefore = navState?.zoomFactor?.value as number | undefined;
     const projScaleBefore = navState?.depthRange?.value as number | undefined;
     viewer.state.restoreState(state);
-    // Re-pin the camera if NG nudged it.
-    try {
-      if (positionBefore && positionBefore.length > 0) {
-        navState.position.value = Float32Array.from(positionBefore);
+    // Re-pin the camera. NG runs an "auto-fit on new layer bounds" pass
+    // *asynchronously* after restoreState — a same-tick write here gets
+    // overwritten on the next render. Defer to a microtask + a
+    // requestAnimationFrame so we beat NG's fit. We also re-write
+    // for ~500 ms to handle slow-resolving data sources.
+    const repin = (): void => {
+      try {
+        if (positionBefore && positionBefore.length > 0) {
+          navState.position.value = Float32Array.from(positionBefore);
+        }
+        if (csScaleBefore !== undefined && navState?.zoomFactor) {
+          navState.zoomFactor.value = csScaleBefore;
+        }
+        if (projScaleBefore !== undefined && navState?.depthRange) {
+          navState.depthRange.value = projScaleBefore;
+        }
+      } catch {
+        /* NG internals shifted between versions; non-fatal */
       }
-      if (csScaleBefore !== undefined && navState?.zoomFactor) {
-        navState.zoomFactor.value = csScaleBefore;
-      }
-      if (projScaleBefore !== undefined && navState?.depthRange) {
-        navState.depthRange.value = projScaleBefore;
-      }
-    } catch {
-      /* NG internals shifted between versions; non-fatal */
-    }
+    };
+    repin();
+    requestAnimationFrame(repin);
+    setTimeout(repin, 100);
+    setTimeout(repin, 400);
     this.currentState = state as any;
   }
 
