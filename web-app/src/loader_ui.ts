@@ -2,6 +2,7 @@ import {
   buildDescriptorFromInput,
   loadDescriptorFromYaml,
   descriptorToYaml,
+  resolveDescriptorAgainstFolder,
   type PastedDatasetInput,
   type PastedLayerInput,
 } from "./loader.js";
@@ -66,7 +67,8 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
           <p class="hint warn folder-unsupported" data-folder-unsupported hidden>This browser doesn't support the File System Access API. Use Chrome / Edge, or use the <strong>Local server</strong> tab.</p>
         </section>
         <section class="modal-pane" data-pane="yaml">
-          <p class="hint">Paste a complete dataset descriptor in YAML.</p>
+          <p class="hint">Paste a complete dataset descriptor in YAML. Sources can be absolute (<code>zarr://https://…</code>) or — when you've also picked a local folder via the <strong>Local folder</strong> tab — relative paths like <code>cells/data</code> that get resolved against that folder.</p>
+          <p class="hint">Tip: drop a <code>tourguide.yaml</code> next to your data. Picking the folder will auto-load it with relative sources resolved.</p>
           <textarea class="yaml-input" rows="18" placeholder="name: my_dataset&#10;display_name: My Dataset&#10;voxel_size_nm: [4, 4, 4]&#10;layers:&#10;  - name: image&#10;    type: image&#10;    source: zarr://..."></textarea>
           <div class="form-actions">
             <button class="btn-primary" data-action="load-yaml">Load</button>
@@ -268,10 +270,42 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
       const reg = await pickLocalFolder();
       folderStatusEl.textContent = `Picked: ${reg.name}`;
       folderStatusEl.className = "folder-pick-status ok";
-      // Probe the picked folder for common formats and offer one-click loading.
       folderDetectedEl.hidden = false;
+      // First, look for a tourguide.yaml/.yml dropped at the root of the
+      // picked folder. If found, parse it and rewrite relative sources
+      // against the folder's base URL — that's a one-click load with full
+      // user-authored layer metadata (csv links, organelle classes, etc.)
+      // beating any auto-detect heuristic.
+      const yamlNames = ["tourguide.yaml", "tourguide.yml", "descriptor.yaml", "descriptor.yml"];
+      let resolvedDescriptor: DatasetDescriptor | null = null;
+      for (const fname of yamlNames) {
+        try {
+          const res = await fetch(reg.baseUrl + fname);
+          if (!res.ok) continue;
+          const yamlText = await res.text();
+          const parsed = loadDescriptorFromYaml(yamlText);
+          resolvedDescriptor = resolveDescriptorAgainstFolder(parsed, reg.baseUrl);
+          folderDetectedEl.innerHTML = `
+            <p class="hint">✓ Found <code>${escapeHtml(fname)}</code> in <code>${escapeHtml(reg.name)}</code> — relative sources resolved to this folder.</p>
+            <button class="btn-primary" data-action="load-yaml-from-folder">Load this dataset</button>
+          `;
+          folderDetectedEl.querySelector("[data-action='load-yaml-from-folder']")!.addEventListener("click", () => {
+            try {
+              onLoad(resolvedDescriptor!);
+              close();
+            } catch (err) {
+              setError((err as Error).message);
+            }
+          });
+          break;
+        } catch {
+          /* keep looking; fall through to auto-detect */
+        }
+      }
+      if (resolvedDescriptor) return;
+      // No tourguide.yaml — fall back to probing common entry points.
       folderDetectedEl.innerHTML = `
-        <p class="hint">Trying to detect a dataset under <code>${escapeHtml(reg.name)}</code>…</p>
+        <p class="hint">No <code>tourguide.yaml</code> in this folder. Trying to auto-detect a dataset under <code>${escapeHtml(reg.name)}</code>…</p>
       `;
       const candidates: Array<{ kind: "zarr" | "n5" | "precomputed"; subpath: string }> = [];
       // Probe a few common entry-points: root and one level deep.
