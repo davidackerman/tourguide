@@ -115,12 +115,21 @@ TOOLS:
   done()
     End this turn. You MUST call this after delivering any answer / plot / fly_to.
 
+CRITICAL — fly_to expects POSITION coordinates (com_x_nm, com_y_nm, com_z_nm
+or position_x, position_y, position_z), NOT a volume / surface_area / id.
+ALWAYS include position columns in your SQL when you plan to fly_to a
+result. Pass [com_x, com_y, com_z] from the row as position. If the
+schema's position columns are named differently, use whatever the schema
+shows — never invent values.
+
 TYPICAL FLOWS:
-  "show me the largest mito"       -> run_sql (ORDER BY volume DESC LIMIT 1) -> fly_to -> done
+  "show me the largest mito"       -> run_sql (SELECT object_id, com_x_nm, com_y_nm, com_z_nm, volume_nm_3 FROM mito ORDER BY volume_nm_3 DESC LIMIT 1)
+                                      -> fly_to (position = [com_x, com_y, com_z], object_id from row) -> done
   "how many nuclei are there?"     -> run_sql (COUNT) -> answer -> done
   "plot mitochondrion volumes"     -> make_plot -> done
-  "fly through the 3 biggest mitos" -> run_sql (LIMIT 3) -> fly_to (first) -> fly_to (second) -> fly_to (third) -> done
-  "show only the largest 10 mitos" -> run_sql (ORDER BY volume DESC LIMIT 10) -> highlight_segments -> done
+  "fly through the 3 biggest mitos" -> run_sql (SELECT object_id, com_x_nm, com_y_nm, com_z_nm, volume_nm_3 FROM mito ORDER BY volume_nm_3 DESC LIMIT 3)
+                                      -> fly_to (row 1) -> fly_to (row 2) -> fly_to (row 3) -> done
+  "show only the largest 10 mitos" -> run_sql (SELECT object_id FROM mito ORDER BY volume_nm_3 DESC LIMIT 10) -> highlight_segments -> done
   "densest region of mitos"        -> run_python (grid COMs, find max-count bin, set _out = (com, ids))
                                       -> fly_to (bin center) -> highlight_segments (ids in bin) -> done
   "median volume of nuclei"        -> run_python (df_nucleus["volume_(nm^3)"].median(); print) -> answer -> done
@@ -200,6 +209,13 @@ async function execRunSql(
   return { columns: result.columns, rows: result.rows };
 }
 
+// Sanity bound for fly_to positions. EM volumes top out at ~1 mm
+// (1e6 nm) per axis — anything above this is the model confusing a
+// volume / surface_area / object_id value for a coordinate. Reject
+// loudly so the model can self-correct (typical mistake: SELECT'd
+// volume but not com_x/y/z, then put volume into position[0]).
+const FLY_TO_MAX_NM = 1e7; // 10 mm — generous upper bound
+
 async function execFlyTo(
   args: Record<string, unknown>,
   ctx: AgentContext,
@@ -207,6 +223,17 @@ async function execFlyTo(
   const pos = args.position as unknown;
   if (!Array.isArray(pos) || pos.length !== 3 || pos.some((n) => typeof n !== "number")) {
     throw new Error("fly_to requires position: [x, y, z] numbers");
+  }
+  // Reject absurd magnitudes — these come from the model substituting
+  // a volume / surface_area / object_id into a position slot. A 12-
+  // billion-nm 'x' is 12 meters; obviously not a dataset coord.
+  for (let i = 0; i < 3; i++) {
+    const v = (pos as number[])[i];
+    if (!Number.isFinite(v) || Math.abs(v) > FLY_TO_MAX_NM) {
+      throw new Error(
+        `fly_to position[${i}] = ${v} nm is out of dataset range. Positions must come from com_x_nm / com_y_nm / com_z_nm columns of the SQL result, in nanometers. SELECT those columns alongside object_id (e.g. 'SELECT object_id, com_x_nm, com_y_nm, com_z_nm FROM mito ORDER BY volume_nm_3 DESC LIMIT 1'), then pass the COM values as position. Do NOT pass volume / surface_area / object_id as position.`,
+      );
+    }
   }
   const layer = String(args.layer ?? "").trim();
   if (!layer) throw new Error("fly_to requires 'layer'");

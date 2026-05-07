@@ -225,13 +225,17 @@ export interface WebLLMModelInfo {
 }
 
 export const WEBLLM_MODELS: WebLLMModelInfo[] = [
-  // Tier 5 — strongest agent performance, large.
-  { id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "7B · f16", sizeGB: 4.0, recommended: 5, note: "best — code-tuned, needs ~6 GB VRAM" },
+  // Tier 5 — strongest agent performance.
+  { id: "Hermes-2-Pro-Llama-3-8B-q4f16_1-MLC", family: "Hermes-2-Pro Llama-3", size: "8B · f16", sizeGB: 4.5, recommended: 5, note: "Nous fine-tune trained for function-calling / structured tool use — strongest WebLLM agent" },
+  { id: "Hermes-3-Llama-3.1-8B-q4f16_1-MLC", family: "Hermes-3 Llama-3.1", size: "8B · f16", sizeGB: 4.5, recommended: 5, note: "newer Hermes, also tool-tuned" },
+  { id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "7B · f16", sizeGB: 4.0, recommended: 5, note: "code-tuned, needs ~6 GB VRAM" },
   // Tier 4 — strong, more accessible.
   { id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "3B · f16", sizeGB: 2.0, recommended: 4, note: "recommended sweet spot for agent" },
   { id: "Qwen2.5-Coder-3B-Instruct-q4f32_1-MLC", family: "Qwen2.5-Coder", size: "3B · f32", sizeGB: 2.6, recommended: 4, note: "Intel Mac / older GPU compatible" },
+  { id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC", family: "Hermes-3 Llama-3.2", size: "3B · f16", sizeGB: 2.0, recommended: 4, note: "tool-tuned, accessible size" },
   { id: "Qwen3-8B-q4f16_1-MLC", family: "Qwen3", size: "8B · f16", sizeGB: 4.5, recommended: 4, note: "newer general, very capable" },
   { id: "Llama-3.1-8B-Instruct-q4f16_1-MLC", family: "Llama-3.1", size: "8B · f16", sizeGB: 4.5, recommended: 4, note: "general, solid all-rounder" },
+  { id: "gemma-2-9b-it-q4f16_1-MLC", family: "Gemma-2", size: "9B · f16", sizeGB: 5.0, recommended: 4, note: "Google open model, large" },
   // Tier 3 — capable but smaller / less agent-tuned.
   { id: "Qwen3-4B-q4f16_1-MLC", family: "Qwen3", size: "4B · f16", sizeGB: 2.5, recommended: 3, note: "newer mid-size general" },
   { id: "Qwen2.5-7B-Instruct-q4f16_1-MLC", family: "Qwen2.5", size: "7B · f16", sizeGB: 4.0, recommended: 3, note: "general (non-coder)" },
@@ -244,6 +248,7 @@ export const WEBLLM_MODELS: WebLLMModelInfo[] = [
   { id: "Llama-3.2-3B-Instruct-q4f32_1-MLC", family: "Llama-3.2", size: "3B · f32", sizeGB: 2.6, recommended: 2, note: "Intel Mac compatible" },
   { id: "Qwen2.5-3B-Instruct-q4f16_1-MLC", family: "Qwen2.5", size: "3B · f16", sizeGB: 2.0, recommended: 2, note: "general (non-coder)" },
   { id: "Phi-3.5-mini-instruct-q4f16_1-MLC", family: "Phi-3.5-mini", size: "3.8B · f16", sizeGB: 2.4, recommended: 2, note: "Microsoft small model" },
+  { id: "gemma-2-2b-it-q4f16_1-MLC", family: "Gemma-2", size: "2B · f16", sizeGB: 1.5, recommended: 2, note: "Google small open model" },
   // Tier 1 — too small for reliable agent use; kept for low-spec / testing.
   { id: "Qwen3-0.6B-q4f16_1-MLC", family: "Qwen3", size: "0.6B · f16", sizeGB: 0.5, recommended: 1, note: "tiny — for testing only" },
   { id: "Llama-3.2-1B-Instruct-q4f32_1-MLC", family: "Llama-3.2", size: "1B · f32", sizeGB: 0.7, recommended: 1, note: "smallest, widest compat" },

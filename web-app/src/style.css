@@ -644,6 +644,24 @@ button {
   text-overflow: ellipsis;
 }
 
+.agent-trace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.3rem;
+}
+.btn-tiny {
+  font-size: 0.72rem;
+  padding: 0.18rem 0.45rem;
+}
+.agent-trace-copy-status {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+}
+.agent-trace-copy-status.ok {
+  color: #7fd3a4;
+}
+
 .webllm-sort-row {
   margin-bottom: 0.4rem;
 }

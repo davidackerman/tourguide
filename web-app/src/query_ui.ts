@@ -30,6 +30,10 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     <div class="plot-output" data-plot hidden></div>
     <details class="query-details" data-details hidden>
       <summary>Show agent trace</summary>
+      <div class="agent-trace-toolbar">
+        <button class="btn-secondary btn-tiny" data-action="copy-trace" type="button">📋 Copy trace</button>
+        <span class="agent-trace-copy-status" data-copy-status></span>
+      </div>
       <div class="agent-trace" data-trace></div>
     </details>
   `;
@@ -43,6 +47,48 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const plotEl = box.querySelector<HTMLDivElement>("[data-plot]")!;
   const detailsEl = box.querySelector<HTMLDetailsElement>("[data-details]")!;
   const traceEl = box.querySelector<HTMLDivElement>("[data-trace]")!;
+  const copyBtn = box.querySelector<HTMLButtonElement>("[data-action='copy-trace']")!;
+  const copyStatus = box.querySelector<HTMLSpanElement>("[data-copy-status]")!;
+
+  // Keep the structured trace in memory so the copy button can dump it
+  // as plain text — DOM-walking the rendered HTML is fragile and loses
+  // collapsed sections.
+  const traceItems: AgentTraceItem[] = [];
+
+  const formatTraceForCopy = (): string => {
+    const lines: string[] = [];
+    if (statusEl.textContent) lines.push(`# Status\n${statusEl.textContent}\n`);
+    if (answerEl.textContent) lines.push(`# Answer\n${answerEl.textContent}\n`);
+    lines.push(`# Trace (${traceItems.length} steps)`);
+    traceItems.forEach((item, i) => {
+      lines.push(`\n## Step ${i + 1}: ${item.tool}`);
+      if (item.args && Object.keys(item.args).length > 0) {
+        lines.push("args:\n```json\n" + JSON.stringify(item.args, null, 2) + "\n```");
+      }
+      if (item.error) {
+        lines.push("error:\n```\n" + item.error + "\n```");
+      } else if (item.result !== undefined) {
+        const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
+        lines.push("result:\n```\n" + r + "\n```");
+      }
+    });
+    return lines.join("\n");
+  };
+
+  copyBtn.addEventListener("click", async () => {
+    const text = formatTraceForCopy();
+    try {
+      await navigator.clipboard.writeText(text);
+      copyStatus.textContent = "✓ copied";
+      copyStatus.className = "agent-trace-copy-status ok";
+    } catch {
+      // Clipboard API can be blocked in non-secure contexts; fall back
+      // to a window prompt() which lets the user copy manually.
+      window.prompt("Copy trace:", text);
+      copyStatus.textContent = "";
+    }
+    setTimeout(() => (copyStatus.textContent = ""), 1500);
+  });
 
   const setStatus = (msg: string, kind: "" | "err" | "ok" | "pending" = ""): void => {
     statusEl.textContent = msg;
@@ -50,6 +96,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   };
 
   const appendTrace = (item: AgentTraceItem): void => {
+    traceItems.push(item);
     detailsEl.hidden = false;
     const row = document.createElement("div");
     row.className = "agent-trace-item";
@@ -115,6 +162,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     answerEl.textContent = "";
     plotEl.hidden = true;
     traceEl.innerHTML = "";
+    traceItems.length = 0;
     detailsEl.hidden = true;
     let answeredOrFlew = false;
     try {
