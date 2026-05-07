@@ -8,6 +8,11 @@ export interface LLMCompleteOptions {
   maxTokens?: number;
   jsonMode?: boolean;
   onToken?: (text: string, accumulated: string) => void;
+  // When this fires, the backend should abort its in-flight request and
+  // throw. Gemini wires the signal directly to fetch(); WebLLM has an
+  // interruptGenerate() method we call. The throw is what unwinds the
+  // agent loop's `await` so it can stop instead of running another step.
+  signal?: AbortSignal;
 }
 
 export interface LLMBackend {
@@ -173,19 +178,50 @@ export class WebLLMBackend implements LLMBackend {
           create: (req: unknown) => Promise<NonStreamResponse | AsyncIterable<Chunk>>;
         };
       };
+      // MLC's interrupt API — stops the in-progress generation. The
+      // current await on chat.completions.create resolves with whatever
+      // tokens have been produced so far, then we throw to unwind.
+      interruptGenerate?: () => void;
     };
     const engine = this.engine as MLCEngineLike;
+    // Hook the abort signal into MLC's interruptGenerate. WebLLM doesn't
+    // accept an AbortSignal directly, so we listen and call its imperative
+    // API when the signal fires.
+    const onAbort = (): void => {
+      try {
+        engine.interruptGenerate?.();
+      } catch {
+        /* engine may be mid-teardown; nothing more we can do */
+      }
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        throw new DOMException("Aborted before WebLLM call", "AbortError");
+      }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
     const useStream = !!options.onToken;
     // Note: WebLLM's response_format requires a full JSON schema string for
     // json_object mode and throws BindingError otherwise. Skip it; the agent
     // prompts already instruct "respond with one JSON object" and our parser
     // tolerates fenced/wrapped JSON. JSON mode is honored on Gemini only.
-    const result = await engine.chat.completions.create({
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      temperature: options.temperature ?? 0.1,
-      max_tokens: options.maxTokens ?? 1024,
-      stream: useStream,
-    });
+    let result;
+    try {
+      result = await engine.chat.completions.create({
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        temperature: options.temperature ?? 0.1,
+        max_tokens: options.maxTokens ?? 1024,
+        stream: useStream,
+      });
+    } finally {
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+    // After the await: if the user aborted while we were generating,
+    // throw rather than returning a half-baked response. The agent loop
+    // catches AbortError and stops cleanly.
+    if (options.signal?.aborted) {
+      throw new DOMException("WebLLM generation aborted", "AbortError");
+    }
     if (!useStream) {
       const r = result as NonStreamResponse;
       return r.choices[0].message.content ?? "";
@@ -193,6 +229,9 @@ export class WebLLMBackend implements LLMBackend {
     const stream = result as AsyncIterable<Chunk>;
     let accumulated = "";
     for await (const chunk of stream) {
+      if (options.signal?.aborted) {
+        throw new DOMException("WebLLM stream aborted", "AbortError");
+      }
       const delta = chunk.choices?.[0]?.delta?.content ?? "";
       if (delta) {
         accumulated += delta;
@@ -323,6 +362,7 @@ export class GeminiBackend implements LLMBackend {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: options.signal,
     });
     if (res.status === 429) {
       // Parse Gemini's retryInfo block to see how long to wait. Free-tier
@@ -341,6 +381,7 @@ export class GeminiBackend implements LLMBackend {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          signal: options.signal,
         });
         if (!res.ok) {
           const retryText = await res.text();

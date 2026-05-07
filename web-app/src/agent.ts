@@ -28,6 +28,11 @@ export interface AgentContext {
   viewer: BundledViewer;
   backend: LLMBackend;
   callbacks: AgentCallbacks;
+  // When this aborts, the agent stops between iterations (and the
+  // current LLM call gets aborted via fetch/interruptGenerate). Lets
+  // the user hit a Stop button mid-question instead of waiting out
+  // 5 iterations of a slow WebLLM model.
+  signal?: AbortSignal;
 }
 
 interface ToolCall {
@@ -534,10 +539,14 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     let tokenCount = 0;
     let lastUpdate = 0;
     ctx.callbacks.onProgress?.(`Agent step ${i + 1}: thinking…`);
+    if (ctx.signal?.aborted) {
+      throw new DOMException("Agent stopped by user", "AbortError");
+    }
     const raw = await ctx.backend.complete(messages, {
       temperature: 0.1,
       jsonMode: true,
       maxTokens: 1500,
+      signal: ctx.signal,
       onToken: (_t, accumulated) => {
         tokenCount += 1;
         const now = performance.now();
