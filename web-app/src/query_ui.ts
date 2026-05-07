@@ -78,18 +78,9 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     const lines: string[] = [];
     if (statusEl.textContent) lines.push(`# Status\n${statusEl.textContent}\n`);
     if (answerEl.textContent) lines.push(`# Answer\n${answerEl.textContent}\n`);
-    lines.push(`# Trace (${traceItems.length} steps)`);
+    lines.push(`# Trace (${traceItems.length} step${traceItems.length === 1 ? "" : "s"})`);
     traceItems.forEach((item, i) => {
-      lines.push(`\n## Step ${i + 1}: ${item.tool}`);
-      if (item.args && Object.keys(item.args).length > 0) {
-        lines.push("args:\n```json\n" + JSON.stringify(item.args, null, 2) + "\n```");
-      }
-      if (item.error) {
-        lines.push("error:\n```\n" + item.error + "\n```");
-      } else if (item.result !== undefined) {
-        const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
-        lines.push("result:\n```\n" + r + "\n```");
-      }
+      lines.push("\n" + formatStepForCopy(item, i));
     });
     return lines.join("\n");
   };
@@ -114,7 +105,24 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     statusEl.className = `query-status ${kind}`;
   };
 
+  // Format a single step the same way formatTraceForCopy does so the
+  // per-step copy button output matches what "Copy trace" produces.
+  const formatStepForCopy = (item: AgentTraceItem, index: number): string => {
+    const lines: string[] = [`## Step ${index + 1}: ${item.tool}`];
+    if (item.args && Object.keys(item.args).length > 0) {
+      lines.push("args:\n```json\n" + JSON.stringify(item.args, null, 2) + "\n```");
+    }
+    if (item.error) {
+      lines.push("error:\n```\n" + item.error + "\n```");
+    } else if (item.result !== undefined) {
+      const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
+      lines.push("result:\n```\n" + r + "\n```");
+    }
+    return lines.join("\n");
+  };
+
   const appendTrace = (item: AgentTraceItem): void => {
+    const index = traceItems.length;
     traceItems.push(item);
     detailsEl.hidden = false;
     const row = document.createElement("div");
@@ -130,7 +138,28 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
       resultLine = `<details class="agent-trace-block"><summary>result</summary><pre class="agent-trace-result">${escapeHtml(r)}</pre></details>`;
     }
-    row.innerHTML = `<span class="agent-trace-tool">${escapeHtml(item.tool)}</span>${safeArgs}${resultLine}`;
+    // Tool name + per-step copy button. Click handler bound below
+    // because innerHTML can't carry function refs.
+    row.innerHTML = `
+      <div class="agent-trace-item-header">
+        <span class="agent-trace-tool">${escapeHtml(item.tool)}</span>
+        <button class="btn-tiny agent-trace-copy-step" type="button" title="Copy this step">📋</button>
+        <span class="agent-trace-step-status" data-step-status></span>
+      </div>
+      ${safeArgs}${resultLine}`;
+    const stepCopyBtn = row.querySelector<HTMLButtonElement>(".agent-trace-copy-step")!;
+    const stepStatus = row.querySelector<HTMLSpanElement>("[data-step-status]")!;
+    stepCopyBtn.addEventListener("click", async () => {
+      const text = formatStepForCopy(item, index);
+      try {
+        await navigator.clipboard.writeText(text);
+        stepStatus.textContent = "✓";
+        stepStatus.className = "agent-trace-step-status ok";
+      } catch {
+        window.prompt("Copy step:", text);
+      }
+      setTimeout(() => (stepStatus.textContent = ""), 1500);
+    });
     traceEl.appendChild(row);
     traceEl.scrollTop = traceEl.scrollHeight;
   };
@@ -183,7 +212,12 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     plotEl.hidden = true;
     traceEl.innerHTML = "";
     traceItems.length = 0;
-    detailsEl.hidden = true;
+    // Show the trace panel up front (collapsed by default) so even if
+    // the agent fails or is stopped before any tool fires, the Copy
+    // trace button is still reachable. Previously we only revealed it
+    // on the first appendTrace, which hid the copy path on early
+    // errors (model parse failures, 429s on first call, etc.).
+    detailsEl.hidden = false;
     let answeredOrFlew = false;
     // Fresh AbortController per query — Stop button calls abort()
     // which cascades through to the LLM backend (fetch / WebLLM

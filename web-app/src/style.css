@@ -650,6 +650,34 @@ button {
   gap: 0.5rem;
   margin: 0.4rem 0 0.3rem;
 }
+.agent-trace-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.15rem;
+}
+.agent-trace-copy-step {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.25rem;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  opacity: 0.5;
+}
+.agent-trace-item:hover .agent-trace-copy-step {
+  opacity: 1;
+}
+.agent-trace-copy-step:hover {
+  background: var(--border);
+}
+.agent-trace-step-status {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+}
+.agent-trace-step-status.ok {
+  color: #7fd3a4;
+}
 .btn-tiny {
   font-size: 0.72rem;
   padding: 0.18rem 0.45rem;
