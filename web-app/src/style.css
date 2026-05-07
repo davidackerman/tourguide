@@ -763,12 +763,35 @@ button {
 .analysis-layer-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
   font-size: 0.85rem;
-  cursor: pointer;
+  padding: 0.15rem 0;
 }
 .analysis-layer-row:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+.analysis-layer-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.analysis-layer-scale {
+  flex: 0 1 360px;
+  min-width: 200px;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0.2rem 0.3rem;
+}
+.analysis-layer-status {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  min-width: 80px;
+}
+.analysis-layer-status.err {
+  color: #ff9d9d;
 }
 .gemini-model-status {
   font-size: 0.75rem;

@@ -185,18 +185,137 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     })();
   }
 
-  // Render one checkbox per zarr layer. The first one starts checked
-  // so single-layer use looks like before; the user can check more to
-  // batch.
+  // Per-layer cache of inspection result + currently-selected scale,
+  // keyed by the layer index in segLayers. Populated lazily as the
+  // user checks layers in multi-layer mode (so we don't run an HTTP
+  // probe for layers they're not going to analyze).
+  type LayerSlot = {
+    inspection: LayerInspection | null;
+    selectedScaleIdx: number | null;
+    inspecting: boolean;
+    inspectError: string | null;
+  };
+  const layerSlots: LayerSlot[] = segLayers.map(() => ({
+    inspection: null,
+    selectedScaleIdx: null,
+    inspecting: false,
+    inspectError: null,
+  }));
+
+  // Render one row per zarr layer. Each row has a checkbox plus a
+  // <select> for scale selection (hidden in single-layer mode where
+  // the big radio table below is used instead). In multi-layer mode
+  // each row's <select> drives that layer's scale choice — the radio
+  // table is hidden.
   segLayers.forEach((l, i) => {
-    const row = document.createElement("label");
+    const row = document.createElement("div");
     row.className = "analysis-layer-row";
+    row.dataset.layerIdx = String(i);
     row.innerHTML = `
-      <input type="checkbox" data-layer-idx="${i}" ${i === 0 ? "checked" : ""} />
-      <span>${escapeHtml(l.name)} <em class="hint" style="opacity:0.7;">[${l.type}]${l.organelle_class ? ` — ${escapeHtml(l.organelle_class)}` : ""}</em></span>
+      <label class="analysis-layer-check">
+        <input type="checkbox" data-layer-idx="${i}" ${i === 0 ? "checked" : ""} />
+        <span>${escapeHtml(l.name)} <em class="hint" style="opacity:0.7;">[${l.type}]${l.organelle_class ? ` — ${escapeHtml(l.organelle_class)}` : ""}</em></span>
+      </label>
+      <select class="analysis-layer-scale" data-layer-scale="${i}" hidden>
+        <option>(loading scales…)</option>
+      </select>
+      <span class="analysis-layer-status" data-layer-status="${i}"></span>
     `;
     layersHost.appendChild(row);
   });
+
+  // Format an option label for one scale: 's0  1300×1500×220, 388 MB'
+  // plus a 'beyond cap' badge if it'd OOM in Pyodide and we're not on
+  // the backend.
+  const scaleOptionLabel = (s: LayerScaleInfo, useRemote: boolean): string => {
+    const path = s.path || "(root)";
+    const shape = s.shape.join("×");
+    const size = humanSize(s.approxBytes);
+    const veryRisky = !useRemote && s.approxBytes > 3 * SAFE_INPUT_BYTES;
+    const risky = !useRemote && s.approxBytes > SAFE_INPUT_BYTES;
+    const tag = veryRisky ? " — beyond WASM cap" : risky ? " — may OOM" : "";
+    return `${path}  ${shape}  ${size}${tag}`;
+  };
+
+  // Build the dropdown options for a layer's scale picker. Coarsest
+  // fitting scale is preselected (matches the radio-table default).
+  const populateLayerScaleSelect = (layerIdx: number): void => {
+    const slot = layerSlots[layerIdx];
+    const sel = layersHost.querySelector<HTMLSelectElement>(
+      `[data-layer-scale="${layerIdx}"]`,
+    );
+    if (!sel) return;
+    if (!slot.inspection) {
+      sel.innerHTML = `<option>(loading scales…)</option>`;
+      sel.disabled = true;
+      return;
+    }
+    const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
+    sel.innerHTML = "";
+    slot.inspection.scales.forEach((s, j) => {
+      const opt = document.createElement("option");
+      opt.value = String(j);
+      const veryRisky = !useRemote && s.approxBytes > 3 * SAFE_INPUT_BYTES;
+      opt.disabled = veryRisky;
+      opt.textContent = scaleOptionLabel(s, useRemote);
+      if (j === slot.selectedScaleIdx) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.disabled = false;
+    sel.onchange = (): void => {
+      slot.selectedScaleIdx = Number(sel.value);
+    };
+  };
+
+  // Lazy inspection: probe a layer for its scales when first needed
+  // in multi-layer mode. Already-inspected layers no-op.
+  const ensureInspected = async (layerIdx: number): Promise<void> => {
+    const slot = layerSlots[layerIdx];
+    if (slot.inspection || slot.inspecting) return;
+    slot.inspecting = true;
+    const statusEl = layersHost.querySelector<HTMLSpanElement>(
+      `[data-layer-status="${layerIdx}"]`,
+    );
+    if (statusEl) statusEl.textContent = "inspecting…";
+    try {
+      const url = normalizeZarrUrl(segLayers[layerIdx].source);
+      const insp = await client.inspect(url, d.voxel_size_nm);
+      slot.inspection = insp;
+      const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
+      slot.selectedScaleIdx = autoPickScaleIdx(insp, useRemote);
+      if (statusEl) statusEl.textContent = "";
+      populateLayerScaleSelect(layerIdx);
+    } catch (err) {
+      slot.inspectError = (err as Error).message;
+      if (statusEl) {
+        statusEl.textContent = `✗ ${slot.inspectError.slice(0, 80)}`;
+        statusEl.classList.add("err");
+      }
+    } finally {
+      slot.inspecting = false;
+    }
+  };
+
+  // Toggle visibility of per-row scale dropdowns based on how many
+  // layers are checked. Single-layer mode keeps them hidden so the
+  // big radio table is the single source of scale selection;
+  // multi-layer mode shows them inline.
+  const refreshPerRowScalePickers = (): void => {
+    const idxs = getCheckedLayerIdxs();
+    const useDropdowns = idxs.length >= 2;
+    layersHost
+      .querySelectorAll<HTMLSelectElement>("[data-layer-scale]")
+      .forEach((sel) => {
+        const idx = Number(sel.dataset.layerScale);
+        const checked = idxs.includes(idx);
+        sel.hidden = !(useDropdowns && checked);
+      });
+    if (useDropdowns) {
+      // Kick off inspection for any newly-checked layer that we haven't
+      // probed yet. Already-inspected ones no-op.
+      idxs.forEach((idx) => void ensureInspected(idx));
+    }
+  };
   const getCheckedLayerIdxs = (): number[] => {
     const out: number[] = [];
     layersHost
@@ -379,10 +498,11 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
 
   // When the layer selection changes:
   //  - 0 checked → disable Run, show hint.
-  //  - 1 checked → inspect the layer, show scale picker (single-layer mode).
-  //  - 2+ checked → hide scale picker; each layer auto-picks its coarsest
-  //                 scale that fits the budget at run time.
+  //  - 1 checked → inspect the layer, show big radio-table scale picker.
+  //  - 2+ checked → hide radio table; each row's inline <select> picks
+  //                 the layer's scale (lazily inspected as checked).
   const onLayerSelectionChange = (): void => {
+    refreshPerRowScalePickers();
     const idxs = getCheckedLayerIdxs();
     if (idxs.length === 0) {
       currentLayer = null;
@@ -397,17 +517,32 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       void inspectLayer(currentLayer);
       return;
     }
-    // Multi-layer mode: skip per-scale UI; we'll auto-pick at run time.
+    // Multi-layer mode: hide the per-scale radio table; scale lives in
+    // each layer-row's <select>. Inspection runs in the background;
+    // user can click Run as soon as they're ready (slots that are
+    // still inspecting will block briefly at run time).
     currentLayer = null;
     currentInspection = null;
     selectedScaleIdx = null;
-    scalesHost.innerHTML = `<p class="hint">Multi-layer mode — ${idxs.length} layers selected. Each will run at its coarsest fitting scale${analysisBackendUrl && remoteToggle.checked ? "; backend lifts the WASM cap" : ""}. Click Run analysis to start.</p>`;
+    scalesHost.innerHTML = `<p class="hint">Multi-layer mode — ${idxs.length} layers selected. Pick a scale per row above; default is the coarsest one that fits the budget${analysisBackendUrl && remoteToggle.checked ? " (backend lifts the WASM cap)" : ""}.</p>`;
     runBtn.disabled = false;
   };
   layersHost.addEventListener("change", (e) => {
     if ((e.target as HTMLElement).matches('input[type="checkbox"][data-layer-idx]')) {
       onLayerSelectionChange();
     }
+  });
+  // When the user toggles 'Run on backend', the per-row scale labels
+  // need to refresh — 'beyond WASM cap' badges drop / reappear, and
+  // the auto-picked scale flips between coarsest-fit (local) and s0
+  // (backend). Re-run the dropdown population for any inspected slot.
+  remoteToggle.addEventListener("change", () => {
+    layerSlots.forEach((slot, idx) => {
+      if (!slot.inspection) return;
+      const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
+      slot.selectedScaleIdx = autoPickScaleIdx(slot.inspection, useRemote);
+      populateLayerScaleSelect(idx);
+    });
   });
 
   // Auto-pick a sensible scale for a layer when running in multi-layer
@@ -592,8 +727,11 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     runBtn.disabled = true;
     inspectStatus.textContent = "";
 
-    // Pre-resolve the (layer, scale) pairs. In single-layer mode we
-    // already inspected; in multi-layer mode we inspect each here.
+    // Pre-resolve the (layer, scale) pairs. In single-layer mode the
+    // radio-table selection is authoritative. In multi-layer mode we
+    // read each row's <select> via the cached layerSlots, kicking off
+    // any not-yet-inspected layers and waiting on them so the run
+    // doesn't fire half-loaded.
     type Job = { layer: DatasetLayer; insp: LayerInspection; scaleIdx: number };
     const jobs: Job[] = [];
     try {
@@ -604,11 +742,18 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           scaleIdx: selectedScaleIdx,
         });
       } else {
+        // Block on any pending inspections so each layer's <select>
+        // has a real scale chosen before we read it.
+        await Promise.all(checkedIdxs.map((i) => ensureInspected(i)));
         for (const i of checkedIdxs) {
-          const layer = segLayers[i];
-          showProgress(`Inspecting ${layer.name}…`);
-          const insp = await client.inspect(normalizeZarrUrl(layer.source), d.voxel_size_nm);
-          jobs.push({ layer, insp, scaleIdx: autoPickScaleIdx(insp, useRemote) });
+          const slot = layerSlots[i];
+          if (!slot.inspection) {
+            throw new Error(
+              `Couldn't inspect ${segLayers[i].name}${slot.inspectError ? `: ${slot.inspectError}` : ""}`,
+            );
+          }
+          const scaleIdx = slot.selectedScaleIdx ?? autoPickScaleIdx(slot.inspection, useRemote);
+          jobs.push({ layer: segLayers[i], insp: slot.inspection, scaleIdx });
         }
       }
     } catch (err) {
