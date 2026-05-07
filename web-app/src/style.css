@@ -753,6 +753,18 @@ button {
   font-style: italic;
 }
 
+.ngstate-status {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  min-height: 1.1em;
+}
+.ngstate-status.ok {
+  color: #7fd3a4;
+}
+.ngstate-status.err {
+  color: #ff9d9d;
+}
+
 .folder-pick-row {
   display: flex;
   align-items: center;

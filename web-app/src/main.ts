@@ -257,7 +257,23 @@ function loadDescriptorDirect(d: DatasetDescriptor): void {
 }
 
 loadBtn.addEventListener("click", () => {
-  openLoaderDialog((d) => loadDescriptorDirect(d));
+  openLoaderDialog((d, ngState) => {
+    loadDescriptorDirect(d);
+    // The "Paste NG state" tab passes back the original NG state so we
+    // can overlay the camera + selected segments on top of the freshly
+    // loaded descriptor. loadDescriptorDirect → applyDescriptor is
+    // fire-and-forget (awaits CSV ingest internally), so we defer past
+    // its synchronous viewer.loadDescriptor before applying.
+    if (ngState) {
+      setTimeout(() => {
+        try {
+          viewer.applyNgState(ngState);
+        } catch (err) {
+          console.error("Failed to apply NG state from loader:", err);
+        }
+      }, 200);
+    }
+  });
 });
 
 analyzeBtn.addEventListener("click", () => {

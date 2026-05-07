@@ -10,8 +10,15 @@ import {
 import type { DatasetDescriptor, LayerType } from "./descriptor.js";
 import { detectSourceMetadata } from "./detect.js";
 import { isFsAccessSupported, pickLocalFolder, buildLocalSourceUrl } from "./local_folder.js";
+// urlSafeParse accepts both standard JSON and NG's URL-safe form
+// (single-quoted strings, '_' as a separator) — what you get when you
+// copy NG's URL hash directly. Plain JSON.parse can't handle the latter.
+import { urlSafeParse } from "neuroglancer/unstable/util/json.js";
 
-type LoaderResult = (descriptor: DatasetDescriptor) => void;
+// Second arg is the (optional) Neuroglancer state to overlay after the
+// descriptor loads — used by the "Paste NG state" tab so the recipient
+// also gets the camera + selected segments the source URL captured.
+type LoaderResult = (descriptor: DatasetDescriptor, ngState?: Record<string, unknown>) => void;
 
 export function openLoaderDialog(onLoad: LoaderResult): void {
   const overlay = document.createElement("div");
@@ -26,6 +33,7 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
         <button class="modal-tab active" data-tab="form" role="tab">Paste URLs</button>
         <button class="modal-tab" data-tab="folder" role="tab">Local folder</button>
         <button class="modal-tab" data-tab="yaml" role="tab">YAML</button>
+        <button class="modal-tab" data-tab="ngstate" role="tab">NG state</button>
       </div>
       <div class="modal-body">
         <section class="modal-pane active" data-pane="form">
@@ -84,6 +92,21 @@ layers:
           <div class="form-actions" style="display:flex;gap:8px;align-items:center;">
             <button class="btn-secondary" data-action="pick-yaml-file" type="button">Open YAML file…</button>
             <button class="btn-primary" data-action="load-yaml">Load</button>
+          </div>
+        </section>
+        <section class="modal-pane" data-pane="ngstate">
+          <p class="hint">Paste a Neuroglancer state JSON — what lives after <code>#!</code> in an NG URL, or what you'd see in NG's <strong>{ } JSON</strong> panel. Tourguide extracts the layers, auto-fills voxel size from the first source, and overlays the camera + selected segments after load. Optionally attach a CSV per segmentation layer to enable the structured browser.</p>
+          <div class="form-row">
+            <label>Name <input data-ngstate-name placeholder="my_dataset" /></label>
+          </div>
+          <textarea class="ngstate-input" rows="10" data-ngstate-input placeholder='{"dimensions":{"x":[4e-9,"m"],...},"layers":[{"type":"image","name":"em","source":"zarr://..."}],"position":[...],...}'></textarea>
+          <div class="form-actions" style="display:flex;gap:8px;align-items:center;">
+            <button class="btn-secondary" data-action="parse-ngstate" type="button">Parse layers</button>
+            <span class="ngstate-status" data-ngstate-status></span>
+          </div>
+          <div class="ngstate-layers" data-ngstate-layers hidden></div>
+          <div class="form-actions">
+            <button class="btn-primary" data-action="load-ngstate">Load</button>
           </div>
         </section>
       </div>
@@ -456,7 +479,214 @@ layers:
     }
   });
 
+  // ---- NG state tab ----
+  const ngstateInput = overlay.querySelector<HTMLTextAreaElement>("[data-ngstate-input]")!;
+  const ngstateNameInput = overlay.querySelector<HTMLInputElement>("[data-ngstate-name]")!;
+  const ngstateLayersHost = overlay.querySelector<HTMLDivElement>("[data-ngstate-layers]")!;
+  const ngstateStatusEl = overlay.querySelector<HTMLSpanElement>("[data-ngstate-status]")!;
+  const setNgstateStatus = (msg: string, kind: "" | "ok" | "err" = ""): void => {
+    ngstateStatusEl.textContent = msg;
+    ngstateStatusEl.className = `ngstate-status ${kind}`;
+  };
+
+  // Pull the layer specs out of the pasted NG state. NG accepts both
+  // array and object forms; reduce both to {name, type, source} we can
+  // feed buildDescriptorFromInput. Source can itself be a string, an
+  // array, or {url} / [{url}] — flatten to string|string[].
+  const extractLayersFromNgState = (
+    ng: Record<string, unknown>,
+  ): PastedLayerInput[] => {
+    const raw = ng.layers;
+    if (raw === undefined) throw new Error("NG state is missing 'layers'");
+    let entries: Array<Record<string, unknown>>;
+    if (Array.isArray(raw)) {
+      entries = raw.filter((l): l is Record<string, unknown> => !!l && typeof l === "object");
+    } else if (typeof raw === "object" && raw !== null) {
+      entries = Object.entries(raw as Record<string, unknown>).map(([name, spec]) => {
+        if (typeof spec === "string") return { name, source: spec };
+        if (spec && typeof spec === "object") return { name, ...(spec as Record<string, unknown>) };
+        return { name };
+      });
+    } else {
+      throw new Error("NG state 'layers' must be an array or object");
+    }
+    const flattenSource = (s: unknown): string | string[] | null => {
+      const one = (x: unknown): string | null => {
+        if (typeof x === "string") return x;
+        if (x && typeof x === "object" && typeof (x as { url?: unknown }).url === "string") {
+          return (x as { url: string }).url;
+        }
+        return null;
+      };
+      if (Array.isArray(s)) {
+        const out = s.map(one).filter((v): v is string => !!v);
+        if (out.length === 0) return null;
+        return out.length === 1 ? out[0] : out;
+      }
+      return one(s);
+    };
+    const out: PastedLayerInput[] = [];
+    for (const entry of entries) {
+      const name = typeof entry.name === "string" ? entry.name : "";
+      const type = entry.type === "segmentation" ? "segmentation" : "image";
+      const src = flattenSource(entry.source);
+      if (!src) continue;
+      out.push({
+        name: name || defaultLayerName(Array.isArray(src) ? src[0] : src, type),
+        type,
+        source: Array.isArray(src) ? src[0] : src, // descriptor.layer.source is string-only
+      });
+    }
+    if (out.length === 0) {
+      throw new Error("No layers with a usable source found in the NG state");
+    }
+    return out;
+  };
+
+  const renderNgstateLayerRows = (layers: PastedLayerInput[]): void => {
+    ngstateLayersHost.hidden = false;
+    ngstateLayersHost.innerHTML = `
+      <h3 style="margin:8px 0 4px;">Detected layers</h3>
+      <p class="hint">Source URLs are taken straight from the NG state; the CSV / organelle-class fields below are tourguide-only and stay blank unless you fill them in.</p>
+      <div class="layers-list" data-ngstate-layer-rows></div>
+    `;
+    const rowsHost = ngstateLayersHost.querySelector<HTMLDivElement>("[data-ngstate-layer-rows]")!;
+    layers.forEach((l, i) => {
+      const row = document.createElement("div");
+      row.className = "layer-row";
+      row.dataset.idx = String(i);
+      row.innerHTML = `
+        <input data-l="name" value="${escapeAttr(l.name)}" />
+        <select data-l="type">
+          <option value="image"${l.type === "image" ? " selected" : ""}>image</option>
+          <option value="segmentation"${l.type === "segmentation" ? " selected" : ""}>segmentation</option>
+        </select>
+        <input data-l="source" value="${escapeAttr(Array.isArray(l.source) ? l.source.join(", ") : l.source)}" readonly title="Source comes from the NG state" />
+        <input data-l="organelle_class" placeholder="organelle class (optional)" />
+        <input data-l="csv" placeholder="CSV URL (optional)" />
+      `;
+      rowsHost.appendChild(row);
+    });
+  };
+
+  const parseNgstate = (): { ng: Record<string, unknown>; layers: PastedLayerInput[] } | null => {
+    setError("");
+    setNgstateStatus("");
+    const raw = ngstateInput.value.trim();
+    if (!raw) {
+      setError("Paste an NG state JSON first");
+      return null;
+    }
+    // Accept whatever shape the user pastes:
+    //   - The bare `{...}` from NG's "{ } JSON" panel (standard JSON)
+    //   - The `#!{...}` form from NG's URL hash (URL-encoded JSON)
+    //   - The `#!+{...}` form (URL-safe encoding: single quotes, `_` for `,`)
+    //   - A full `https://.../#!...` URL pasted in
+    let cleaned = raw;
+    const hashIdx = cleaned.indexOf("#!");
+    if (hashIdx >= 0) cleaned = cleaned.slice(hashIdx + 2);
+    if (cleaned.startsWith("+")) cleaned = cleaned.slice(1); // legacy `#!+` form
+    if (!cleaned.startsWith("{")) {
+      // URL-encoded variants — `%7B` etc. — survive a copy from the
+      // address bar in some browsers.
+      try {
+        cleaned = decodeURIComponent(cleaned);
+      } catch {
+        /* fall through; urlSafeParse will give the real error */
+      }
+    }
+    let ng: Record<string, unknown>;
+    try {
+      // urlSafeParse handles both `{"layers":...}` and `{'layers':...}`;
+      // JSON.parse rejects the latter, which is what NG actually puts in
+      // the URL by default.
+      ng = urlSafeParse(cleaned);
+    } catch (err) {
+      setError(`Invalid JSON: ${(err as Error).message}`);
+      return null;
+    }
+    if (!ng || typeof ng !== "object") {
+      setError("NG state must be a JSON object");
+      return null;
+    }
+    let layers: PastedLayerInput[];
+    try {
+      layers = extractLayersFromNgState(ng);
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    }
+    if (!ngstateNameInput.value) {
+      // Default the dataset name to the first layer's URL tail, matching
+      // what the YAML loader does when name is omitted.
+      const firstSource = Array.isArray(layers[0].source) ? layers[0].source[0] : layers[0].source;
+      ngstateNameInput.value = defaultLayerName(firstSource, "ngstate");
+    }
+    setNgstateStatus(`✓ Found ${layers.length} layer(s)`, "ok");
+    return { ng, layers };
+  };
+
+  overlay.querySelector("[data-action='parse-ngstate']")!.addEventListener("click", () => {
+    const parsed = parseNgstate();
+    if (parsed) renderNgstateLayerRows(parsed.layers);
+  });
+
+  // Re-parse on textarea blur so the layer rows refresh after edits, but
+  // only if the user has already triggered an initial parse (otherwise
+  // a paste-then-tab away would surprise them with an inline error).
+  ngstateInput.addEventListener("blur", () => {
+    if (!ngstateLayersHost.hidden) {
+      const parsed = parseNgstate();
+      if (parsed) renderNgstateLayerRows(parsed.layers);
+    }
+  });
+
+  overlay.querySelector("[data-action='load-ngstate']")!.addEventListener("click", async () => {
+    setError("");
+    const parsed = parseNgstate();
+    if (!parsed) return;
+    // Pull any CSV / organelle-class overrides the user typed into the
+    // detected-layer rows. If the user never clicked Parse, fall back to
+    // the layers extracted just now (no overrides available).
+    let layers = parsed.layers;
+    const rows = ngstateLayersHost.querySelectorAll<HTMLDivElement>(".layer-row");
+    if (rows.length === layers.length) {
+      layers = Array.from(rows).map((row, i) => {
+        const lget = (k: string): string => {
+          const el = row.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-l="${k}"]`);
+          return el?.value.trim() ?? "";
+        };
+        return {
+          name: lget("name") || layers[i].name,
+          type: (lget("type") as LayerType) || layers[i].type,
+          source: layers[i].source,
+          organelle_class: lget("organelle_class") || undefined,
+          csv: lget("csv") || undefined,
+        };
+      });
+    }
+    const name = ngstateNameInput.value.trim() || "ngstate_paste";
+    try {
+      // Build a placeholder descriptor first; voxel size is auto-filled
+      // below the same way the YAML loader does it.
+      let descriptor = buildDescriptorFromInput({
+        name,
+        voxel_size_nm: [1, 1, 1], // placeholder, autofill replaces below
+        layers,
+      });
+      descriptor = await autofillVoxelFromFirstSource(descriptor);
+      onLoad(descriptor, parsed.ng);
+      close();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  });
+
   document.body.appendChild(overlay);
+}
+
+function escapeAttr(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
 function escapeHtml(s: string): string {
