@@ -275,6 +275,50 @@ _TS_ZARR2_COMPRESSOR_KNOWN_FIELDS: Dict[str, set] = {
 }
 
 
+async def _load_via_zarr_python(layer: LayerSpec) -> np.ndarray:
+    """Open a remote zarr with zarr-python and materialize to numpy.
+
+    Used as a fallback when tensorstore can't open the array — typically
+    because CellMap's numcodecs (zstd with `checksum`, etc.) include
+    fields tensorstore strict-rejects. zarr-python is tolerant of all
+    numcodecs additions. Slower than tensorstore for large arrays but
+    correct.
+    """
+    import asyncio  # noqa: WPS433
+    import zarr  # noqa: WPS433
+    import fsspec  # noqa: WPS433
+
+    raw = layer.url.rstrip("/") + "/"
+    if raw.startswith("s3://"):
+        # Treat s3 buckets as anon HTTPS for CellMap's public buckets.
+        raw = "https://" + raw.split("://", 1)[1]
+
+    def _read() -> np.ndarray:
+        # fsspec.open_async would be nicer but its zarr3 store wiring is
+        # finicky — using sync open in a thread keeps this simple.
+        store = fsspec.get_mapper(raw)
+        # zarr-python autodetects v2/v3 from the layout.
+        root = zarr.open(store, mode="r")
+        # Navigate to scale path. zarr group/array indexing accepts
+        # "s0", "s0/", or empty for the root array case.
+        target = root[layer.scalePath] if layer.scalePath else root
+        if hasattr(target, "members"):
+            # It's a group, not an array — pick the array at scalePath
+            # if scalePath was empty, this is unusual but try .0 fallback.
+            raise ValueError(
+                f"zarr path {layer.scalePath!r} is a group, not an array"
+            )
+        rank = target.ndim
+        axes = list(layer.axesOrder) if layer.axesOrder and len(layer.axesOrder) == rank else None
+        if axes is not None:
+            sel = tuple(slice(None) if a in ("x", "y", "z") else 0 for a in axes)
+        else:
+            sel = tuple(slice(None) if i >= rank - 3 else 0 for i in range(rank))
+        return np.asarray(target[sel])
+
+    return await asyncio.get_event_loop().run_in_executor(None, _read)
+
+
 async def _fetch_and_sanitize_zarray(
     base_url: str,
     scale_path: str,
@@ -333,9 +377,9 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
         raise HTTPException(status_code=400, detail=f"unsupported layer URL scheme: {raw_proto}")
 
     # Try zarr v2 first (CellMap default), fall back to v3. When both
-    # fail, surface BOTH errors — the previous behavior reported only
-    # the last (zarr3) error, which hid the real reason zarr2 didn't
-    # open (e.g., unsupported codec, dimension_separator quirk).
+    # tensorstore drivers fail, fall back to zarr-python — it tolerates
+    # numcodecs additions (checksum, etc.) that tensorstore strict-
+    # rejects. Slower per-chunk but reliable.
     errors_by_driver: Dict[str, Exception] = {}
     ts_arr = None
     for driver in ("zarr", "zarr3"):
@@ -350,57 +394,34 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
             break
         except Exception as exc:  # noqa: BLE001
             errors_by_driver[driver] = exc
-            # Recovery path #1: tensorstore's zarr v2 driver is strict
-            # about the `compressor` object — newer numcodecs versions
-            # add fields it doesn't recognize (e.g. `checksum` on zstd
-            # since numcodecs 0.13). Strict parsing then fails with
-            # 'Object includes extra members'. Workaround: fetch
-            # .zarray ourselves, strip unknown compressor fields, and
-            # pass the sanitized metadata back inline so tensorstore
-            # uses ours instead of re-parsing the file.
-            if driver == "zarr" and "extra members" in str(exc):
-                try:
-                    result = await _fetch_and_sanitize_zarray(url, layer.scalePath or "")
-                    if result is not None:
-                        cleaned_metadata, stripped_fields = result
-                        retry_spec = dict(spec)
-                        retry_spec["metadata"] = cleaned_metadata
-                        ts_arr = await ts.open(retry_spec)
-                        log.info(
-                            "tensorstore zarr2 retry with sanitized metadata succeeded for %s (stripped: %s)",
-                            url,
-                            stripped_fields,
-                        )
-                        # Drop the recovered driver's earlier error so
-                        # the user doesn't see a phantom failure note.
-                        errors_by_driver.pop(driver, None)
-                        break
-                except Exception as retry_exc:  # noqa: BLE001
-                    log.warning("zarr2 sanitized-metadata retry failed: %s", retry_exc)
             continue
     if ts_arr is None:
+        # Fallback: zarr-python. CellMap data uses numcodecs zstd with
+        # 'checksum' (since numcodecs 0.13) which tensorstore's strict
+        # parser rejects with 'Object includes extra members'.
+        # zarr-python doesn't care, so we use it for the whole load.
         per_driver = " | ".join(
             f"{drv}: {type(exc).__name__}: {exc}"
             for drv, exc in errors_by_driver.items()
         )
-        # Always log the full driver-by-driver chain — HF Spaces' default
-        # FastAPI handler swallows HTTPException details, so without this
-        # the user has no way to see the real reason zarr2 failed (only
-        # the abbreviated form that fits in their alert dialog).
-        log.error(
-            "tensorstore failed url=%s scalePath=%r drivers_tried=%s",
+        log.warning(
+            "tensorstore failed for %s (path=%r), falling back to zarr-python — %s",
             url,
             layer.scalePath,
             per_driver,
         )
-        # Also log each error's traceback in case the message string
-        # itself dropped useful context.
-        for drv, exc in errors_by_driver.items():
-            log.exception("tensorstore driver=%s failed: %s", drv, exc, exc_info=exc)
-        raise HTTPException(
-            status_code=400,
-            detail=f"tensorstore failed to open {url} path={layer.scalePath!r}; tried both drivers — {per_driver}",
-        )
+        try:
+            return await _load_via_zarr_python(layer)
+        except Exception as zp_exc:  # noqa: BLE001
+            log.exception("zarr-python fallback also failed: %s", zp_exc)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Could not open {url} path={layer.scalePath!r}. "
+                    f"tensorstore tried both drivers — {per_driver}. "
+                    f"zarr-python fallback also failed: {type(zp_exc).__name__}: {zp_exc}"
+                ),
+            ) from zp_exc
 
     rank = ts_arr.rank
     axes = list(layer.axesOrder) if layer.axesOrder and len(layer.axesOrder) == rank else None
