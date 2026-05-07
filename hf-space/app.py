@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import aiohttp
 import numpy as np
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -261,6 +262,54 @@ async def _load_layer(layer: LayerSpec, tunnel: Optional[TunnelSession]) -> np.n
     return await _load_via_tensorstore(layer)
 
 
+# Fields tensorstore's zarr v2 compressor parsers know about, by
+# compressor id. Anything beyond these is rejected as 'extra members'.
+# Adding to this list is fine if a new tensorstore version drops the
+# strict check — extra-but-allowed fields just pass through.
+_TS_ZARR2_COMPRESSOR_KNOWN_FIELDS: Dict[str, set] = {
+    "zstd": {"id", "level"},
+    "blosc": {"id", "cname", "clevel", "shuffle", "blocksize"},
+    "gzip": {"id", "level"},
+    "bz2": {"id", "level"},
+    "zlib": {"id", "level"},
+}
+
+
+async def _fetch_and_sanitize_zarray(
+    base_url: str,
+    scale_path: str,
+) -> Optional[Tuple[Dict[str, Any], List[str]]]:
+    """Fetch a zarr v2 .zarray and drop extra/unknown compressor fields.
+
+    Returns (cleaned_metadata, stripped_field_names) — the cleaned dict
+    is suitable for tensorstore's `metadata` spec field as-is. None on
+    fetch / parse failure.
+    """
+    target = base_url.rstrip("/") + "/"
+    if scale_path:
+        target += scale_path.strip("/") + "/"
+    target += ".zarray"
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(target) as resp:
+                resp.raise_for_status()
+                metadata = await resp.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not fetch .zarray at %s: %s", target, exc)
+        return None
+    stripped: List[str] = []
+    compressor = metadata.get("compressor")
+    if isinstance(compressor, dict):
+        codec_id = compressor.get("id")
+        known = _TS_ZARR2_COMPRESSOR_KNOWN_FIELDS.get(codec_id, None)
+        if known is not None:
+            for k in list(compressor.keys()):
+                if k not in known:
+                    stripped.append(f"compressor.{k}={compressor[k]!r}")
+                    del compressor[k]
+    return metadata, stripped
+
+
 async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
     """Open a remote zarr with tensorstore and materialize to numpy.
 
@@ -290,7 +339,7 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
     errors_by_driver: Dict[str, Exception] = {}
     ts_arr = None
     for driver in ("zarr", "zarr3"):
-        spec = {
+        spec: Dict[str, Any] = {
             "driver": driver,
             "kvstore": kvstore,
             "path": layer.scalePath or "",
@@ -301,6 +350,33 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
             break
         except Exception as exc:  # noqa: BLE001
             errors_by_driver[driver] = exc
+            # Recovery path #1: tensorstore's zarr v2 driver is strict
+            # about the `compressor` object — newer numcodecs versions
+            # add fields it doesn't recognize (e.g. `checksum` on zstd
+            # since numcodecs 0.13). Strict parsing then fails with
+            # 'Object includes extra members'. Workaround: fetch
+            # .zarray ourselves, strip unknown compressor fields, and
+            # pass the sanitized metadata back inline so tensorstore
+            # uses ours instead of re-parsing the file.
+            if driver == "zarr" and "extra members" in str(exc):
+                try:
+                    result = await _fetch_and_sanitize_zarray(url, layer.scalePath or "")
+                    if result is not None:
+                        cleaned_metadata, stripped_fields = result
+                        retry_spec = dict(spec)
+                        retry_spec["metadata"] = cleaned_metadata
+                        ts_arr = await ts.open(retry_spec)
+                        log.info(
+                            "tensorstore zarr2 retry with sanitized metadata succeeded for %s (stripped: %s)",
+                            url,
+                            stripped_fields,
+                        )
+                        # Drop the recovered driver's earlier error so
+                        # the user doesn't see a phantom failure note.
+                        errors_by_driver.pop(driver, None)
+                        break
+                except Exception as retry_exc:  # noqa: BLE001
+                    log.warning("zarr2 sanitized-metadata retry failed: %s", retry_exc)
             continue
     if ts_arr is None:
         per_driver = " | ".join(
