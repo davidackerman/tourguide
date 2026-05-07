@@ -909,12 +909,72 @@ button {
 .plot-image {
   max-width: 100%;
   display: block;
+  cursor: zoom-in;
 }
 
 .plot-explanation {
   font-size: 0.78rem;
   color: #555;
   margin: 0.4rem 0 0;
+}
+
+.plot-toolbar {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.plot-code {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+}
+.plot-code summary {
+  cursor: pointer;
+  color: #555;
+}
+.plot-code pre {
+  margin: 0.3rem 0 0;
+  padding: 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plot-fullscreen {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.plot-fullscreen img {
+  max-width: 95vw;
+  max-height: 95vh;
+  display: block;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+.plot-fullscreen-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: rgba(255, 255, 255, 0.9);
+  color: #111;
+  border: 0;
+  border-radius: 4px;
+  padding: 0.35rem 0.7rem;
+  font-size: 1rem;
+  cursor: pointer;
 }
 
 .webllm-progress {

@@ -281,6 +281,8 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     const img = document.createElement("img");
     img.src = pngDataUrl;
     img.className = "plot-image";
+    img.title = "Click to enlarge";
+    img.addEventListener("click", () => openFullscreenImage(pngDataUrl));
     plotEl.appendChild(img);
     if (explanation) {
       const p = document.createElement("p");
@@ -288,7 +290,87 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       p.textContent = explanation;
       plotEl.appendChild(p);
     }
-    void code;
+    const toolbar = document.createElement("div");
+    toolbar.className = "plot-toolbar";
+    toolbar.appendChild(makeDownloadButton("⬇ PNG", () => downloadDataUrl(pngDataUrl, slugify(title) + ".png")));
+    if (code) {
+      toolbar.appendChild(
+        makeDownloadButton("⬇ .py", () =>
+          downloadBlob(new Blob([code], { type: "text/x-python" }), slugify(title) + ".py"),
+        ),
+      );
+    }
+    plotEl.appendChild(toolbar);
+    if (code) {
+      const det = document.createElement("details");
+      det.className = "plot-code";
+      det.innerHTML = `<summary>Show Python source</summary>`;
+      const pre = document.createElement("pre");
+      pre.textContent = code;
+      det.appendChild(pre);
+      plotEl.appendChild(det);
+    }
+  };
+
+  // Fullscreen overlay for plot images. Click the image (or background)
+  // or press Esc to close. We don't reuse .modal-overlay because that
+  // pattern centers a modal card with a header — for a single image we
+  // want edge-to-edge and a one-click dismiss anywhere on the dimmer.
+  const openFullscreenImage = (src: string): void => {
+    const overlay = document.createElement("div");
+    overlay.className = "plot-fullscreen";
+    overlay.innerHTML = `<button class="plot-fullscreen-close" aria-label="Close">×</button>`;
+    const big = document.createElement("img");
+    big.src = src;
+    overlay.appendChild(big);
+    const close = (): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") close();
+    };
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay || (e.target as HTMLElement).classList.contains("plot-fullscreen-close")) {
+        close();
+      }
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+  };
+
+  const makeDownloadButton = (label: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.className = "btn-secondary btn-tiny";
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
+  };
+
+  const downloadBlob = (blob: Blob, filename: string): void => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
+  const downloadDataUrl = (dataUrl: string, filename: string): void => {
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const slugify = (s: string | undefined): string => {
+    const t = (s ?? "plot").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    return t || "plot";
   };
 
   form.addEventListener("submit", async (e) => {
