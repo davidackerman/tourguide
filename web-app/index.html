@@ -10,18 +10,24 @@
     <div id="app">
       <header id="topbar">
         <div class="brand">tourguide</div>
-        <div class="dataset-picker">
-          <label for="dataset-select">Dataset:</label>
+        <div class="topbar-group">
+          <label for="dataset-select" class="topbar-label">Dataset</label>
           <select id="dataset-select" disabled>
             <option>Loading…</option>
           </select>
-          <button id="load-data-btn" class="btn-secondary">+ Load your data</button>
-          <button id="analyze-btn" class="btn-secondary" title="Compute per-object stats on a zarr segmentation (browser-side)">∑ Analyze</button>
-          <button id="custom-btn" class="btn-secondary" title="Run arbitrary Python on one or more layers (with Gemini-assist)">🐍 Custom</button>
+          <button id="load-data-btn" class="btn-secondary" title="Load a different dataset (URL, folder, YAML, or NG state)">+ Load</button>
+        </div>
+        <div class="topbar-group">
+          <button id="analyze-btn" class="btn-secondary" title="Compute per-object stats (volume, position, etc.) on a zarr segmentation. No AI needed.">∑ Analyze</button>
+          <button id="custom-btn" class="btn-secondary" title="Plain-English Python on one or more layers — REQUIRES AI (set up in Settings).">🐍 Custom</button>
+        </div>
+        <div class="topbar-group">
           <button id="download-btn" class="btn-secondary" title="Download zarr layers as .zip">⬇ Save zarr</button>
-          <button id="settings-btn" class="btn-secondary" title="Settings (AI, analysis backend)">⚙ Settings</button>
-          <button id="share-btn" class="btn-secondary" title="Copy shareable link">🔗 Share</button>
-          <span id="backend-indicator" class="backend-indicator">No AI</span>
+          <button id="share-btn" class="btn-secondary" title="Copy a shareable link with the current view + computed tables">🔗 Share</button>
+        </div>
+        <div class="topbar-group topbar-right">
+          <button id="settings-btn" class="btn-secondary" title="AI backend, analysis backend, and other settings">⚙ Settings</button>
+          <button id="backend-indicator" class="backend-indicator" title="Click to configure">No AI</button>
         </div>
       </header>
       <main>

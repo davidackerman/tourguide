@@ -16,6 +16,10 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const box = document.createElement("div");
   box.className = "query-box";
   box.innerHTML = `
+    <div class="query-ai-hint" data-ai-hint hidden>
+      ⚠ AI not configured — plain-English questions, agent trace, and 🐍 Custom Python need an AI backend.
+      <button class="btn-link" data-action="open-settings">Set up in Settings</button>
+    </div>
     <form class="query-form">
       <input
         type="text"
@@ -45,6 +49,27 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const input = box.querySelector<HTMLInputElement>(".query-input")!;
   const button = box.querySelector<HTMLButtonElement>("button[type=submit]")!;
   const stopBtn = box.querySelector<HTMLButtonElement>("[data-action='stop']")!;
+  const aiHint = box.querySelector<HTMLDivElement>("[data-ai-hint]")!;
+  const aiHintBtn = box.querySelector<HTMLButtonElement>("[data-action='open-settings']")!;
+  // Reflect backend readiness in the persistent hint above the Ask
+  // input. Show the hint and dim the Ask button when no backend is
+  // ready; clear both once the user configures one. Polled because
+  // backend reconfigures from the Settings dialog don't fire an event
+  // here — keeps the hint truthful without a pubsub.
+  const refreshAiHint = (): void => {
+    const ready = ctx.getBackend().isReady();
+    aiHint.hidden = ready;
+    button.disabled = !ready;
+    button.title = ready ? "" : "Set up an AI backend in Settings to use Ask.";
+    input.placeholder = ready
+      ? "Ask: 'largest mito' or 'plot mito volumes'"
+      : "(set up AI in Settings to ask questions)";
+  };
+  refreshAiHint();
+  setInterval(refreshAiHint, 1500);
+  aiHintBtn.addEventListener("click", () => {
+    document.getElementById("settings-btn")?.click();
+  });
   // Active AbortController for the in-flight query, or null when idle.
   // Exposed at module scope (closure-captured) so the Stop click handler
   // and the form-submit handler can share it without prop-drilling.

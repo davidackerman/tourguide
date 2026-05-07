@@ -75,7 +75,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             </div>
             <div class="analysis-layers-host" data-layers-host></div>
           </div>
-          <label>
+          <label data-global-labeled>
             <span>Already labeled?</span>
             <select data-labeled>
               <option value="true" selected>Yes — values are segment ids</option>
@@ -208,6 +208,12 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   // the big radio table below is used instead). In multi-layer mode
   // each row's <select> drives that layer's scale choice — the radio
   // table is hidden.
+  // Two-row layout per layer: line 1 has the checkbox + name + type
+  // (always visible), line 2 has scale + already-labeled dropdowns
+  // (only visible in multi-layer mode). Avoids the overlap that
+  // happened when name and dropdown shared one row and text wrapped
+  // under the <select>. Each row's labeled dropdown is independent so
+  // mixed-input batches (one labeled volume + one mask volume) work.
   segLayers.forEach((l, i) => {
     const row = document.createElement("div");
     row.className = "analysis-layer-row";
@@ -215,12 +221,27 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     row.innerHTML = `
       <label class="analysis-layer-check">
         <input type="checkbox" data-layer-idx="${i}" ${i === 0 ? "checked" : ""} />
-        <span>${escapeHtml(l.name)} <em class="hint" style="opacity:0.7;">[${l.type}]${l.organelle_class ? ` — ${escapeHtml(l.organelle_class)}` : ""}</em></span>
+        <span class="analysis-layer-name">
+          ${escapeHtml(l.name)}
+          <em class="hint analysis-layer-type">[${l.type}]${l.organelle_class ? ` — ${escapeHtml(l.organelle_class)}` : ""}</em>
+        </span>
       </label>
-      <select class="analysis-layer-scale" data-layer-scale="${i}" hidden>
-        <option>(loading scales…)</option>
-      </select>
-      <span class="analysis-layer-status" data-layer-status="${i}"></span>
+      <div class="analysis-layer-controls" data-layer-controls="${i}" hidden>
+        <label class="analysis-layer-control">
+          <span>Scale</span>
+          <select class="analysis-layer-scale" data-layer-scale="${i}">
+            <option>(loading scales…)</option>
+          </select>
+        </label>
+        <label class="analysis-layer-control">
+          <span>Labeled</span>
+          <select class="analysis-layer-labeled" data-layer-labeled="${i}">
+            <option value="true" selected>Yes — values are segment ids</option>
+            <option value="false">No — connected-components on mask</option>
+          </select>
+        </label>
+        <span class="analysis-layer-status" data-layer-status="${i}"></span>
+      </div>
     `;
     layersHost.appendChild(row);
   });
@@ -320,20 +341,24 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     return job;
   };
 
-  // Toggle visibility of per-row scale dropdowns based on how many
-  // layers are checked. Single-layer mode keeps them hidden so the
-  // big radio table is the single source of scale selection;
-  // multi-layer mode shows them inline.
+  // Toggle visibility of each row's controls block (scale + labeled
+  // dropdowns) based on how many layers are checked. Single-layer
+  // mode keeps them hidden so the big radio table + global 'Already
+  // labeled?' dropdown remain the source of truth; multi-layer mode
+  // shows the per-row controls inline AND hides the global labeled
+  // selector to avoid two competing controls.
+  const globalLabeledRow = overlay.querySelector<HTMLLabelElement>("[data-global-labeled]");
   const refreshPerRowScalePickers = (): void => {
     const idxs = getCheckedLayerIdxs();
     const useDropdowns = idxs.length >= 2;
     layersHost
-      .querySelectorAll<HTMLSelectElement>("[data-layer-scale]")
-      .forEach((sel) => {
-        const idx = Number(sel.dataset.layerScale);
+      .querySelectorAll<HTMLDivElement>("[data-layer-controls]")
+      .forEach((ctrls) => {
+        const idx = Number(ctrls.dataset.layerControls);
         const checked = idxs.includes(idx);
-        sel.hidden = !(useDropdowns && checked);
+        ctrls.hidden = !(useDropdowns && checked);
       });
+    if (globalLabeledRow) globalLabeledRow.hidden = useDropdowns;
     if (useDropdowns) {
       // Kick off inspection for any newly-checked layer that we haven't
       // probed yet. Already-inspected ones no-op.
@@ -592,6 +617,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     scaleIdx: number,
     useRemote: boolean,
     labelPrefix: string,
+    alreadyLabeled: boolean,
   ): Promise<void> => {
     const scale: LayerScaleInfo = insp.scales[scaleIdx];
     let progressTimer = 0;
@@ -656,7 +682,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           ],
           tables: [],
           code: buildRegionpropsCode(
-            labeledSel.value === "true",
+            alreadyLabeled,
             makeMeshes,
             layer.name,
             chooseMeshDownsample(scale.shape),
@@ -685,7 +711,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         // all other cases (cc3d-derived ids, image-typed inputs) fall
         // back to a standalone mesh-only layer to avoid mis-mapping ids.
         if (remote.meshLayer) {
-          const isAlreadyLabeled = labeledSel.value === "true";
+          const isAlreadyLabeled = alreadyLabeled;
           const canAttach = isAlreadyLabeled && layer.type === "segmentation";
           let attached = false;
           if (canAttach) {
@@ -725,7 +751,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             voxelNm: scale.voxelNm,
             offsetNm: scale.offsetNm,
             maxVoxels,
-            alreadyLabeled: labeledSel.value === "true",
+            alreadyLabeled,
           },
           (message) => showProgress(`${labelPrefix}${message}`),
         );
@@ -756,18 +782,24 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     // read each row's <select> via the cached layerSlots, kicking off
     // any not-yet-inspected layers and waiting on them so the run
     // doesn't fire half-loaded.
-    type Job = { layer: DatasetLayer; insp: LayerInspection; scaleIdx: number };
+    type Job = {
+      layer: DatasetLayer;
+      insp: LayerInspection;
+      scaleIdx: number;
+      alreadyLabeled: boolean;
+    };
     const jobs: Job[] = [];
     try {
       if (checkedIdxs.length === 1 && currentInspection && selectedScaleIdx != null) {
+        // Single-layer: global labeled selector is authoritative.
         jobs.push({
           layer: segLayers[checkedIdxs[0]],
           insp: currentInspection,
           scaleIdx: selectedScaleIdx,
+          alreadyLabeled: labeledSel.value === "true",
         });
       } else {
-        // Block on any pending inspections so each layer's <select>
-        // has a real scale chosen before we read it.
+        // Multi-layer: read each row's per-layer labeled <select>.
         await Promise.all(checkedIdxs.map((i) => ensureInspected(i)));
         for (const i of checkedIdxs) {
           const slot = layerSlots[i];
@@ -777,7 +809,15 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             );
           }
           const scaleIdx = slot.selectedScaleIdx ?? autoPickScaleIdx(slot.inspection, useRemote);
-          jobs.push({ layer: segLayers[i], insp: slot.inspection, scaleIdx });
+          const perRowLabeled = layersHost.querySelector<HTMLSelectElement>(
+            `[data-layer-labeled="${i}"]`,
+          );
+          jobs.push({
+            layer: segLayers[i],
+            insp: slot.inspection,
+            scaleIdx,
+            alreadyLabeled: (perRowLabeled?.value ?? "true") === "true",
+          });
         }
       }
     } catch (err) {
@@ -806,10 +846,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
 
     const errors: { layer: string; message: string }[] = [];
     for (let i = 0; i < jobs.length; i++) {
-      const { layer, insp, scaleIdx } = jobs[i];
+      const { layer, insp, scaleIdx, alreadyLabeled } = jobs[i];
       const labelPrefix = jobs.length > 1 ? `[${i + 1}/${jobs.length}] ` : "";
       try {
-        await runOneLayer(layer, insp, scaleIdx, useRemote, labelPrefix);
+        await runOneLayer(layer, insp, scaleIdx, useRemote, labelPrefix, alreadyLabeled);
       } catch (err) {
         errors.push({ layer: layer.name, message: (err as Error).message });
       }

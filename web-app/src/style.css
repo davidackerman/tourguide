@@ -33,37 +33,50 @@ body {
 #topbar {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
+  gap: 0.6rem;
   padding: 0.5rem 1rem;
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .brand {
   font-weight: 600;
   letter-spacing: 0.02em;
+  margin-right: 0.4rem;
 }
 
-.dataset-picker {
+/* Each topbar-group is a logical cluster of related controls
+ * (dataset / compute / save+share / settings). Visual separators
+ * between groups make scanning easier than 6 buttons in a row. */
+.topbar-group {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
+  padding-right: 0.6rem;
+  border-right: 1px solid var(--border);
 }
-
-.dataset-picker label {
+.topbar-group:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+.topbar-group.topbar-right {
+  margin-left: auto; /* push Settings + AI indicator to the right edge */
+}
+.topbar-label {
   color: var(--fg-dim);
   font-size: 0.85rem;
 }
 
-.dataset-picker select {
+#dataset-select {
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0.3rem 0.5rem;
   font: inherit;
-  min-width: 220px;
+  min-width: 200px;
 }
 
 main {
@@ -509,17 +522,65 @@ button {
   cursor: not-allowed;
 }
 
+/* Persistent hint above the Ask box: shown when no AI backend is
+ * configured. Clicking the inline link opens Settings. Calmer than a
+ * hard error since the rest of the app still works without AI. */
+.query-ai-hint {
+  background: rgba(247, 201, 72, 0.08);
+  border-left: 3px solid #f7c948;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.78rem;
+  color: var(--fg);
+  margin-bottom: 0.5rem;
+  border-radius: 3px;
+  line-height: 1.4;
+}
+.btn-link {
+  background: none;
+  border: none;
+  color: #6ea7ff;
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+  padding: 0;
+}
+.btn-link:hover {
+  color: #9bc4ff;
+}
+
+/* The backend-indicator is now a button that opens Settings on click —
+ * a fast path when AI isn't configured yet. Default state nudges the
+ * user (red-ish, says 'No AI') so they know what's missing; .ok state
+ * is calm (green) once a backend is reachable. */
 .backend-indicator {
   font-size: 0.78rem;
   color: var(--fg-dim);
-  padding: 0.2rem 0.45rem;
+  padding: 0.25rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: 999px;
+  background: var(--bg);
+  cursor: pointer;
+  font-family: inherit;
 }
-
+.backend-indicator:hover {
+  border-color: var(--fg-dim);
+  color: var(--fg);
+}
+.backend-indicator:not(.ok) {
+  color: #f7c948;
+  border-color: #6e5a1f;
+}
+.backend-indicator:not(.ok)::before {
+  content: "⚙ ";
+  margin-right: 0.1rem;
+}
 .backend-indicator.ok {
   color: #7fd3a4;
   border-color: #4d8a65;
+  cursor: default; /* still clickable, but nothing critical to do */
+}
+.backend-indicator.ok::before {
+  content: "● ";
 }
 
 .query-box {
@@ -760,35 +821,67 @@ button {
   border-radius: 4px;
   padding: 0.4rem 0.5rem;
 }
+/* Two-row per-layer layout so the name + type never collide with the
+ * scale / labeled dropdowns. Row 1 = checkbox + name + type; row 2 =
+ * controls (only visible in multi-layer mode). */
 .analysis-layer-row {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.25rem;
   font-size: 0.85rem;
-  padding: 0.15rem 0;
+  padding: 0.3rem 0.1rem;
+  border-bottom: 1px dashed transparent;
 }
-.analysis-layer-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+.analysis-layer-row + .analysis-layer-row {
+  border-top: 1px dashed var(--border);
 }
 .analysis-layer-check {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.4rem;
   cursor: pointer;
-  flex: 1 1 auto;
   min-width: 0;
 }
-.analysis-layer-scale {
-  flex: 0 1 360px;
-  min-width: 200px;
+.analysis-layer-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.analysis-layer-type {
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.analysis-layer-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-left: 1.4rem; /* indent under the checkbox */
+}
+.analysis-layer-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+.analysis-layer-control > select {
   font-size: 0.78rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0.2rem 0.3rem;
 }
+.analysis-layer-scale {
+  min-width: 240px;
+}
+.analysis-layer-labeled {
+  min-width: 200px;
+  font-family: inherit;
+}
 .analysis-layer-status {
   font-size: 0.72rem;
   color: var(--fg-dim);
-  min-width: 80px;
 }
 .analysis-layer-status.err {
   color: #ff9d9d;

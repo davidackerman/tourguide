@@ -45,7 +45,10 @@ const customBtn = $<HTMLButtonElement>("custom-btn");
 const downloadBtn = $<HTMLButtonElement>("download-btn");
 const settingsBtn = $<HTMLButtonElement>("settings-btn");
 const shareBtn = $<HTMLButtonElement>("share-btn");
-const backendIndicator = $<HTMLSpanElement>("backend-indicator");
+const backendIndicator = $<HTMLButtonElement>("backend-indicator");
+// Make the indicator a quick way into Settings when AI isn't configured —
+// matches the title attribute on the button.
+backendIndicator.addEventListener("click", () => settingsBtn.click());
 const meta = $<HTMLDivElement>("dataset-meta");
 const browserHost = $<HTMLDivElement>("browser-host");
 const queryHost = $<HTMLDivElement>("query-host");
@@ -63,13 +66,24 @@ let currentIsCustom = false;
 let backend: LLMBackend = backendFromSettings(loadSettings());
 
 function updateBackendIndicator(): void {
-  if (backend.isReady()) {
+  const ready = backend.isReady();
+  if (ready) {
     backendIndicator.textContent = backend.name;
     backendIndicator.className = "backend-indicator ok";
+    backendIndicator.title = `${backend.name} ready. Click to change.`;
   } else {
     backendIndicator.textContent = "No AI";
     backendIndicator.className = "backend-indicator";
+    backendIndicator.title = "Click to configure an AI backend (needed for Ask + Custom Python).";
   }
+  // Custom Python and Ask both depend on AI — visually dim Custom in
+  // the topbar when no backend is ready, and update its tooltip so
+  // users know why. Σ Analyze and the structured browser don't need
+  // AI, so we leave those alone.
+  customBtn.disabled = !ready;
+  customBtn.title = ready
+    ? "Plain-English Python on one or more layers"
+    : "Requires AI — set up in Settings";
 }
 updateBackendIndicator();
 
