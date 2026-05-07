@@ -3,6 +3,7 @@ import type { DatasetDB } from "./db.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { runAgent, type AgentTraceItem } from "./agent.js";
+import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 
 export interface QueryUIContext {
   getDB: () => DatasetDB | null;
@@ -26,7 +27,9 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
         class="query-input"
         placeholder="Ask: 'largest mito' or 'plot mito volumes'"
         autocomplete="off"
+        list="tg-agent-history"
       />
+      <datalist id="tg-agent-history" data-history-list></datalist>
       <button class="btn-primary" type="submit" data-action="ask">Ask</button>
       <button class="btn-secondary" type="button" data-action="stop" hidden>Stop</button>
     </form>
@@ -87,6 +90,44 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       }, 1500);
     }
   });
+  const historyList = box.querySelector<HTMLDataListElement>("[data-history-list]")!;
+  const refreshHistoryList = (): void => {
+    const items = loadPromptHistory("agent");
+    historyList.innerHTML = items
+      .map((p) => `<option value="${p.replace(/"/g, "&quot;")}"></option>`)
+      .join("");
+  };
+  refreshHistoryList();
+
+  // Shell-style ArrowUp/Down recall over the agent's prompt history.
+  // Preserves whatever the user was typing before they started recalling
+  // ("draft") so ArrowDown past index 0 brings it back. Index -1 means
+  // "showing draft"; 0..N-1 walks the persisted history (most-recent
+  // first). We refuse to recall while a query is in flight — it would
+  // visually overwrite the in-progress prompt mid-execution.
+  let historyIndex = -1;
+  let draft = "";
+  input.addEventListener("keydown", (e) => {
+    if (button.hidden) return; // running; don't intercept
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    const items = loadPromptHistory("agent");
+    if (items.length === 0) return;
+    e.preventDefault();
+    if (historyIndex === -1) draft = input.value;
+    if (e.key === "ArrowUp") {
+      historyIndex = Math.min(items.length - 1, historyIndex + 1);
+    } else {
+      historyIndex = Math.max(-1, historyIndex - 1);
+    }
+    input.value = historyIndex === -1 ? draft : items[historyIndex];
+    // Move caret to end so the user can keep typing immediately.
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+  // Any direct edit cancels recall mode so the next ArrowUp starts fresh.
+  input.addEventListener("input", () => {
+    historyIndex = -1;
+  });
+
   const statusEl = box.querySelector<HTMLDivElement>("[data-status]")!;
   const answerEl = box.querySelector<HTMLDivElement>("[data-answer]")!;
   const plotEl = box.querySelector<HTMLDivElement>("[data-plot]")!;
@@ -226,6 +267,12 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     const question = input.value.trim();
     if (!question) return;
     currentQuestion = question;
+    // Persist before running so a crash / refresh mid-query still leaves
+    // the prompt recoverable in the dropdown.
+    recordPrompt(question, "agent");
+    refreshHistoryList();
+    historyIndex = -1;
+    draft = "";
     const db = ctx.getDB();
     if (!db) {
       setStatus("Load a dataset with organelle CSVs first.", "err");

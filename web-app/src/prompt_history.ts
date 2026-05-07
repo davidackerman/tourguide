@@ -1,14 +1,20 @@
-// Most-recent-first list of Custom Analysis prompts the user has run.
-// Persisted in localStorage so the dropdown survives reloads, and read by
-// the permalink encoder so a "Share" link carries the sharer's recent
-// queries forward to the recipient.
+// Most-recent-first list of prompts the user has run, persisted in
+// localStorage so the dropdown survives reloads. Two scopes share this
+// helper: Custom Analysis ("analysis") and the AI agent ("agent"). The
+// permalink encoder also reads the analysis scope so a "Share" link
+// carries the sharer's recent queries forward to the recipient.
 
-const KEY = "tourguide.analysisPromptHistory";
+export type HistoryScope = "analysis" | "agent";
+
+const KEYS: Record<HistoryScope, string> = {
+  analysis: "tourguide.analysisPromptHistory",
+  agent: "tourguide.agentPromptHistory",
+};
 const MAX_PROMPTS = 20;
 
-export function loadPromptHistory(): string[] {
+export function loadPromptHistory(scope: HistoryScope = "analysis"): string[] {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(KEYS[scope]);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.map(String).slice(0, MAX_PROMPTS) : [];
@@ -17,25 +23,25 @@ export function loadPromptHistory(): string[] {
   }
 }
 
-export function savePromptHistory(prompts: string[]): void {
+export function savePromptHistory(prompts: string[], scope: HistoryScope = "analysis"): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(prompts.slice(0, MAX_PROMPTS)));
+    localStorage.setItem(KEYS[scope], JSON.stringify(prompts.slice(0, MAX_PROMPTS)));
   } catch {
     /* private mode / quota — silently drop */
   }
 }
 
-export function recordPrompt(prompt: string): void {
+export function recordPrompt(prompt: string, scope: HistoryScope = "analysis"): void {
   const trimmed = prompt.trim();
   if (!trimmed) return;
-  const existing = loadPromptHistory();
+  const existing = loadPromptHistory(scope);
   const deduped = [trimmed, ...existing.filter((p) => p !== trimmed)];
-  savePromptHistory(deduped);
+  savePromptHistory(deduped, scope);
 }
 
-export function mergePrompts(incoming: string[]): void {
+export function mergePrompts(incoming: string[], scope: HistoryScope = "analysis"): void {
   if (!incoming || incoming.length === 0) return;
-  const existing = loadPromptHistory();
+  const existing = loadPromptHistory(scope);
   const seen = new Set(existing);
   const merged = [...existing];
   for (const p of incoming) {
@@ -44,5 +50,5 @@ export function mergePrompts(incoming: string[]): void {
     merged.push(t);
     seen.add(t);
   }
-  savePromptHistory(merged);
+  savePromptHistory(merged, scope);
 }
