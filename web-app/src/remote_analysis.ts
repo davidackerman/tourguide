@@ -205,7 +205,20 @@ export async function postAnalysisRequest(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Remote analysis failed (${res.status}): ${text.slice(0, 400)}`);
+    // Try to pull out the FastAPI 'detail' field — that's the
+    // human-readable bit. Falls back to the raw body if the response
+    // isn't JSON or doesn't have a detail. Cap at 2000 chars so a
+    // truly enormous traceback doesn't blow up the alert / modal,
+    // but leave enough room for tensorstore's per-driver fallback
+    // chains (which run a few hundred chars each).
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { detail?: unknown };
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      /* not JSON; use raw text */
+    }
+    throw new Error(`Remote analysis failed (${res.status}): ${message.slice(0, 2000)}`);
   }
   const raw = (await res.json()) as RemoteResponse;
   if (raw.kind === "error") {

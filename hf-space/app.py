@@ -307,6 +307,20 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
             f"{drv}: {type(exc).__name__}: {exc}"
             for drv, exc in errors_by_driver.items()
         )
+        # Always log the full driver-by-driver chain — HF Spaces' default
+        # FastAPI handler swallows HTTPException details, so without this
+        # the user has no way to see the real reason zarr2 failed (only
+        # the abbreviated form that fits in their alert dialog).
+        log.error(
+            "tensorstore failed url=%s scalePath=%r drivers_tried=%s",
+            url,
+            layer.scalePath,
+            per_driver,
+        )
+        # Also log each error's traceback in case the message string
+        # itself dropped useful context.
+        for drv, exc in errors_by_driver.items():
+            log.exception("tensorstore driver=%s failed: %s", drv, exc, exc_info=exc)
         raise HTTPException(
             status_code=400,
             detail=f"tensorstore failed to open {url} path={layer.scalePath!r}; tried both drivers — {per_driver}",
