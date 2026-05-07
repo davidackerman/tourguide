@@ -3,32 +3,6 @@ export interface LLMMessage {
   content: string;
 }
 
-// Per-model Gemini usage counters live in localStorage so daily counts
-// survive page reloads. Google resets RPD at Pacific midnight, so we
-// roll over our own counter on the same boundary.
-const GEMINI_USAGE_KEY = "tourguide.geminiUsage.v1";
-type GeminiUsageStore = Record<string, GeminiUsageEntry>;
-interface GeminiUsageEntry {
-  date: string; // YYYY-MM-DD in Pacific time
-  dayCount: number;
-  recentMs: number[]; // recent request timestamps (last ~90s)
-  // Token usage harvested from generateContent's usageMetadata.
-  // recentTokens are timestamp+count pairs in the same 90s window
-  // used for RPM tracking, so we can compute live TPM. dayTokens is
-  // the cumulative total today (informational; Google's TPM cap is
-  // per-minute, not per-day).
-  recentTokens?: Array<[ts: number, tokens: number]>;
-  dayTokens?: number;
-}
-function pacificDateString(): string {
-  // 'en-CA' yields YYYY-MM-DD which is what we want for date comparison.
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
 
 export interface LLMCompleteOptions {
   temperature?: number;
@@ -352,100 +326,6 @@ export class GeminiBackend implements LLMBackend {
   // surface it as "wait Ns before retrying".
   static lastRetryDelaySeconds: number | undefined;
 
-  // Persistent per-model usage tracking so the user can see how many
-  // requests they've burned against today's free-tier quota *from
-  // this browser*. Google doesn't expose usage via a public API, so
-  // we maintain our own counts in localStorage. Resets at Pacific
-  // midnight (where Google's RPD counter rolls over) plus a
-  // sliding-window list of timestamps for RPM tracking.
-  static recordUsage(modelId: string): void {
-    if (typeof localStorage === "undefined") return;
-    try {
-      const today = pacificDateString();
-      const raw = localStorage.getItem(GEMINI_USAGE_KEY);
-      const data = raw ? (JSON.parse(raw) as GeminiUsageStore) : {};
-      const entry = data[modelId] ?? {
-        date: today,
-        dayCount: 0,
-        recentMs: [],
-        recentTokens: [],
-        dayTokens: 0,
-      };
-      // Roll over at PT midnight.
-      if (entry.date !== today) {
-        entry.date = today;
-        entry.dayCount = 0;
-        entry.recentMs = [];
-        entry.recentTokens = [];
-        entry.dayTokens = 0;
-      }
-      const now = Date.now();
-      entry.dayCount += 1;
-      // Keep the last 90 seconds of timestamps for RPM display
-      // (60s plus a safety cushion for clock skew).
-      entry.recentMs = [...entry.recentMs, now].filter((t) => now - t < 90_000);
-      data[modelId] = entry;
-      localStorage.setItem(GEMINI_USAGE_KEY, JSON.stringify(data));
-    } catch {
-      /* localStorage full / disabled — best-effort */
-    }
-  }
-
-  // Record token usage harvested from a generateContent response's
-  // usageMetadata block. Called after we successfully parse a response.
-  // Tokens get folded into both the cumulative day total and a sliding
-  // window for live TPM display.
-  static recordTokens(modelId: string, tokens: number): void {
-    if (typeof localStorage === "undefined" || !Number.isFinite(tokens) || tokens <= 0) return;
-    try {
-      const today = pacificDateString();
-      const raw = localStorage.getItem(GEMINI_USAGE_KEY);
-      const data = raw ? (JSON.parse(raw) as GeminiUsageStore) : {};
-      const entry = data[modelId];
-      if (!entry || entry.date !== today) return; // recordUsage runs first; if not, nothing to attach to
-      const now = Date.now();
-      entry.dayTokens = (entry.dayTokens ?? 0) + tokens;
-      entry.recentTokens = [...(entry.recentTokens ?? []), [now, tokens] as [number, number]].filter(
-        ([t]) => now - t < 90_000,
-      );
-      data[modelId] = entry;
-      localStorage.setItem(GEMINI_USAGE_KEY, JSON.stringify(data));
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  static getUsage(modelId: string): {
-    rpdUsed: number;
-    rpmUsed: number;
-    tpmUsed: number;
-    dayTokens: number;
-  } {
-    const empty = { rpdUsed: 0, rpmUsed: 0, tpmUsed: 0, dayTokens: 0 };
-    if (typeof localStorage === "undefined") return empty;
-    try {
-      const today = pacificDateString();
-      const raw = localStorage.getItem(GEMINI_USAGE_KEY);
-      if (!raw) return empty;
-      const data = JSON.parse(raw) as GeminiUsageStore;
-      const entry = data[modelId];
-      if (!entry || entry.date !== today) return empty;
-      const now = Date.now();
-      const rpmUsed = entry.recentMs.filter((t) => now - t < 60_000).length;
-      const tpmUsed = (entry.recentTokens ?? [])
-        .filter(([t]) => now - t < 60_000)
-        .reduce((sum, [, n]) => sum + n, 0);
-      return {
-        rpdUsed: entry.dayCount,
-        rpmUsed,
-        tpmUsed,
-        dayTokens: entry.dayTokens ?? 0,
-      };
-    } catch {
-      return empty;
-    }
-  }
-
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
     const useStream = !!options.onToken;
     const action = useStream ? "streamGenerateContent?alt=sse&key=" : "generateContent?key=";
@@ -479,7 +359,6 @@ export class GeminiBackend implements LLMBackend {
       body.systemInstruction = { parts: [{ text: systemParts.join("\n\n") }] };
     }
     GeminiBackend.requestCount += 1;
-    GeminiBackend.recordUsage(this.model);
     let res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -493,17 +372,12 @@ export class GeminiBackend implements LLMBackend {
       // Daily-quota 429s come back with retryDelay ≈ 0s — the wait won't
       // help, but we still surface the message clearly.
       const text = await res.text();
-      // Google's 429 body includes the actual quota limits — harvest
-      // them so the next session has accurate numbers even if our
-      // static map drifts.
-      learnLimitsFrom429(this.model, text);
       const delaySec = parseRetryDelaySeconds(text);
       GeminiBackend.lastRetryDelaySeconds = delaySec;
       if (delaySec !== undefined && delaySec > 0 && delaySec <= 60) {
         options.onToken?.("", `Rate-limited; waiting ${delaySec}s and retrying…`);
         await new Promise((r) => setTimeout(r, delaySec * 1000 + 250));
         GeminiBackend.requestCount += 1;
-        GeminiBackend.recordUsage(this.model);
         res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -512,7 +386,6 @@ export class GeminiBackend implements LLMBackend {
         });
         if (!res.ok) {
           const retryText = await res.text();
-          if (res.status === 429) learnLimitsFrom429(this.model, retryText);
           throw new Error(formatQuotaError(res.status, retryText, delaySec));
         }
       } else {
@@ -525,13 +398,9 @@ export class GeminiBackend implements LLMBackend {
     if (!useStream) {
       const data = (await res.json()) as {
         candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-        usageMetadata?: { totalTokenCount?: number; promptTokenCount?: number; candidatesTokenCount?: number };
       };
       const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
       if (!text) throw new Error("Gemini returned empty response");
-      // Record real Google-reported token usage for the TPM bar.
-      const total = data.usageMetadata?.totalTokenCount;
-      if (total !== undefined) GeminiBackend.recordTokens(this.model, total);
       return text;
     }
     const reader = res.body?.getReader();
@@ -539,7 +408,6 @@ export class GeminiBackend implements LLMBackend {
     const decoder = new TextDecoder();
     let buffer = "";
     let accumulated = "";
-    let lastUsageTotal: number | undefined;
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -553,17 +421,11 @@ export class GeminiBackend implements LLMBackend {
         try {
           const chunk = JSON.parse(json) as {
             candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-            usageMetadata?: { totalTokenCount?: number };
           };
           const t = chunk.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
           if (t) {
             accumulated += t;
             options.onToken?.(t, accumulated);
-          }
-          // Gemini emits usageMetadata cumulatively in each SSE chunk;
-          // the last seen value is the final total for the request.
-          if (chunk.usageMetadata?.totalTokenCount !== undefined) {
-            lastUsageTotal = chunk.usageMetadata.totalTokenCount;
           }
         } catch {
           /* ignore partial-JSON SSE noise */
@@ -571,7 +433,6 @@ export class GeminiBackend implements LLMBackend {
       }
     }
     if (!accumulated) throw new Error("Gemini returned empty stream");
-    if (lastUsageTotal !== undefined) GeminiBackend.recordTokens(this.model, lastUsageTotal);
     return accumulated;
   }
 
@@ -591,98 +452,6 @@ export interface GeminiModelInfo {
   description?: string;
   // True if this model supports the generateContent action we use.
   supportsGenerateContent: boolean;
-  // Free-tier rate limits, when known. NOT returned by the API —
-  // hand-curated by id prefix below. Optional because the map will
-  // miss freshly-released models until updated.
-  rpm?: number;
-  tpm?: number;
-  rpd?: number;
-}
-
-// Hand-curated free-tier limits, sourced from real AI Studio dashboards.
-// Google has *aggressively* cut 2.5-series quotas in 2026 — what was
-// 1000 RPD became 500, then 250, then 20. The generous limits now live
-// only on 3.x preview models. Keys are id prefixes; longest match wins.
-// When the user hits a 429, learnLimitsFrom429 below reads the actual
-// quota out of the error body and updates this map at runtime, so a
-// stale entry corrects itself after one 429.
-const KNOWN_GEMINI_FREE_TIER: Record<
-  string,
-  { rpm?: number; tpm?: number; rpd?: number }
-> = {
-  // Verified 2026-05-07 from a free-tier user's dashboard.
-  "gemini-3.1-flash-lite-preview": { rpm: 15, tpm: 250_000, rpd: 500 },
-  "gemini-3.1-flash":               { rpm: 10, tpm: 250_000 },           // RPD unknown
-  "gemini-3.1-pro":                 { rpm: 5,  tpm: 250_000 },           // RPD unknown
-  "gemini-3-flash":                 { rpm: 10, tpm: 250_000 },
-  "gemini-3-pro":                   { rpm: 5,  tpm: 250_000 },
-  "gemini-2.5-flash-lite":          { rpm: 10, tpm: 250_000, rpd: 20 },
-  "gemini-2.5-flash":               { rpm: 5,  tpm: 250_000, rpd: 20 },
-  "gemini-2.5-pro":                 { rpm: 5,  tpm: 250_000, rpd: 20 },
-  // Older 2.0 series — limits unknown / likely similar to 2.5.
-};
-
-const LEARNED_GEMINI_LIMITS_KEY = "tourguide.geminiLearnedLimits.v1";
-
-// At runtime we accumulate observed limits from 429 error bodies. They
-// override the static map entries (Google can change these without
-// notice). Persisted to localStorage so they survive reloads.
-function loadLearnedLimits(): Record<string, { rpm?: number; tpm?: number; rpd?: number }> {
-  if (typeof localStorage === "undefined") return {};
-  try {
-    return JSON.parse(localStorage.getItem(LEARNED_GEMINI_LIMITS_KEY) ?? "{}");
-  } catch {
-    return {};
-  }
-}
-
-function saveLearnedLimits(map: Record<string, { rpm?: number; tpm?: number; rpd?: number }>): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(LEARNED_GEMINI_LIMITS_KEY, JSON.stringify(map));
-  } catch {
-    /* best-effort */
-  }
-}
-
-function lookupKnownLimits(id: string): { rpm?: number; tpm?: number; rpd?: number } {
-  // Merge: longest-prefix entry from the static map, overridden by any
-  // learned values from 429s for that model.
-  const candidates = Object.keys(KNOWN_GEMINI_FREE_TIER).filter((k) => id.startsWith(k));
-  candidates.sort((a, b) => b.length - a.length);
-  const fromStatic = candidates.length > 0 ? KNOWN_GEMINI_FREE_TIER[candidates[0]] : {};
-  const learned = loadLearnedLimits()[id] ?? {};
-  return { ...fromStatic, ...learned };
-}
-
-// Pull observed quota limits out of a 429 body. Google's QuotaFailure
-// detail looks like:
-//   { violations: [{ quotaId: '...PerMinute...', quotaValue: '15' }] }
-// Multiple violations can appear (RPM + RPD bumped together). Returns
-// a partial { rpm, rpd, tpm } on success.
-export function learnLimitsFrom429(modelId: string, body: string): void {
-  let parsed: { error?: { details?: Array<{ "@type"?: string; violations?: Array<{ quotaId?: string; quotaValue?: string }> }> } };
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return;
-  }
-  const update: { rpm?: number; rpd?: number; tpm?: number } = {};
-  for (const detail of parsed.error?.details ?? []) {
-    if (!detail["@type"]?.includes("QuotaFailure")) continue;
-    for (const v of detail.violations ?? []) {
-      const limit = Number(v.quotaValue);
-      if (!Number.isFinite(limit) || limit <= 0) continue;
-      const id = v.quotaId ?? "";
-      if (/PerMinute|PerMin\b|RPM/i.test(id)) update.rpm = limit;
-      else if (/PerDay|RPD/i.test(id)) update.rpd = limit;
-      else if (/Tokens.*PerMinute|TPM/i.test(id)) update.tpm = limit;
-    }
-  }
-  if (Object.keys(update).length === 0) return;
-  const all = loadLearnedLimits();
-  all[modelId] = { ...(all[modelId] ?? {}), ...update };
-  saveLearnedLimits(all);
 }
 
 // Fetch the list of Gemini models the given key can access. Filters
@@ -717,15 +486,11 @@ export async function listGeminiModels(apiKey: string): Promise<GeminiModelInfo[
     if (!supportsGenerateContent) continue;
     // Skip Gemini 1.x — long retired, just clutter.
     if (/^gemini-1\./i.test(id) || /^chat-bison/i.test(id) || /^text-bison/i.test(id)) continue;
-    const limits = lookupKnownLimits(id);
     out.push({
       id,
       displayName: m.displayName ?? id,
       description: m.description,
       supportsGenerateContent: true,
-      rpm: limits.rpm,
-      tpm: limits.tpm,
-      rpd: limits.rpd,
     });
   }
   // Sort: newest major version first, then 'flash-lite' before 'flash'
@@ -819,7 +584,11 @@ export const DEFAULT_ANALYSIS_BACKEND = "https://ackermand-tourguide-analysis.hf
 const DEFAULT_SETTINGS: Settings = {
   backend: "none",
   geminiApiKey: "",
-  geminiModel: "gemini-2.5-flash-lite",
+  // 2026-05-07: 3.1-flash-lite-preview had the most generous free
+  // tier (15 RPM, 500 RPD) — the 2.5 series got crushed to ~20 RPD.
+  // Users can switch via Settings → Refresh once Google moves the
+  // generous limits elsewhere.
+  geminiModel: "gemini-3.1-flash-lite-preview",
   webllmModel: WEBLLM_MODELS[0].id,
   analysisBackendUrl: DEFAULT_ANALYSIS_BACKEND,
 };
