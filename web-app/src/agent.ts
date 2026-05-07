@@ -70,13 +70,28 @@ const SCHEMA_GUIDE = (db: DatasetDB): string => {
   return `SQL tables (THIS is the truth — table and column names below are what actually exist; never invent or copy from examples):\n${tableLines}\n\nPython DataFrames:\n${dataframes}\n\nPre-extracted numpy arrays (USE THESE for spatial / scipy work — no need to convert from DataFrame):\n${numpy}`;
 };
 
+const LAYER_GUIDE = (d: DatasetDescriptor): string => {
+  if (d.layers.length === 0) return "No layers loaded.";
+  const lines = d.layers.map((l) => {
+    const sourceList = Array.isArray(l.source) ? l.source : [l.source];
+    const kind = sourceList[0]?.match(/^(zarr2?|zarr3|n5|precomputed|graphene)/)?.[1] ?? "url";
+    const cls = l.organelle_class ? ` class=${l.organelle_class}` : "";
+    return `  "${l.name}"  type=${l.type}  source=${kind}${cls}`;
+  });
+  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info):\n${lines.join("\n")}`;
+};
+
 const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): string => `
 You are the agent for a 3D microscopy viewer. You respond to user questions by calling one tool at a time.
 
-${d ? `DATASET: ${d.display_name}  (voxel size: ${d.voxel_size_nm.join(" × ")} nm)` : ""}
+${d ? `DATASET: ${d.display_name}  (default voxel size: ${d.voxel_size_nm.join(" × ")} nm — individual layers may differ; use describe_dataset to confirm)` : ""}
 COORDINATES: ALL positions everywhere — CSV com_x_nm / com_y_nm / com_z_nm columns, fly_to inputs, the viewer's display — are in NANOMETERS in Neuroglancer's reference frame. Pass nm values directly; do NOT convert to voxels and do NOT add the layer's offset (already baked in).
 
+${d ? LAYER_GUIDE(d) : ""}
+
 ${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — only answer() and done() are useful."}
+
+NEVER GUESS DATASET PROPERTIES. If the user asks about a layer's resolution / scale / shape / dtype / available downsamplings, call describe_dataset(layer_name) and answer from its return value. Never invent numbers like "1 × 1 × 1 nm" — when uncertain, say so or call describe_dataset.
 
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
@@ -85,6 +100,14 @@ ON EACH TURN, respond with a single JSON object describing one tool call:
 NO prose, NO markdown fences — only the JSON object.
 
 TOOLS:
+
+  describe_dataset(layer_name?: string)
+    Returns information about loaded Neuroglancer layers. Without a name,
+    returns a summary of every layer (name, type, source). With a name,
+    returns scale-level detail for that layer: shape, voxel_size_nm
+    (per-axis, in physical units), offset_nm, available scales, and
+    approximate byte size at each scale. Use this whenever the user
+    asks about resolution, dimensions, or what's loaded — never guess.
 
   run_sql(sql: string)
     Run a SELECT query against the organelle DB. Returns up to 50 rows.
@@ -678,6 +701,76 @@ function registerLayer(d: DatasetDescriptor | null, layer: DatasetLayer): void {
   else d.layers.push(layer);
 }
 
+// describe_dataset — list loaded layers (no arg) or fetch per-layer scale
+// info (with name). The summary form is cheap; the per-layer form runs
+// AnalysisClient.inspect, which fetches zarr metadata. Mirrors the same
+// logic Custom Analysis uses for its scale picker so the answers line up.
+async function execDescribeDataset(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<unknown> {
+  if (!ctx.descriptor) throw new Error("No dataset loaded");
+  const name = args.layer_name !== undefined ? String(args.layer_name).trim() : "";
+
+  if (!name) {
+    // Summary: enough for the model to pick a layer and call back with
+    // a name for scale detail. Keep it terse — this returns into the
+    // agent context on every describe_dataset() call.
+    return {
+      dataset: ctx.descriptor.display_name,
+      default_voxel_size_nm: ctx.descriptor.voxel_size_nm,
+      layers: ctx.descriptor.layers.map((l) => {
+        const sourceList = Array.isArray(l.source) ? l.source : [l.source];
+        return {
+          name: l.name,
+          type: l.type,
+          organelle_class: l.organelle_class ?? null,
+          source_kind: sourceList[0]?.match(/^(zarr2?|zarr3|n5|precomputed|graphene)/)?.[1] ?? "url",
+          inspectable: isZarrSource(l.source),
+        };
+      }),
+    };
+  }
+
+  const layer = ctx.descriptor.layers.find((l) => l.name === name);
+  if (!layer) {
+    const known = ctx.descriptor.layers.map((l) => l.name).join(", ");
+    throw new Error(`No layer named '${name}'. Loaded layers: ${known || "(none)"}.`);
+  }
+  if (!isZarrSource(layer.source)) {
+    return {
+      name: layer.name,
+      type: layer.type,
+      source: layer.source,
+      note: "Source is not a zarr — no scale-level metadata available. Voxel size unknown without a per-format inspector.",
+    };
+  }
+
+  ctx.callbacks.onProgress?.(`Inspecting layer '${name}'…`);
+  const client = new AnalysisClient();
+  try {
+    const url = normalizeZarrUrl(layer.source);
+    const insp = await client.inspect(url, ctx.descriptor.voxel_size_nm);
+    return {
+      name: layer.name,
+      type: layer.type,
+      source_url: url,
+      axes: insp.axes.map((a) => a.name),
+      is_multiscale: insp.isMultiscale,
+      scales: insp.scales.map((s) => ({
+        path: s.path,
+        shape: s.shape,
+        voxel_size_nm: s.voxelNm,
+        offset_nm: s.offsetNm,
+        downsample: s.downsample,
+        approx_bytes: s.approxBytes,
+      })),
+    };
+  } finally {
+    client.terminate();
+  }
+}
+
 async function execAnswer(
   args: Record<string, unknown>,
   ctx: AgentContext,
@@ -816,6 +909,7 @@ const TOOL_EXECUTORS: Record<
   string,
   (args: Record<string, unknown>, ctx: AgentContext) => Promise<unknown>
 > = {
+  describe_dataset: execDescribeDataset,
   run_sql: execRunSql,
   run_python: execRunPython,
   python_on_layers: execPythonOnLayers,
@@ -1035,7 +1129,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       messages.push({ role: "assistant", content: JSON.stringify(call) });
       messages.push({
         role: "user",
-        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, run_python, python_on_layers, fly_to, highlight_segments, make_plot, answer, done.`,
+        content: `Error: tool "${call.tool}" does not exist. Pick from: describe_dataset, run_sql, run_python, python_on_layers, fly_to, highlight_segments, make_plot, answer, done.`,
       });
       continue;
     }
