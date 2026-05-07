@@ -201,12 +201,31 @@ function guardSqlReadOnly(sql: string): void {
   if (banned.test(sql)) throw new Error(`SQL must be SELECT only`);
 }
 
+// Accept a code-like argument under any of the common key names a
+// model might pick (python, code, script, source, query, sql), and
+// stitch back arrays-of-lines that some models emit instead of a
+// single string. Returns "" if nothing usable is found.
+function coerceCodeArg(args: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = args[k];
+    if (v === undefined || v === null) continue;
+    if (typeof v === "string") return v.trim();
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) {
+      return (v as string[]).join("\n").trim();
+    }
+    // Last-ditch: stringify whatever it is. Only useful if the model
+    // wrapped the code in {body: "..."} or similar.
+    return String(v).trim();
+  }
+  return "";
+}
+
 async function execRunSql(
   args: Record<string, unknown>,
   ctx: AgentContext,
 ): Promise<{ columns: string[]; rows: unknown[][] }> {
   if (!ctx.db) throw new Error("No database loaded");
-  const sql = String(args.sql ?? "").trim();
+  const sql = coerceCodeArg(args, ["sql", "query", "statement", "code"]);
   if (!sql) throw new Error("run_sql requires 'sql'");
   guardSqlReadOnly(sql);
   const limitedSql = /\blimit\b/i.test(sql) ? sql : `${sql.replace(/;$/, "")} LIMIT 50`;
@@ -269,7 +288,7 @@ async function execMakePlot(
   ctx: AgentContext,
 ): Promise<{ rendered: boolean }> {
   if (!ctx.db) throw new Error("No database loaded");
-  const code = String(args.python ?? args.code ?? "").trim();
+  const code = coerceCodeArg(args, ["python", "code", "script", "source", "body"]);
   if (!code) throw new Error("make_plot requires 'python'");
   const title = args.title !== undefined ? String(args.title) : undefined;
   const explanation = args.explanation !== undefined ? String(args.explanation) : undefined;
@@ -316,7 +335,7 @@ async function execRunPython(
   ctx: AgentContext,
 ): Promise<{ stdout: string; result?: string }> {
   if (!ctx.db) throw new Error("No database loaded");
-  const code = String(args.python ?? args.code ?? "").trim();
+  const code = coerceCodeArg(args, ["python", "code", "script", "source", "body"]);
   if (!code) throw new Error("run_python requires 'python'");
 
   ctx.callbacks.onProgress?.("Loading Pyodide…");
@@ -464,8 +483,14 @@ function synthesizeErrorHint(
     if (sql.length === 0) {
       return `run_sql expects {"sql": "SELECT ..."}.`;
     }
+    if (lower.includes("requires 'sql'")) {
+      return `Pass the SQL under the key "sql" — e.g. {"tool": "run_sql", "args": {"sql": "SELECT * FROM mito LIMIT 10"}}. Don't use "query" / "statement".`;
+    }
   }
   if (tool === "run_python") {
+    if (lower.includes("requires 'python'")) {
+      return `Pass the code under the key "python" — e.g. {"tool": "run_python", "args": {"python": "df_mitochondria['volume_nm_3'].mean()"}}. Don't use "code" / "script" — just "python".`;
+    }
     if (lower.includes("nameerror") || lower.includes("name '") && lower.includes("' is not defined")) {
       return `That variable doesn't exist. The DataFrames are named df_<organelle_class> (see the system prompt schema). np and pd are imported.`;
     }
