@@ -693,6 +693,27 @@ button {
 .webllm-sort-row {
   margin-bottom: 0.4rem;
 }
+
+.gemini-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.3rem 0;
+}
+.gemini-model-status {
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+.gemini-model-status.ok {
+  color: #7fd3a4;
+}
+.gemini-model-status.err {
+  color: #ff9d9d;
+}
+.gemini-model-status.pending {
+  color: var(--fg-dim);
+  font-style: italic;
+}
 .webllm-sort-label {
   display: inline-flex;
   align-items: center;

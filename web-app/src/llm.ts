@@ -443,6 +443,71 @@ export class GeminiBackend implements LLMBackend {
   }
 }
 
+export interface GeminiModelInfo {
+  // Model ID for the API path: 'models/<id>'. Strip the 'models/' prefix
+  // before passing to GeminiBackend's constructor.
+  id: string;
+  displayName: string;
+  description?: string;
+  // True if this model supports the generateContent action we use.
+  supportsGenerateContent: boolean;
+}
+
+// Fetch the list of Gemini models the given key can access. Filters
+// out anything that doesn't support generateContent (embeddings,
+// retired, image-only) so the dropdown doesn't show models the agent
+// can't actually use. Sorted with newest / lite-tier first.
+export async function listGeminiModels(apiKey: string): Promise<GeminiModelInfo[]> {
+  if (!apiKey) throw new Error("API key required to list models");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`models.list failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as {
+    models?: Array<{
+      name?: string;
+      displayName?: string;
+      description?: string;
+      supportedGenerationMethods?: string[];
+    }>;
+  };
+  const models = data.models ?? [];
+  const out: GeminiModelInfo[] = [];
+  for (const m of models) {
+    const fullName = m.name ?? "";
+    if (!fullName.startsWith("models/")) continue;
+    const id = fullName.slice("models/".length);
+    // Skip non-generateContent (embeddings, gemini-pro-vision-only, etc.).
+    const methods = m.supportedGenerationMethods ?? [];
+    const supportsGenerateContent = methods.includes("generateContent");
+    if (!supportsGenerateContent) continue;
+    // Skip Gemini 1.x — long retired, just clutter.
+    if (/^gemini-1\./i.test(id) || /^chat-bison/i.test(id) || /^text-bison/i.test(id)) continue;
+    out.push({
+      id,
+      displayName: m.displayName ?? id,
+      description: m.description,
+      supportsGenerateContent: true,
+    });
+  }
+  // Sort: newest major version first, then 'flash-lite' before 'flash'
+  // before 'pro' (cheapest tier first within a generation).
+  const tierRank = (id: string): number => {
+    if (/flash-lite/i.test(id)) return 0;
+    if (/flash/i.test(id)) return 1;
+    if (/pro/i.test(id)) return 2;
+    return 3;
+  };
+  const verRank = (id: string): number => {
+    const m = id.match(/gemini-(\d+(?:\.\d+)?)/i);
+    return m ? -parseFloat(m[1]) : 0; // descending
+  };
+  out.sort((a, b) => verRank(a.id) - verRank(b.id) || tierRank(a.id) - tierRank(b.id) || a.id.localeCompare(b.id));
+  return out;
+}
+
 // Pull retryDelay out of Gemini's structured 429 error body. Shape:
 //   { "error": { "details": [{ "@type": ".../RetryInfo", "retryDelay": "30s" }] } }
 // Returns undefined if the field isn't present.

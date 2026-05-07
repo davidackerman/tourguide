@@ -9,14 +9,73 @@ import {
   hasWebGPU,
   diagnoseWebGPU,
   DEFAULT_ANALYSIS_BACKEND,
+  listGeminiModels,
   type Settings,
   type LLMBackend,
   type WebLLMModelInfo,
+  type GeminiModelInfo,
 } from "./llm.js";
+
+const GEMINI_MODELS_CACHE_KEY = "tourguide.geminiModels.v1";
+
+interface CachedGeminiModels {
+  fetchedAt: number;
+  models: GeminiModelInfo[];
+}
+
+function loadCachedGeminiModels(): GeminiModelInfo[] | null {
+  try {
+    const raw = localStorage.getItem(GEMINI_MODELS_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as CachedGeminiModels;
+    // Auto-expire after 7 days so the dropdown picks up newly-released
+    // models without the user having to click Refresh manually.
+    if (Date.now() - cached.fetchedAt > 7 * 24 * 60 * 60 * 1000) return null;
+    return cached.models;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedGeminiModels(models: GeminiModelInfo[]): void {
+  try {
+    localStorage.setItem(
+      GEMINI_MODELS_CACHE_KEY,
+      JSON.stringify({ fetchedAt: Date.now(), models }),
+    );
+  } catch {
+    /* localStorage full or disabled — caching is best-effort */
+  }
+}
 import { waitForBackendReady, fetchHealth } from "./remote_analysis.js";
 
 export interface SettingsUIOptions {
   onChange: (backend: LLMBackend) => void;
+}
+
+// Build the <option> list for the Gemini dropdown. Falls back to a small
+// hardcoded set when no cache exists yet (first-run, before the user
+// has clicked Refresh) so the dropdown isn't empty. Once they click
+// Refresh, real model IDs from their key replace this stub.
+function renderGeminiModelOptions(currentId: string): string {
+  const cached = loadCachedGeminiModels();
+  const fallback: Array<{ id: string; label: string }> = [
+    { id: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite (default — click Refresh for current options)" },
+    { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
+    { id: "gemini-2.5-pro", label: "gemini-2.5-pro" },
+  ];
+  const list = cached && cached.length > 0
+    ? cached.map((m) => ({ id: m.id, label: `${m.id}${m.displayName && m.displayName !== m.id ? `  —  ${m.displayName}` : ""}` }))
+    : fallback;
+  // Make sure the user's currently-saved choice is in the list even if
+  // the API doesn't return it (e.g. they typed a custom ID once and it
+  // worked, but isn't in the standard listing).
+  if (currentId && !list.some((m) => m.id === currentId)) {
+    list.unshift({ id: currentId, label: `${currentId} (current)` });
+  }
+  return list
+    .map((m) => `<option value="${m.id}" ${currentId === m.id ? "selected" : ""}>${m.label}</option>`)
+    .join("");
 }
 
 export function openSettingsDialog(opts: SettingsUIOptions): void {
@@ -121,14 +180,13 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           </label>
           <label>
             Gemini model
-            <select data-field="geminiModel">
-              <option value="gemini-3.5-flash-lite" ${current.geminiModel === "gemini-3.5-flash-lite" ? "selected" : ""}>gemini-3.5-flash-lite (newest small model, verify availability)</option>
-              <option value="gemini-2.5-flash-lite" ${current.geminiModel === "gemini-2.5-flash-lite" ? "selected" : ""}>gemini-2.5-flash-lite (15 RPM · 250K TPM · 500 req/day free)</option>
-              <option value="gemini-2.5-flash" ${current.geminiModel === "gemini-2.5-flash" ? "selected" : ""}>gemini-2.5-flash (better quality, lower free RPD — check AI Studio)</option>
-              <option value="gemini-2.5-pro" ${current.geminiModel === "gemini-2.5-pro" ? "selected" : ""}>gemini-2.5-pro (highest quality, ~100 req/day free)</option>
-            </select>
+            <select data-field="geminiModel">${renderGeminiModelOptions(current.geminiModel)}</select>
           </label>
-          <p class="hint">Free-tier quotas tighten without notice — the most authoritative source is your <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio usage dashboard</a> (Rate limits by model). If the API rejects a model with <em>404 not found</em>, that ID isn't enabled on your key.</p>
+          <div class="gemini-model-actions">
+            <button class="btn-secondary btn-tiny" data-action="refresh-gemini-models" type="button">↻ Refresh available models</button>
+            <span class="gemini-model-status" data-gemini-model-status></span>
+          </div>
+          <p class="hint">List is fetched from your key's available models (cached 7 days). If a model 404s, the ID isn't enabled on your key — refresh to see what is. Free-tier quotas live on the <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio dashboard</a>.</p>
           <p class="hint">Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com</a>. Key is stored in your browser's localStorage only.</p>
           <button class="btn-secondary" data-action="test-gemini">Test key</button>
           <span class="test-result" data-test-result></span>
@@ -172,6 +230,56 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       if (previousSelection) webllmModelEl.value = previousSelection;
     });
   }
+
+  // Refresh-models button: list the user's available Gemini models via
+  // the API, cache the result, and re-render the dropdown so they can
+  // pick from real IDs instead of guessing. Useful when Google ships a
+  // new family (gemini-3, gemini-3-flash-lite, etc.) — no app update
+  // needed, just click Refresh.
+  const refreshGeminiBtn = overlay.querySelector<HTMLButtonElement>(
+    "[data-action='refresh-gemini-models']",
+  )!;
+  const refreshGeminiStatus = overlay.querySelector<HTMLSpanElement>(
+    "[data-gemini-model-status]",
+  )!;
+  const geminiModelEl = overlay.querySelector<HTMLSelectElement>(
+    `[data-field="geminiModel"]`,
+  )!;
+  refreshGeminiBtn.addEventListener("click", async () => {
+    const key = get("geminiApiKey").trim();
+    if (!key) {
+      refreshGeminiStatus.textContent = "Paste a key first";
+      refreshGeminiStatus.className = "gemini-model-status err";
+      return;
+    }
+    refreshGeminiStatus.textContent = "Fetching…";
+    refreshGeminiStatus.className = "gemini-model-status pending";
+    refreshGeminiBtn.disabled = true;
+    try {
+      const models = await listGeminiModels(key);
+      if (models.length === 0) {
+        refreshGeminiStatus.textContent = "0 models returned (key may be unscoped)";
+        refreshGeminiStatus.className = "gemini-model-status err";
+        return;
+      }
+      saveCachedGeminiModels(models);
+      const previous = geminiModelEl.value;
+      geminiModelEl.innerHTML = renderGeminiModelOptions(previous);
+      // If the previously-saved model wasn't in the new list, the
+      // dropdown will show the first option as selected — flag that.
+      if (!models.some((m) => m.id === previous)) {
+        refreshGeminiStatus.textContent = `✓ ${models.length} models · previous "${previous}" not in list`;
+      } else {
+        refreshGeminiStatus.textContent = `✓ ${models.length} models loaded`;
+      }
+      refreshGeminiStatus.className = "gemini-model-status ok";
+    } catch (err) {
+      refreshGeminiStatus.textContent = (err as Error).message.slice(0, 200);
+      refreshGeminiStatus.className = "gemini-model-status err";
+    } finally {
+      refreshGeminiBtn.disabled = false;
+    }
+  });
 
   const testBtn = overlay.querySelector<HTMLButtonElement>("[data-action='test-gemini']")!;
   const testResult = overlay.querySelector<HTMLSpanElement>("[data-test-result]")!;
