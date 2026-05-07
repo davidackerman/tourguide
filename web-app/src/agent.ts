@@ -138,6 +138,8 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     or pairwise distances. ORDER BY volume DESC LIMIT 1 is NOT
     "the densest mito".
 
+BUDGET: You have AT MOST 5 tool calls per question. Plan accordingly — most flows above finish in 2-4. If you can't reach an answer in 5, end with answer() explaining what's missing rather than running out silently.
+
 Pick the minimum tool calls needed. Never repeat the same query. If a tool errors, read the error and adjust.
 `.trim();
 
