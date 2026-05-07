@@ -221,6 +221,25 @@ function parseToolCall(raw: string): ToolCall {
   if (typeof parsed.tool === "string" && parsed.tool.trim().toLowerCase() === "done") {
     return { tool: "done", args: {} };
   }
+  // Models occasionally emit args as a bare string instead of an object —
+  // {tool: "run_sql", args: "SELECT ..."} rather than args: {sql: "..."}.
+  // Wrap it under the tool's primary key so the executor sees something
+  // usable. Other tools that take just a string (answer, fly_to with
+  // segmented args) keep their structure unchanged.
+  if (typeof parsed.args === "string") {
+    const primaryKey: Record<string, string> = {
+      run_sql: "sql",
+      run_python: "python",
+      make_plot: "python",
+      answer: "text",
+    };
+    const key = primaryKey[parsed.tool];
+    if (key) {
+      parsed.args = { [key]: parsed.args } as Record<string, unknown>;
+    } else {
+      parsed.args = {};
+    }
+  }
   parsed.args = parsed.args ?? {};
   return parsed;
 }
@@ -737,10 +756,18 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         // answer / make_plot are inherently terminal — no need for a separate done call.
         return;
       }
-      messages.push({
-        role: "user",
-        content: `tool_result: ${summarizeResult(result)}\n\nCall the next tool, or {"tool":"done"} when finished.`,
-      });
+      // After fly_to / highlight_segments, the user already sees the
+      // result on screen — push back a directive next-step message
+      // instead of the generic 'call next or done'. Without this,
+      // small models keep running more SQL queries trying to "do
+      // more", burning the iteration budget on work the user didn't
+      // ask for.
+      const isVisualDelivery =
+        call.tool === "fly_to" || call.tool === "highlight_segments";
+      const nextPrompt = isVisualDelivery
+        ? `tool_result: ${summarizeResult(result)}\n\nThe user has now seen the result on the viewer. End the turn now: emit {"tool":"done"} unless the user's question explicitly asked for additional info beyond what's visible.`
+        : `tool_result: ${summarizeResult(result)}\n\nCall the next tool, or {"tool":"done"} when finished.`;
+      messages.push({ role: "user", content: nextPrompt });
     } catch (err) {
       const errMsg = (err as Error).message;
       trace.error = errMsg;
