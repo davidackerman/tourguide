@@ -1013,12 +1013,22 @@ function synthesizeErrorHint(
       return `Python syntax error. Watch indentation; the harness wraps your code under a try block, so it must be valid as-is. If the error is about an unterminated string, you have an unescaped newline inside a string literal — split into multiple print() calls instead.`;
     }
     if (lower.includes("modulenotfounderror")) {
-      return `That package isn't in Pyodide's prebuilt list. Stick to numpy / pandas / matplotlib / scipy / scikit-learn / sympy / networkx / statsmodels — and DON'T call micropip.install or pyodide.loadPackage; the harness auto-loads anything you import. If your approach needs a missing package, use a different approach with the available ones.`;
+      return `That package isn't in Pyodide's prebuilt list. Stick to numpy / pandas / matplotlib / scipy / scikit-learn / sympy / networkx / statsmodels — and DON'T call micropip.install or pyodide.loadPackage; the harness auto-loads anything you import. If you really need a Seung-lab / heavyweight package (cc3d, fastmorph, kimimaro, zmesh, edt, fastremap), switch to python_on_layers with the Run-on-backend toggle on — those live on the HF Space. Otherwise pick a different approach with the available ones.`;
     }
   }
   if (tool === "make_plot") {
     if (lower.includes("did not produce a figure")) {
       return `Your code ran but no matplotlib figure was open. Make sure you call plt.figure() / plt.plot() / plt.bar() etc. — at least one plot command before the script ends.`;
+    }
+  }
+  if (tool === "python_on_layers") {
+    if (lower.includes("modulenotfounderror") || lower.includes("no module named")) {
+      const m = errMsg.match(/No module named ['"]?([\w.]+)['"]?/i);
+      const pkg = m ? m[1] : "<that module>";
+      return `Module '${pkg}' isn't available in this analysis runtime. Available locally (Pyodide): numpy, scipy, scikit-image, pandas, matplotlib. Available on the HF backend (Run-on-backend toggle in the Custom Analysis dialog): cc3d, fastmorph, fastremap, edt, kimimaro, zmesh — switch to the backend if you need those. To add a new package permanently, edit hf-space/requirements.txt in the project repo (or in the user's HF Space fork) and redeploy. Pick a different approach with the available libraries for now.`;
+    }
+    if (lower.includes("not a zarr source")) {
+      return `python_on_layers currently only loads zarr layers. Skeleton / precomputed-mesh inputs aren't yet supported through this tool.`;
     }
   }
   return "";
