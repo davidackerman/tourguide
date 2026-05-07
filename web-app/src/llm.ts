@@ -3,6 +3,26 @@ export interface LLMMessage {
   content: string;
 }
 
+// Per-model Gemini usage counters live in localStorage so daily counts
+// survive page reloads. Google resets RPD at Pacific midnight, so we
+// roll over our own counter on the same boundary.
+const GEMINI_USAGE_KEY = "tourguide.geminiUsage.v1";
+type GeminiUsageStore = Record<string, GeminiUsageEntry>;
+interface GeminiUsageEntry {
+  date: string; // YYYY-MM-DD in Pacific time
+  dayCount: number;
+  recentMs: number[]; // recent request timestamps (last ~90s)
+}
+function pacificDateString(): string {
+  // 'en-CA' yields YYYY-MM-DD which is what we want for date comparison.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 export interface LLMCompleteOptions {
   temperature?: number;
   maxTokens?: number;
@@ -325,6 +345,54 @@ export class GeminiBackend implements LLMBackend {
   // surface it as "wait Ns before retrying".
   static lastRetryDelaySeconds: number | undefined;
 
+  // Persistent per-model usage tracking so the user can see how many
+  // requests they've burned against today's free-tier quota *from
+  // this browser*. Google doesn't expose usage via a public API, so
+  // we maintain our own counts in localStorage. Resets at Pacific
+  // midnight (where Google's RPD counter rolls over) plus a
+  // sliding-window list of timestamps for RPM tracking.
+  static recordUsage(modelId: string): void {
+    if (typeof localStorage === "undefined") return;
+    try {
+      const today = pacificDateString();
+      const raw = localStorage.getItem(GEMINI_USAGE_KEY);
+      const data = raw ? (JSON.parse(raw) as GeminiUsageStore) : {};
+      const entry = data[modelId] ?? { date: today, dayCount: 0, recentMs: [] };
+      // Roll over at PT midnight.
+      if (entry.date !== today) {
+        entry.date = today;
+        entry.dayCount = 0;
+        entry.recentMs = [];
+      }
+      const now = Date.now();
+      entry.dayCount += 1;
+      // Keep the last 90 seconds of timestamps for RPM display
+      // (60s plus a safety cushion for clock skew).
+      entry.recentMs = [...entry.recentMs, now].filter((t) => now - t < 90_000);
+      data[modelId] = entry;
+      localStorage.setItem(GEMINI_USAGE_KEY, JSON.stringify(data));
+    } catch {
+      /* localStorage full / disabled — best-effort */
+    }
+  }
+
+  static getUsage(modelId: string): { rpdUsed: number; rpmUsed: number } {
+    if (typeof localStorage === "undefined") return { rpdUsed: 0, rpmUsed: 0 };
+    try {
+      const today = pacificDateString();
+      const raw = localStorage.getItem(GEMINI_USAGE_KEY);
+      if (!raw) return { rpdUsed: 0, rpmUsed: 0 };
+      const data = JSON.parse(raw) as GeminiUsageStore;
+      const entry = data[modelId];
+      if (!entry || entry.date !== today) return { rpdUsed: 0, rpmUsed: 0 };
+      const now = Date.now();
+      const rpmUsed = entry.recentMs.filter((t) => now - t < 60_000).length;
+      return { rpdUsed: entry.dayCount, rpmUsed };
+    } catch {
+      return { rpdUsed: 0, rpmUsed: 0 };
+    }
+  }
+
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
     const useStream = !!options.onToken;
     const action = useStream ? "streamGenerateContent?alt=sse&key=" : "generateContent?key=";
@@ -358,6 +426,7 @@ export class GeminiBackend implements LLMBackend {
       body.systemInstruction = { parts: [{ text: systemParts.join("\n\n") }] };
     }
     GeminiBackend.requestCount += 1;
+    GeminiBackend.recordUsage(this.model);
     let res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -377,6 +446,7 @@ export class GeminiBackend implements LLMBackend {
         options.onToken?.("", `Rate-limited; waiting ${delaySec}s and retrying…`);
         await new Promise((r) => setTimeout(r, delaySec * 1000 + 250));
         GeminiBackend.requestCount += 1;
+        GeminiBackend.recordUsage(this.model);
         res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },

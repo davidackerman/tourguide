@@ -231,6 +231,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             Gemini model
             <select data-field="geminiModel">${renderGeminiModelOptions(current.geminiModel)}</select>
           </label>
+          <div class="gemini-usage" data-gemini-usage></div>
           <div class="gemini-model-actions">
             <button class="btn-secondary btn-tiny" data-action="refresh-gemini-models" type="button">↻ Refresh available models</button>
             <span class="gemini-model-status" data-gemini-model-status></span>
@@ -297,6 +298,52 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   const geminiSortEl = overlay.querySelector<HTMLSelectElement>(
     `[data-field="geminiSort"]`,
   );
+  const geminiUsageEl = overlay.querySelector<HTMLDivElement>("[data-gemini-usage]")!;
+
+  // Render the "X / Y today" line under the model dropdown for the
+  // currently-selected model. Pulls counts from GeminiBackend's
+  // localStorage tracker — accurate for this browser only; usage
+  // from other apps using the same key isn't visible.
+  const renderGeminiUsage = (): void => {
+    const id = geminiModelEl.value;
+    if (!id) {
+      geminiUsageEl.innerHTML = "";
+      return;
+    }
+    const { rpdUsed, rpmUsed } = GeminiBackend.getUsage(id);
+    // Look up known free-tier limits via the cached models list
+    // (which has them populated by listGeminiModels).
+    const cached = loadCachedGeminiModels();
+    const m = cached?.find((x) => x.id === id);
+    const rpd = m?.rpd;
+    const rpm = m?.rpm;
+    const cells: string[] = [];
+    if (rpm !== undefined) {
+      const pct = Math.min(100, (rpmUsed / rpm) * 100);
+      const cls = rpmUsed >= rpm ? "exceeded" : rpmUsed >= rpm * 0.8 ? "warn" : "ok";
+      cells.push(
+        `<div class="gemini-usage-cell ${cls}"><div class="gemini-usage-label">${rpmUsed}/${rpm} RPM</div><div class="gemini-usage-bar"><div style="width:${pct}%"></div></div></div>`,
+      );
+    } else {
+      cells.push(`<div class="gemini-usage-cell"><div class="gemini-usage-label">${rpmUsed} RPM (no known limit)</div></div>`);
+    }
+    if (rpd !== undefined) {
+      const pct = Math.min(100, (rpdUsed / rpd) * 100);
+      const cls = rpdUsed >= rpd ? "exceeded" : rpdUsed >= rpd * 0.8 ? "warn" : "ok";
+      cells.push(
+        `<div class="gemini-usage-cell ${cls}"><div class="gemini-usage-label">${rpdUsed}/${rpd} today</div><div class="gemini-usage-bar"><div style="width:${pct}%"></div></div></div>`,
+      );
+    } else {
+      cells.push(`<div class="gemini-usage-cell"><div class="gemini-usage-label">${rpdUsed} today (no known daily limit)</div></div>`);
+    }
+    geminiUsageEl.innerHTML = `
+      <div class="gemini-usage-row">${cells.join("")}</div>
+      <div class="gemini-usage-note">From this browser only. Resets at Pacific midnight (Google's RPD reset). Check <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio</a> for cross-device totals.</div>
+    `;
+  };
+  renderGeminiUsage();
+  geminiModelEl.addEventListener("change", renderGeminiUsage);
+
   if (geminiSortEl) {
     geminiSortEl.addEventListener("change", () => {
       const mode = geminiSortEl.value as "default" | "rpd" | "rpm";
@@ -304,6 +351,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       const previous = geminiModelEl.value;
       geminiModelEl.innerHTML = renderGeminiModelOptions(previous);
       if (previous) geminiModelEl.value = previous;
+      renderGeminiUsage();
     });
   }
   refreshGeminiBtn.addEventListener("click", async () => {
@@ -334,6 +382,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         refreshGeminiStatus.textContent = `✓ ${models.length} models loaded`;
       }
       refreshGeminiStatus.className = "gemini-model-status ok";
+      renderGeminiUsage();
     } catch (err) {
       refreshGeminiStatus.textContent = (err as Error).message.slice(0, 200);
       refreshGeminiStatus.className = "gemini-model-status err";

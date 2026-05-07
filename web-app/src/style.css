@@ -703,6 +703,53 @@ button {
 .gemini-sort-row {
   margin-bottom: 0.4rem;
 }
+
+.gemini-usage {
+  margin: 0.4rem 0;
+}
+.gemini-usage-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.gemini-usage-cell {
+  flex: 1 1 140px;
+  min-width: 140px;
+}
+.gemini-usage-label {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  margin-bottom: 0.2rem;
+}
+.gemini-usage-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.gemini-usage-bar > div {
+  height: 100%;
+  background: #7fd3a4;
+  transition: width 0.2s linear;
+}
+.gemini-usage-cell.warn .gemini-usage-bar > div {
+  background: #f7c948;
+}
+.gemini-usage-cell.exceeded .gemini-usage-bar > div {
+  background: #ff9d9d;
+}
+.gemini-usage-cell.warn .gemini-usage-label {
+  color: #f7c948;
+}
+.gemini-usage-cell.exceeded .gemini-usage-label {
+  color: #ff9d9d;
+}
+.gemini-usage-note {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin-top: 0.25rem;
+}
 .gemini-sort-label {
   display: inline-flex;
   align-items: center;
