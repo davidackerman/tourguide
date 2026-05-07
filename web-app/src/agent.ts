@@ -385,12 +385,16 @@ const TOOL_EXECUTORS: Record<
 
 // Translate raw SQLite / Pyodide errors into a short, directive hint
 // the model can act on. WebLLM small models in particular don't
-// recover from "unrecognized token" or "no such column" without one.
+// recover from "unrecognized token" or "no such column" without one
+// — and crucially, they can't re-read the schema in the system prompt
+// once it's pushed back in context. So for column / table errors we
+// reinject the actual schema as part of the hint.
 // Returns "" when no useful hint is available.
 function synthesizeErrorHint(
   tool: string,
   args: Record<string, unknown>,
   errMsg: string,
+  ctx: AgentContext,
 ): string {
   const lower = errMsg.toLowerCase();
   if (tool === "run_sql") {
@@ -401,11 +405,26 @@ function synthesizeErrorHint(
       // names — re-emphasize that they go between double quotes.
       return `Column names with special characters like '(', ')', '^' must be wrapped in double quotes: "volume_(nm^3)" not volume_(nm^3). Or use only the alphanumeric prefix if it's unique.`;
     }
-    if (lower.includes("no such column")) {
-      return `That column doesn't exist on this table. Check the schema in the system prompt for the exact column name (column names are case-sensitive when quoted).`;
+    if (lower.includes("no such column") && ctx.db) {
+      const colMatch = errMsg.match(/no such column[:\s]+([^\s,;]+)/i);
+      const bad = colMatch ? colMatch[1] : "that column";
+      // Try to figure out which table the SQL targeted so we can list
+      // ITS columns specifically (more focused than dumping every
+      // table). Falls back to listing all tables' columns if FROM
+      // can't be parsed.
+      const fromMatch = sql.match(/from\s+"?([a-zA-Z0-9_]+)"?/i);
+      const targetTable = fromMatch?.[1]?.toLowerCase();
+      const targets = targetTable
+        ? ctx.db.tables.filter((t) => t.table_name === targetTable)
+        : ctx.db.tables;
+      const schema = (targets.length > 0 ? targets : ctx.db.tables)
+        .map((t) => `"${t.table_name}": ${t.columns.join(", ")}`)
+        .join("\n");
+      return `Column ${bad} doesn't exist. The actual columns are:\n${schema}\nUse one of these names verbatim.`;
     }
-    if (lower.includes("no such table")) {
-      return `That table doesn't exist. Use one of the tables listed in the SQL tables section of the system prompt.`;
+    if (lower.includes("no such table") && ctx.db) {
+      const names = ctx.db.tables.map((t) => `"${t.table_name}"`).join(", ");
+      return `That table doesn't exist. Available tables: ${names}.`;
     }
     if (lower.includes("syntax error")) {
       return `SQL syntax error. Re-check the SELECT clause, table name, and any quoted identifiers. Note: SQLite dialect.`;
@@ -590,7 +609,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       // Don't offer 'done' as an option here at all; the model can
       // still emit it, but biasing toward retry-with-hint catches the
       // common 80%.
-      const hint = synthesizeErrorHint(call.tool, call.args ?? {}, errMsg);
+      const hint = synthesizeErrorHint(call.tool, call.args ?? {}, errMsg, ctx);
       messages.push({
         role: "user",
         content: `tool_error: ${errMsg}${hint ? `\n\nHint: ${hint}` : ""}\n\nFix the call and try again. If you've tried twice with no progress, call answer() to explain what's blocking you.`,
