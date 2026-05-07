@@ -493,6 +493,10 @@ export class GeminiBackend implements LLMBackend {
       // Daily-quota 429s come back with retryDelay ≈ 0s — the wait won't
       // help, but we still surface the message clearly.
       const text = await res.text();
+      // Google's 429 body includes the actual quota limits — harvest
+      // them so the next session has accurate numbers even if our
+      // static map drifts.
+      learnLimitsFrom429(this.model, text);
       const delaySec = parseRetryDelaySeconds(text);
       GeminiBackend.lastRetryDelaySeconds = delaySec;
       if (delaySec !== undefined && delaySec > 0 && delaySec <= 60) {
@@ -508,6 +512,7 @@ export class GeminiBackend implements LLMBackend {
         });
         if (!res.ok) {
           const retryText = await res.text();
+          if (res.status === 429) learnLimitsFrom429(this.model, retryText);
           throw new Error(formatQuotaError(res.status, retryText, delaySec));
         }
       } else {
@@ -594,33 +599,90 @@ export interface GeminiModelInfo {
   rpd?: number;
 }
 
-// Hand-curated free-tier limits as of 2026-05. Google has tightened
-// these multiple times this year — updates land here when reported.
-// Keys are ID prefixes (most-specific-first wins). When in doubt the
-// user's AI Studio dashboard is authoritative.
-//
-// Source: aistudio.google.com/usage 'Rate limits by model' panel.
-const KNOWN_GEMINI_FREE_TIER: Array<{
-  prefix: string;
-  rpm: number;
-  tpm: number;
-  rpd: number;
-}> = [
-  { prefix: "gemini-2.5-flash-lite", rpm: 15, tpm: 250_000, rpd: 500 },
-  { prefix: "gemini-2.5-flash",      rpm: 10, tpm: 250_000, rpd: 250 },
-  { prefix: "gemini-2.5-pro",        rpm: 5,  tpm: 250_000, rpd: 100 },
-  { prefix: "gemini-flash-lite",     rpm: 15, tpm: 250_000, rpd: 500 },
-  { prefix: "gemini-flash",          rpm: 10, tpm: 250_000, rpd: 250 },
-  { prefix: "gemini-pro",            rpm: 5,  tpm: 250_000, rpd: 100 },
-];
+// Hand-curated free-tier limits, sourced from real AI Studio dashboards.
+// Google has *aggressively* cut 2.5-series quotas in 2026 — what was
+// 1000 RPD became 500, then 250, then 20. The generous limits now live
+// only on 3.x preview models. Keys are id prefixes; longest match wins.
+// When the user hits a 429, learnLimitsFrom429 below reads the actual
+// quota out of the error body and updates this map at runtime, so a
+// stale entry corrects itself after one 429.
+const KNOWN_GEMINI_FREE_TIER: Record<
+  string,
+  { rpm?: number; tpm?: number; rpd?: number }
+> = {
+  // Verified 2026-05-07 from a free-tier user's dashboard.
+  "gemini-3.1-flash-lite-preview": { rpm: 15, tpm: 250_000, rpd: 500 },
+  "gemini-3.1-flash":               { rpm: 10, tpm: 250_000 },           // RPD unknown
+  "gemini-3.1-pro":                 { rpm: 5,  tpm: 250_000 },           // RPD unknown
+  "gemini-3-flash":                 { rpm: 10, tpm: 250_000 },
+  "gemini-3-pro":                   { rpm: 5,  tpm: 250_000 },
+  "gemini-2.5-flash-lite":          { rpm: 10, tpm: 250_000, rpd: 20 },
+  "gemini-2.5-flash":               { rpm: 5,  tpm: 250_000, rpd: 20 },
+  "gemini-2.5-pro":                 { rpm: 5,  tpm: 250_000, rpd: 20 },
+  // Older 2.0 series — limits unknown / likely similar to 2.5.
+};
+
+const LEARNED_GEMINI_LIMITS_KEY = "tourguide.geminiLearnedLimits.v1";
+
+// At runtime we accumulate observed limits from 429 error bodies. They
+// override the static map entries (Google can change these without
+// notice). Persisted to localStorage so they survive reloads.
+function loadLearnedLimits(): Record<string, { rpm?: number; tpm?: number; rpd?: number }> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    return JSON.parse(localStorage.getItem(LEARNED_GEMINI_LIMITS_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveLearnedLimits(map: Record<string, { rpm?: number; tpm?: number; rpd?: number }>): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(LEARNED_GEMINI_LIMITS_KEY, JSON.stringify(map));
+  } catch {
+    /* best-effort */
+  }
+}
 
 function lookupKnownLimits(id: string): { rpm?: number; tpm?: number; rpd?: number } {
-  // Longest-prefix match so 'gemini-2.5-flash-lite' beats 'gemini-2.5-flash'.
-  const sorted = [...KNOWN_GEMINI_FREE_TIER].sort((a, b) => b.prefix.length - a.prefix.length);
-  for (const entry of sorted) {
-    if (id.startsWith(entry.prefix)) return { rpm: entry.rpm, tpm: entry.tpm, rpd: entry.rpd };
+  // Merge: longest-prefix entry from the static map, overridden by any
+  // learned values from 429s for that model.
+  const candidates = Object.keys(KNOWN_GEMINI_FREE_TIER).filter((k) => id.startsWith(k));
+  candidates.sort((a, b) => b.length - a.length);
+  const fromStatic = candidates.length > 0 ? KNOWN_GEMINI_FREE_TIER[candidates[0]] : {};
+  const learned = loadLearnedLimits()[id] ?? {};
+  return { ...fromStatic, ...learned };
+}
+
+// Pull observed quota limits out of a 429 body. Google's QuotaFailure
+// detail looks like:
+//   { violations: [{ quotaId: '...PerMinute...', quotaValue: '15' }] }
+// Multiple violations can appear (RPM + RPD bumped together). Returns
+// a partial { rpm, rpd, tpm } on success.
+export function learnLimitsFrom429(modelId: string, body: string): void {
+  let parsed: { error?: { details?: Array<{ "@type"?: string; violations?: Array<{ quotaId?: string; quotaValue?: string }> }> } };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return;
   }
-  return {};
+  const update: { rpm?: number; rpd?: number; tpm?: number } = {};
+  for (const detail of parsed.error?.details ?? []) {
+    if (!detail["@type"]?.includes("QuotaFailure")) continue;
+    for (const v of detail.violations ?? []) {
+      const limit = Number(v.quotaValue);
+      if (!Number.isFinite(limit) || limit <= 0) continue;
+      const id = v.quotaId ?? "";
+      if (/PerMinute|PerMin\b|RPM/i.test(id)) update.rpm = limit;
+      else if (/PerDay|RPD/i.test(id)) update.rpd = limit;
+      else if (/Tokens.*PerMinute|TPM/i.test(id)) update.tpm = limit;
+    }
+  }
+  if (Object.keys(update).length === 0) return;
+  const all = loadLearnedLimits();
+  all[modelId] = { ...(all[modelId] ?? {}), ...update };
+  saveLearnedLimits(all);
 }
 
 // Fetch the list of Gemini models the given key can access. Filters

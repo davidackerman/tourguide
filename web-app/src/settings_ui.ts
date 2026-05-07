@@ -16,7 +16,10 @@ import {
   type GeminiModelInfo,
 } from "./llm.js";
 
-const GEMINI_MODELS_CACHE_KEY = "tourguide.geminiModels.v1";
+// v2: bumped 2026-05-07 after correcting free-tier limits. Old caches
+// had wrong RPD numbers (claimed 500 for 2.5-flash-lite which is now
+// actually 20); invalidating forces a re-fetch with the right limits.
+const GEMINI_MODELS_CACHE_KEY = "tourguide.geminiModels.v2";
 
 interface CachedGeminiModels {
   fetchedAt: number;
