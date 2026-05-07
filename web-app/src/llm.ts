@@ -583,7 +583,13 @@ export interface Settings {
 export const DEFAULT_ANALYSIS_BACKEND = "https://ackermand-tourguide-analysis.hf.space";
 
 const DEFAULT_SETTINGS: Settings = {
-  backend: "none",
+  // Gemini is the recommended path — works without setup beyond
+  // pasting an API key. Selecting it as the default doesn't enable AI
+  // on its own (backendFromSettings still returns NullBackend until
+  // the key is set), but it pre-checks the radio so the Settings
+  // dialog surfaces the key field directly instead of forcing a click
+  // through "None".
+  backend: "gemini",
   geminiApiKey: "",
   // 2026-05-07: 3.1-flash-lite-preview had the most generous free
   // tier (15 RPM, 500 RPD) — the 2.5 series got crushed to ~20 RPD.

@@ -206,6 +206,10 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   };
 
   const renderSlot = async (slot: LayerSlot): Promise<void> => {
+    // Variable name is auto-derived from the layer's organelle_class
+    // (or sanitized name) — no UI for it. Showing it as read-only text
+    // alongside the dropdowns lets the user know what to call it from
+    // Python without forcing a decision.
     slot.row.innerHTML = `
       <select data-slot-layer>
         ${zarrLayers
@@ -215,23 +219,32 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
           )
           .join("")}
       </select>
-      <input data-slot-var value="${escapeAttr(slot.varName)}" size="10" />
+      <span class="slot-var-label" data-slot-var-label>as <code>${escapeHtml(slot.varName)}</code></span>
       <select data-slot-scale><option>Loading…</option></select>
       <button class="btn-remove" data-action="remove" type="button">×</button>
     `;
+    const varLabel = slot.row.querySelector<HTMLElement>("[data-slot-var-label]")!;
     slot.row
       .querySelector<HTMLSelectElement>("[data-slot-layer]")!
       .addEventListener("change", async (e) => {
         const idx = Number((e.target as HTMLSelectElement).value);
         slot.layer = zarrLayers[idx];
+        // Re-derive the var name from the new layer, but skip our own
+        // slot in the uniqueness check so we don't drift to "_2" just
+        // because our previous name matches the new base.
+        const others = slots.filter((s) => s !== slot);
+        const base = (slot.layer.organelle_class ?? slot.layer.name).replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+        let n = base;
+        let i = 1;
+        while (others.some((s) => s.varName === n)) {
+          i += 1;
+          n = `${base}_${i}`;
+        }
+        slot.varName = n;
+        varLabel.innerHTML = `as <code>${escapeHtml(slot.varName)}</code>`;
         slot.inspection = undefined;
         slot.scaleIdx = undefined;
         await loadScales(slot);
-      });
-    slot.row
-      .querySelector<HTMLInputElement>("[data-slot-var]")!
-      .addEventListener("change", (e) => {
-        slot.varName = (e.target as HTMLInputElement).value.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
       });
     slot.row
       .querySelector<HTMLButtonElement>("[data-action='remove']")!
@@ -909,9 +922,6 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
 }
 
 // Push a freshly-created layer into the live descriptor so downstream

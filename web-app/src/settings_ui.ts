@@ -104,84 +104,85 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <button class="modal-close" aria-label="Close">×</button>
       </header>
       <div class="modal-body">
-        <p class="hint">Two independent pieces of configuration, both optional. The app works without either one.</p>
-
-        <h3>Analysis backend</h3>
-        <div class="settings-section" data-section="analysis-backend">
-          <p class="hint">Where to run heavy analyses that don't fit in Pyodide's ~4 GB ceiling. Leave empty to disable the remote path (everything still runs locally in your browser).</p>
-          <div class="analysis-backend-fork-callout">
-            <strong>Recommended for real use:</strong> fork the Space.
-            The default URL points to a shared demo Space with limited
-            CPU + memory and possible cold starts; it's fine for trying
-            things out, not for sustained work.
-            <a class="btn-link" href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space →</a>
-            (~5 min, one-time). Paste the resulting URL below.
-            <br /><br />
-            <strong>Keeping your fork updated:</strong> on your Space's
-            <em>Files</em> tab on huggingface.co, click <em>"Sync with
-            upstream"</em> when an update is available. One click pulls
-            in the maintainer's latest <code>app.py</code>.
-          </div>
-          <label>
-            Backend URL
-            <input type="text" data-field="analysisBackendUrl" value="${escapeAttr(current.analysisBackendUrl)}" placeholder="${DEFAULT_ANALYSIS_BACKEND}" />
-          </label>
-          <div class="analysis-backend-row">
-            <button class="btn-secondary" data-action="test-analysis-backend">Test backend</button>
-            <span class="test-result" data-analysis-backend-result></span>
-          </div>
-        </div>
-
         <h3>AI backend</h3>
-        <p class="hint">AI unlocks plain-English queries and auto-generated plot/analysis code. Pick none, a local in-browser model, or Gemini.</p>
-        <div class="radio-group">
-          <label class="radio-row">
-            <input type="radio" name="backend" value="none" ${current.backend === "none" ? "checked" : ""}>
-            <span><strong>None</strong> — structured browser only</span>
-          </label>
-          <label class="radio-row">
-            <input type="radio" name="backend" value="webllm" ${current.backend === "webllm" ? "checked" : ""} ${webgpu ? "" : "disabled"}>
-            <span><strong>WebLLM (in-browser)</strong> — runs locally, no key ${webgpu ? "" : "<em>(needs WebGPU — Chrome/Edge/Safari 18+)</em>"}</span>
-          </label>
-          <label class="radio-row">
-            <input type="radio" name="backend" value="gemini" ${current.backend === "gemini" ? "checked" : ""}>
-            <span><strong>Gemini (cloud)</strong> — paste your API key</span>
-          </label>
-        </div>
-
-        <div class="settings-section" data-section="webllm">
-          <label>
-            WebLLM model
-            <select data-field="webllmModel">${webllmOptions}</select>
-          </label>
-          <p class="hint">Listed best-for-agent first — top entries handle multi-step SQL + Python reliably; lower entries are smaller / less code-tuned and may give up after one tool error. Sizes shown for download / VRAM planning. Model downloads to your browser cache on first use; subsequent loads are instant and fully offline.</p>
-          <div class="webgpu-diagnosis" data-webgpu-diagnosis>Checking WebGPU…</div>
-          <button class="btn-secondary" data-action="test-webllm">Load now (optional)</button>
-          <span class="test-result" data-webllm-result></span>
-          <div class="webllm-progress" data-webllm-progress hidden>
-            <div class="webllm-progress-text" data-webllm-progress-text></div>
-            <div class="webllm-progress-bar"><div data-webllm-progress-fill></div></div>
-          </div>
-        </div>
+        <p class="hint">AI unlocks plain-English queries and auto-generated plot / analysis code. Gemini is the recommended path — paste a free key and you're done.</p>
 
         <div class="settings-section" data-section="gemini">
+          <label class="radio-row gemini-default-row">
+            <input type="radio" name="backend" value="gemini" ${current.backend === "gemini" ? "checked" : ""}>
+            <span><strong>Gemini (cloud)</strong> — paste your API key below</span>
+          </label>
           <label>
             Gemini API key
-            <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="(paste your key here)" autocomplete="off" />
+            <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/app/apikey" autocomplete="off" />
           </label>
           <label>
             Gemini model
             <select data-field="geminiModel">${renderGeminiModelOptions(current.geminiModel)}</select>
           </label>
+          <p class="hint">Key is stored in your browser's localStorage only. As of 2026-05-07, <code>gemini-3.1-flash-lite-preview</code> had the most generous free tier (15 RPM · 500 req/day) — quotas change, see <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">your dashboard</a>.</p>
+          <button class="btn-secondary" data-action="test-gemini">Test key</button>
+          <span class="test-result" data-test-result></span>
+        </div>
+
+        <details class="settings-advanced">
+          <summary>Advanced — local WebLLM, analysis backend, model refresh</summary>
+
+          <h4>Other AI backends</h4>
+          <div class="radio-group">
+            <label class="radio-row">
+              <input type="radio" name="backend" value="none" ${current.backend === "none" ? "checked" : ""}>
+              <span><strong>None</strong> — structured browser only (disables the agent)</span>
+            </label>
+            <label class="radio-row">
+              <input type="radio" name="backend" value="webllm" ${current.backend === "webllm" ? "checked" : ""} ${webgpu ? "" : "disabled"}>
+              <span><strong>WebLLM (in-browser)</strong> — runs locally, no key ${webgpu ? "" : "<em>(needs WebGPU — Chrome/Edge/Safari 18+)</em>"}</span>
+            </label>
+          </div>
+
+          <div class="settings-section" data-section="webllm">
+            <label>
+              WebLLM model
+              <select data-field="webllmModel">${webllmOptions}</select>
+            </label>
+            <p class="hint">Listed best-for-agent first — top entries handle multi-step SQL + Python reliably; lower entries are smaller / less code-tuned. Model downloads to your browser cache on first use.</p>
+            <div class="webgpu-diagnosis" data-webgpu-diagnosis>Checking WebGPU…</div>
+            <button class="btn-secondary" data-action="test-webllm">Load now (optional)</button>
+            <span class="test-result" data-webllm-result></span>
+            <div class="webllm-progress" data-webllm-progress hidden>
+              <div class="webllm-progress-text" data-webllm-progress-text></div>
+              <div class="webllm-progress-bar"><div data-webllm-progress-fill></div></div>
+            </div>
+          </div>
+
+          <h4>Refresh Gemini model list</h4>
           <div class="gemini-model-actions">
             <button class="btn-secondary btn-tiny" data-action="refresh-gemini-models" type="button">↻ Refresh available models</button>
             <span class="gemini-model-status" data-gemini-model-status></span>
           </div>
-          <p class="hint">As of 2026-05-07, <code>gemini-3.1-flash-lite-preview</code> had the most generous free tier (15 RPM · 500 req/day). The 2.5 series was capped to ~20 req/day around then. Quotas change without notice — check your <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio dashboard</a> for current numbers. Refresh fetches the current available-models list from your key.</p>
-          <p class="hint">Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com</a>. Key is stored in your browser's localStorage only.</p>
-          <button class="btn-secondary" data-action="test-gemini">Test key</button>
-          <span class="test-result" data-test-result></span>
-        </div>
+
+          <h4>Analysis backend (heavy compute)</h4>
+          <div class="settings-section" data-section="analysis-backend">
+            <p class="hint">Where to run heavy analyses that don't fit in Pyodide's ~4 GB ceiling. Leave empty to disable the remote path (everything still runs locally).</p>
+            <div class="analysis-backend-fork-callout">
+              <strong>For real use:</strong> fork the Space.
+              The default URL points to a shared demo Space with limited
+              CPU + memory and possible cold starts.
+              <a class="btn-link" href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space →</a>
+              (~5 min, one-time). Paste the resulting URL below.
+              On your Space's <em>Files</em> tab, click <em>"Sync with
+              upstream"</em> for updates.
+            </div>
+            <label>
+              Backend URL
+              <input type="text" data-field="analysisBackendUrl" value="${escapeAttr(current.analysisBackendUrl)}" placeholder="${DEFAULT_ANALYSIS_BACKEND}" />
+            </label>
+            <div class="analysis-backend-row">
+              <button class="btn-secondary" data-action="test-analysis-backend">Test backend</button>
+              <span class="test-result" data-analysis-backend-result></span>
+            </div>
+          </div>
+        </details>
       </div>
       <div class="modal-footer">
         <button class="btn-link" data-action="show-welcome" type="button">Show welcome again</button>
