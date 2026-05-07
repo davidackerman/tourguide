@@ -57,9 +57,13 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
   // 'Show welcome again' sees their current state, not blank.
   const initialAi = settings.backend;
   const webgpu = hasWebGPU();
-  const webllmRecommended = [...WEBLLM_MODELS]
-    .sort((a, b) => b.recommended - a.recommended || a.sizeGB - b.sizeGB)
-    .slice(0, 4);
+  // Full list, ordered by agent suitability (recommended desc, size
+  // asc tiebreak) — same order Settings uses. The welcome modal had a
+  // top-4 cap which hid Llama / Qwen-3 / Gemma options the user might
+  // actually want; no reason to hide them here.
+  const webllmAll = [...WEBLLM_MODELS].sort(
+    (a, b) => b.recommended - a.recommended || a.sizeGB - b.sizeGB,
+  );
 
   overlay.innerHTML = `
     <div class="modal modal-welcome" role="dialog" aria-label="Welcome to tourguide">
@@ -116,7 +120,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
                   ${webgpu ? "" : "<em>(needs Chrome / Edge / Safari 18+)</em>"}
                 </p>
                 <select data-welcome-webllm-model ${webgpu ? "" : "disabled"}>
-                  ${webllmRecommended
+                  ${webllmAll
                     .map(
                       (m) =>
                         `<option value="${m.id}" ${settings.webllmModel === m.id ? "selected" : ""}>${webllmModelLabel(m)}</option>`,
