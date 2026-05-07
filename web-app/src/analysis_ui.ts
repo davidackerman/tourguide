@@ -75,21 +75,12 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             </div>
             <div class="analysis-layers-host" data-layers-host></div>
           </div>
-          <label data-global-labeled>
-            <span>Already labeled?</span>
-            <select data-labeled>
-              <option value="true" selected>Yes — values are segment ids</option>
-              <option value="false">No — run connected-components on mask</option>
-            </select>
-          </label>
           <label class="mesh-toggle" data-mesh-row>
             <input type="checkbox" data-make-meshes />
             <span>Generate 3D meshes (zmesh, backend only) <em data-mesh-hint class="hint" style="font-style:italic;opacity:0.75;"></em></span>
           </label>
         </div>
-        <div data-scales-host>
-          <p class="hint" data-inspect-status>Pick a layer (single-layer mode shows scales). With multiple layers checked, each layer auto-picks its coarsest scale that fits the budget.</p>
-        </div>
+        <p class="hint" data-inspect-status>Each checked layer's scale + labeled dropdowns appear inline above. Default scale is the coarsest one that fits the budget; defaults to "Yes — values are segment ids".</p>
         <div class="analysis-progress" data-progress hidden>
           <div class="progress-line" data-progress-text></div>
           <div class="progress-bar"><div class="progress-bar-fill" data-progress-bar></div></div>
@@ -110,8 +101,6 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
 
   const $ = <T extends HTMLElement>(sel: string): T => overlay.querySelector<T>(sel)!;
   const layersHost = $<HTMLDivElement>("[data-layers-host]");
-  const labeledSel = $<HTMLSelectElement>("[data-labeled]");
-  const scalesHost = $<HTMLDivElement>("[data-scales-host]");
   const inspectStatus = $<HTMLParagraphElement>("[data-inspect-status]");
   const progressEl = $<HTMLDivElement>("[data-progress]");
   const progressText = $<HTMLDivElement>("[data-progress-text]");
@@ -148,12 +137,22 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     if (nvox <= 512e6) return 4;
     return 8;
   };
+  // Mesh-downsample hint reflects whichever layer is the FIRST checked
+  // — heuristic that's simple and good enough; a more accurate hint
+  // would need to enumerate every checked layer's scale, which crowds
+  // the UI for marginal value.
   const refreshMeshHint = (): void => {
-    if (selectedScaleIdx == null || !currentInspection) {
+    const idxs = getCheckedLayerIdxs();
+    if (idxs.length === 0) {
       meshHint.textContent = "";
       return;
     }
-    const sc = currentInspection.scales[selectedScaleIdx];
+    const slot = layerSlots[idxs[0]];
+    if (!slot.inspection || slot.selectedScaleIdx == null) {
+      meshHint.textContent = "";
+      return;
+    }
+    const sc = slot.inspection.scales[slot.selectedScaleIdx];
     const f = chooseMeshDownsample(sc.shape);
     meshHint.textContent = f === 1
       ? "— meshes at full analyze resolution"
@@ -286,7 +285,9 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     sel.disabled = false;
     sel.onchange = (): void => {
       slot.selectedScaleIdx = Number(sel.value);
+      refreshMeshHint();
     };
+    refreshMeshHint();
   };
 
   // AnalysisClient runs a single shared worker — only one inspect or
@@ -341,29 +342,21 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     return job;
   };
 
-  // Toggle visibility of each row's controls block (scale + labeled
-  // dropdowns) based on how many layers are checked. Single-layer
-  // mode keeps them hidden so the big radio table + global 'Already
-  // labeled?' dropdown remain the source of truth; multi-layer mode
-  // shows the per-row controls inline AND hides the global labeled
-  // selector to avoid two competing controls.
-  const globalLabeledRow = overlay.querySelector<HTMLLabelElement>("[data-global-labeled]");
+  // Show each row's controls (scale + labeled dropdowns) whenever its
+  // checkbox is checked. Inspection runs lazily on first check and
+  // populates the scale dropdown when ready; the labeled dropdown is
+  // immediately usable.
   const refreshPerRowScalePickers = (): void => {
     const idxs = getCheckedLayerIdxs();
-    const useDropdowns = idxs.length >= 2;
     layersHost
       .querySelectorAll<HTMLDivElement>("[data-layer-controls]")
       .forEach((ctrls) => {
         const idx = Number(ctrls.dataset.layerControls);
-        const checked = idxs.includes(idx);
-        ctrls.hidden = !(useDropdowns && checked);
+        ctrls.hidden = !idxs.includes(idx);
       });
-    if (globalLabeledRow) globalLabeledRow.hidden = useDropdowns;
-    if (useDropdowns) {
-      // Kick off inspection for any newly-checked layer that we haven't
-      // probed yet. Already-inspected ones no-op.
-      idxs.forEach((idx) => void ensureInspected(idx));
-    }
+    // Kick off inspection for any newly-checked layer that we haven't
+    // probed yet. Already-inspected ones no-op.
+    idxs.forEach((idx) => void ensureInspected(idx));
   };
   const getCheckedLayerIdxs = (): number[] => {
     const out: number[] = [];
@@ -387,14 +380,6 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     setAllLayers(false);
     onLayerSelectionChange();
   });
-
-  // currentLayer / currentInspection / selectedScaleIdx are only
-  // used in single-layer mode (exactly one checkbox checked) — they
-  // drive the per-scale radio table. In multi-layer mode the scale
-  // selection is automatic per layer at run time.
-  let currentLayer: DatasetLayer | null = segLayers[0];
-  let currentInspection: LayerInspection | null = null;
-  let selectedScaleIdx: number | null = null;
 
   const close = (): void => {
     client.terminate();
@@ -422,158 +407,29 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     progressEl.hidden = true;
   };
 
-  const renderScales = (insp: LayerInspection): void => {
-    scalesHost.innerHTML = "";
-    if (insp.scales.length === 0) {
-      scalesHost.innerHTML = `<p class="hint warn">No scales found.</p>`;
-      return;
-    }
-    const hdr = document.createElement("p");
-    hdr.className = "hint";
-    hdr.textContent = insp.isMultiscale
-      ? `OME-Zarr multiscale pyramid detected (${insp.scales.length} scales). Coarser scales are faster but lower resolution.`
-      : "Single-scale zarr — only one resolution available.";
-    scalesHost.appendChild(hdr);
-
-    const tbl = document.createElement("table");
-    tbl.className = "analysis-scales-table";
-    tbl.innerHTML = `
-      <thead>
-        <tr>
-          <th></th>
-          <th>Path</th>
-          <th>Shape</th>
-          <th>Voxel (nm)</th>
-          <th>Offset (nm, xyz)</th>
-          <th>Size</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    `;
-    const tb = tbl.querySelector("tbody")!;
-    // Pyodide's WASM32 ceiling (~4 GB) only applies to local runs. On the
-    // remote backend the input lives in 16 GB of real RAM, so don't disable
-    // any scale and don't show the cap badges.
-    const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
-    insp.scales.forEach((s, i) => {
-      const tr = document.createElement("tr");
-      const bytes = s.approxBytes;
-      const risky = !useRemote && bytes > SAFE_INPUT_BYTES;
-      const veryRisky = !useRemote && bytes > 3 * SAFE_INPUT_BYTES; // ~4.5 GB → guaranteed OOM locally
-      const offStr = s.offsetNm.map((v) => format1(v)).join(", ");
-      tr.innerHTML = `
-        <td><input type="radio" name="scale" value="${i}" ${veryRisky ? "disabled" : ""}></td>
-        <td><code>${escapeHtml(s.path || "(root)")}</code></td>
-        <td><code>${s.shape.join("×")}</code></td>
-        <td><code>${s.voxelNm.map((v) => format1(v)).join(" × ")}</code></td>
-        <td><code>${offStr}</code></td>
-        <td>${humanSize(bytes)}</td>
-        <td>${
-          veryRisky
-            ? `<span class="chip chip-bad" title="Exceeds WASM memory limit — will OOM">beyond WASM cap</span>`
-            : risky
-              ? `<span class="chip chip-warn" title="May OOM: single-layer analysis typically needs ~6–10× the input size">may OOM</span>`
-              : ""
-        }</td>
-      `;
-      tb.appendChild(tr);
-    });
-    scalesHost.appendChild(tbl);
-
-    // Auto-pick the coarsest scale that fits the safe budget. On remote,
-    // every scale fits, so default to the *finest* (s0) — that's what the
-    // user wants when they've explicitly opted into the backend.
-    if (useRemote) {
-      selectedScaleIdx = 0;
-      const input = tbl.querySelector<HTMLInputElement>(`input[value="0"]`);
-      if (input) input.checked = true;
-      runBtn.disabled = false;
-    } else {
-      const coarsestFitIdx = [...insp.scales].reverse().findIndex((s) => s.approxBytes <= SAFE_INPUT_BYTES);
-      if (coarsestFitIdx !== -1) {
-        const realIdx = insp.scales.length - 1 - coarsestFitIdx;
-        selectedScaleIdx = realIdx;
-        const input = tbl.querySelector<HTMLInputElement>(`input[value="${realIdx}"]`);
-        if (input) input.checked = true;
-        runBtn.disabled = false;
-      } else {
-        // No scale fits the safe budget — pre-select the smallest that's not
-        // beyond WASM cap, still usable if the user accepts the OOM risk.
-        const idx = insp.scales.findIndex((s) => s.approxBytes <= 3 * SAFE_INPUT_BYTES);
-        if (idx !== -1) {
-          selectedScaleIdx = idx;
-          const input = tbl.querySelector<HTMLInputElement>(`input[value="${idx}"]`);
-          if (input) input.checked = true;
-          runBtn.disabled = false;
-        }
-      }
-    }
-
-    tbl.querySelectorAll<HTMLInputElement>('input[type="radio"]').forEach((inp) => {
-      inp.addEventListener("change", () => {
-        selectedScaleIdx = Number(inp.value);
-        runBtn.disabled = false;
-        refreshMeshHint();
-      });
-    });
-    refreshMeshHint();
-  };
-
-  // Re-render the scales table whenever the remote toggle flips, so the
-  // 'beyond WASM cap' chips and disabled radios drop away when the backend
-  // is selected (and reappear on switch back).
+  // Re-render per-row scale labels whenever 'Run on backend' toggles,
+  // so 'beyond WASM cap' tags drop / reappear and the auto-selected
+  // scale flips between coarsest-fit (local) and s0 (backend).
   remoteToggle.addEventListener("change", () => {
-    if (currentInspection) renderScales(currentInspection);
     refreshMeshAvailability();
   });
   refreshMeshAvailability();
 
-  const inspectLayer = async (layer: DatasetLayer): Promise<void> => {
-    clearError();
-    scalesHost.innerHTML = `<p class="hint">Inspecting ${escapeHtml(layer.name)} …</p>`;
-    selectedScaleIdx = null;
-    runBtn.disabled = true;
-    try {
-      const url = normalizeZarrUrl(layer.source);
-      const insp = await client.inspect(url, d.voxel_size_nm);
-      currentInspection = insp;
-      renderScales(insp);
-    } catch (err) {
-      showError((err as Error).message);
-      scalesHost.innerHTML = "";
-    }
-  };
-
-  // When the layer selection changes:
-  //  - 0 checked → disable Run, show hint.
-  //  - 1 checked → inspect the layer, show big radio-table scale picker.
-  //  - 2+ checked → hide radio table; each row's inline <select> picks
-  //                 the layer's scale (lazily inspected as checked).
+  // Layer selection drives whether each row's controls (scale +
+  // labeled dropdowns) are visible. Always per-row now — no global
+  // 'Already labeled?' dropdown, no separate radio-table scale picker.
   const onLayerSelectionChange = (): void => {
     refreshPerRowScalePickers();
     const idxs = getCheckedLayerIdxs();
     if (idxs.length === 0) {
-      currentLayer = null;
-      currentInspection = null;
-      selectedScaleIdx = null;
-      scalesHost.innerHTML = `<p class="hint warn">Check at least one layer.</p>`;
+      inspectStatus.textContent = "Check at least one layer to enable Run.";
       runBtn.disabled = true;
       return;
     }
-    if (idxs.length === 1) {
-      currentLayer = segLayers[idxs[0]];
-      void inspectLayer(currentLayer);
-      return;
-    }
-    // Multi-layer mode: hide the per-scale radio table; scale lives in
-    // each layer-row's <select>. Inspection runs in the background;
-    // user can click Run as soon as they're ready (slots that are
-    // still inspecting will block briefly at run time).
-    currentLayer = null;
-    currentInspection = null;
-    selectedScaleIdx = null;
-    scalesHost.innerHTML = `<p class="hint">Multi-layer mode — ${idxs.length} layers selected. Pick a scale per row above; default is the coarsest one that fits the budget${analysisBackendUrl && remoteToggle.checked ? " (backend lifts the WASM cap)" : ""}.</p>`;
+    inspectStatus.textContent =
+      idxs.length === 1
+        ? `1 layer selected. Pick a scale + labeled mode above.`
+        : `${idxs.length} layers selected — runs in series. Default scale per row is the coarsest one that fits the budget${analysisBackendUrl && remoteToggle.checked ? " (backend lifts the WASM cap)" : ""}.`;
     runBtn.disabled = false;
   };
   layersHost.addEventListener("change", (e) => {
@@ -790,35 +646,27 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     };
     const jobs: Job[] = [];
     try {
-      if (checkedIdxs.length === 1 && currentInspection && selectedScaleIdx != null) {
-        // Single-layer: global labeled selector is authoritative.
-        jobs.push({
-          layer: segLayers[checkedIdxs[0]],
-          insp: currentInspection,
-          scaleIdx: selectedScaleIdx,
-          alreadyLabeled: labeledSel.value === "true",
-        });
-      } else {
-        // Multi-layer: read each row's per-layer labeled <select>.
-        await Promise.all(checkedIdxs.map((i) => ensureInspected(i)));
-        for (const i of checkedIdxs) {
-          const slot = layerSlots[i];
-          if (!slot.inspection) {
-            throw new Error(
-              `Couldn't inspect ${segLayers[i].name}${slot.inspectError ? `: ${slot.inspectError}` : ""}`,
-            );
-          }
-          const scaleIdx = slot.selectedScaleIdx ?? autoPickScaleIdx(slot.inspection, useRemote);
-          const perRowLabeled = layersHost.querySelector<HTMLSelectElement>(
-            `[data-layer-labeled="${i}"]`,
+      // Always read per-row controls. Block on any pending inspections
+      // so each layer's scale dropdown has a real value before we
+      // read it.
+      await Promise.all(checkedIdxs.map((i) => ensureInspected(i)));
+      for (const i of checkedIdxs) {
+        const slot = layerSlots[i];
+        if (!slot.inspection) {
+          throw new Error(
+            `Couldn't inspect ${segLayers[i].name}${slot.inspectError ? `: ${slot.inspectError}` : ""}`,
           );
-          jobs.push({
-            layer: segLayers[i],
-            insp: slot.inspection,
-            scaleIdx,
-            alreadyLabeled: (perRowLabeled?.value ?? "true") === "true",
-          });
         }
+        const scaleIdx = slot.selectedScaleIdx ?? autoPickScaleIdx(slot.inspection, useRemote);
+        const perRowLabeled = layersHost.querySelector<HTMLSelectElement>(
+          `[data-layer-labeled="${i}"]`,
+        );
+        jobs.push({
+          layer: segLayers[i],
+          insp: slot.inspection,
+          scaleIdx,
+          alreadyLabeled: (perRowLabeled?.value ?? "true") === "true",
+        });
       }
     } catch (err) {
       hideProgress();
@@ -876,7 +724,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     }
   });
 
-  if (currentLayer) void inspectLayer(currentLayer);
+  // First run: the default-checked layer (idx 0) needs its controls
+  // visible immediately. onLayerSelectionChange triggers the lazy
+  // inspection + dropdown population.
+  onLayerSelectionChange();
 }
 
 function productOf(shape: number[]): number {
@@ -888,10 +739,6 @@ function humanSize(n: number): string {
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
-}
-
-function format1(n: number): string {
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
 function escapeHtml(s: string): string {
