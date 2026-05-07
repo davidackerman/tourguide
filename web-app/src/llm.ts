@@ -227,6 +227,14 @@ export class GeminiBackend implements LLMBackend {
     return this.apiKey.length > 0;
   }
 
+  // Process-wide counter so the agent can show "this turn made N API
+  // calls" — the actual variable that matters when a free-tier quota
+  // bites. Static so any caller can read it.
+  static requestCount = 0;
+  // Most recently observed retryDelay from a 429 (seconds). UI can
+  // surface it as "wait Ns before retrying".
+  static lastRetryDelaySeconds: number | undefined;
+
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
     const useStream = !!options.onToken;
     const action = useStream ? "streamGenerateContent?alt=sse&key=" : "generateContent?key=";
@@ -259,12 +267,38 @@ export class GeminiBackend implements LLMBackend {
     if (systemParts.length > 0) {
       body.systemInstruction = { parts: [{ text: systemParts.join("\n\n") }] };
     }
-    const res = await fetch(url, {
+    GeminiBackend.requestCount += 1;
+    let res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
+    if (res.status === 429) {
+      // Parse Gemini's retryInfo block to see how long to wait. Free-tier
+      // RPM bumps usually give a small delay (~10–30s); we honor it once
+      // and retry, then surface the original error if still capped.
+      // Daily-quota 429s come back with retryDelay ≈ 0s — the wait won't
+      // help, but we still surface the message clearly.
+      const text = await res.text();
+      const delaySec = parseRetryDelaySeconds(text);
+      GeminiBackend.lastRetryDelaySeconds = delaySec;
+      if (delaySec !== undefined && delaySec > 0 && delaySec <= 60) {
+        options.onToken?.("", `Rate-limited; waiting ${delaySec}s and retrying…`);
+        await new Promise((r) => setTimeout(r, delaySec * 1000 + 250));
+        GeminiBackend.requestCount += 1;
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const retryText = await res.text();
+          throw new Error(formatQuotaError(res.status, retryText, delaySec));
+        }
+      } else {
+        throw new Error(formatQuotaError(429, text, delaySec));
+      }
+    } else if (!res.ok) {
       const text = await res.text();
       throw new Error(`Gemini API error ${res.status}: ${text.slice(0, 400)}`);
     }
@@ -315,6 +349,61 @@ export class GeminiBackend implements LLMBackend {
       { maxTokens: 64 },
     );
   }
+}
+
+// Pull retryDelay out of Gemini's structured 429 error body. Shape:
+//   { "error": { "details": [{ "@type": ".../RetryInfo", "retryDelay": "30s" }] } }
+// Returns undefined if the field isn't present.
+function parseRetryDelaySeconds(body: string): number | undefined {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { details?: Array<{ "@type"?: string; retryDelay?: string }> };
+    };
+    const details = parsed.error?.details ?? [];
+    for (const d of details) {
+      if (d["@type"]?.includes("RetryInfo") && typeof d.retryDelay === "string") {
+        const m = d.retryDelay.match(/^(\d+(?:\.\d+)?)s$/);
+        if (m) return Number(m[1]);
+      }
+    }
+  } catch {
+    /* not JSON or not the expected shape */
+  }
+  return undefined;
+}
+
+// Format a 429 in a way that's actually actionable for the user, not
+// just the raw API JSON. Pulls out which quota was hit (RPM vs RPD) by
+// reading the QuotaFailure block, and tells them what to do next.
+function formatQuotaError(status: number, body: string, delaySec?: number): string {
+  let quotaId = "";
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { details?: Array<{ "@type"?: string; violations?: Array<{ quotaId?: string }> }> };
+    };
+    const details = parsed.error?.details ?? [];
+    for (const d of details) {
+      if (d["@type"]?.includes("QuotaFailure")) {
+        quotaId = d.violations?.[0]?.quotaId ?? "";
+        break;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  const isPerDay = /PerDay|RequestsPerDay|RPD/i.test(quotaId);
+  const isPerMin = /PerMinute|RPM/i.test(quotaId);
+  let advice: string;
+  if (isPerDay) {
+    advice = "Daily free-tier limit hit. Resets at midnight Pacific. Switch model in Settings, enable billing, or wait.";
+  } else if (isPerMin) {
+    const wait = delaySec !== undefined ? `~${delaySec}s` : "~60s";
+    advice = `Per-minute limit hit. Wait ${wait} and try again, or switch model in Settings.`;
+  } else {
+    advice = "Free-tier quota exceeded. Switch model in Settings, enable billing, or wait.";
+  }
+  const quotaNote = quotaId ? ` [${quotaId}]` : "";
+  return `Gemini ${status}${quotaNote}: ${advice}`;
 }
 
 const LS_KEY = "tourguide.settings.v1";

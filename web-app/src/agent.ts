@@ -1,5 +1,5 @@
 import type { LLMBackend, LLMMessage } from "./llm.js";
-import { WebLLMBackend } from "./llm.js";
+import { WebLLMBackend, GeminiBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import { runQuery } from "./db.js";
 import type { BundledViewer } from "./bundled_viewer.js";
@@ -35,7 +35,12 @@ interface ToolCall {
   args?: Record<string, unknown>;
 }
 
-const MAX_ITERATIONS = 10;
+// Cap the agent loop at 5 steps. Most legitimate flows finish in 2-4
+// (run_sql -> fly_to -> done; run_python -> answer -> done). A higher
+// cap mostly lets a confused model burn through your Gemini free-tier
+// quota chasing its tail. If a real query needs more, the user can ask
+// a follow-up.
+const MAX_ITERATIONS = 5;
 
 const SCHEMA_GUIDE = (db: DatasetDB): string => {
   const tableLines = db.tables
@@ -406,6 +411,11 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     { role: "user", content: question },
   ];
 
+  // Snapshot the cloud-API call counter so we can show "this turn used
+  // N calls" — the actual number that matters when you're hitting a
+  // free-tier quota. Local backends (WebLLM) leave this at 0.
+  const startReqCount = GeminiBackend.requestCount;
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const stepStart = performance.now();
     let tokenCount = 0;
@@ -430,7 +440,9 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       },
     });
     const stepElapsed = ((performance.now() - stepStart) / 1000).toFixed(1);
-    ctx.callbacks.onProgress?.(`Agent step ${i + 1}: done in ${stepElapsed}s (${tokenCount} tokens)`);
+    const apiCalls = GeminiBackend.requestCount - startReqCount;
+    const apiNote = apiCalls > 0 ? ` · ${apiCalls} API call${apiCalls === 1 ? "" : "s"} this turn` : "";
+    ctx.callbacks.onProgress?.(`Agent step ${i + 1}: done in ${stepElapsed}s (${tokenCount} tokens)${apiNote}`);
 
     let call: ToolCall;
     try {
