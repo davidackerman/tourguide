@@ -124,7 +124,20 @@ TOOLS:
                    com_mito[i] for the i-th point. Pass com_<class>.T to
                    scipy.stats.gaussian_kde (it expects (D, N), not (N, D)).
                    USE com_<class> directly — do NOT rebuild it via
-                   np.array(df_x[["com_x_nm",...]]).
+                   np.array(df_x[["com_x_nm",...]]). DO NOT call pd.read_csv
+                   or any network fetch — the data is already loaded.
+
+    JSON STRING ESCAPING — read carefully:
+      Your code is a JSON string, so \\n inside a Python literal needs to
+      survive JSON unescaping. Two safe patterns:
+        1. Single-line strings, no newlines:
+             print('Densest bin COM:', max_count_bin)   # no \\n needed
+        2. If you really need a newline in a string, use a triple-quoted
+           string OR escape twice:  "\\\\n" in the JSON becomes "\\n" in
+           Python which is an actual newline at runtime.
+      DO NOT write f'foo: {x}\\nbar: {y}' as a single non-triple-quoted
+      Python literal — \\n in the JSON becomes a real line break and
+      triggers SyntaxError: unterminated string literal.
     Conventions:
       - print(...) anything you want returned; it lands in stdout.
       - Set _out = <python value> for a structured return — DataFrames /
@@ -598,8 +611,11 @@ function synthesizeErrorHint(
     if (lower.includes("singular data covariance") || (lower.includes("dimensions") && lower.includes("samples"))) {
       return `gaussian_kde expects (D, N) shape — D dimensions, N samples. Pass com_<class>.T not com_<class>. Example: kde = gaussian_kde(com_mito.T) where com_mito is (N, 3).`;
     }
+    if (lower.includes("unterminated string literal") || lower.includes("unterminated f-string")) {
+      return `Don't put raw \\n inside a Python string literal — it becomes an actual line break and breaks the string. Either drop the \\n (use a separate print call), use a triple-quoted string ('''text''' or """text"""), or write \\\\n in the JSON so the Python source has the literal escape \\n.`;
+    }
     if (lower.includes("indentationerror") || lower.includes("syntaxerror")) {
-      return `Python syntax error. Watch indentation; the harness wraps your code under a try block, so it must be valid as-is.`;
+      return `Python syntax error. Watch indentation; the harness wraps your code under a try block, so it must be valid as-is. If the error is about an unterminated string, you have an unescaped newline inside a string literal — split into multiple print() calls instead.`;
     }
     if (lower.includes("modulenotfounderror")) {
       return `That package isn't in Pyodide's prebuilt list. Stick to numpy / pandas / matplotlib / scipy / scikit-learn / sympy / networkx / statsmodels — and DON'T call micropip.install or pyodide.loadPackage; the harness auto-loads anything you import. If your approach needs a missing package, use a different approach with the available ones.`;
