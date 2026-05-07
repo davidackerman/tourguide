@@ -83,6 +83,7 @@ export class BundledViewer {
     // load — tear down the existing viewer and recreate it. NG's
     // standard auto-fit-to-layer-bounds then runs naturally and we
     // don't have to bolt on flyTo / setTimeout / state-reset hacks.
+    const isFirstMount = !this.viewer;
     if (this.viewer) {
       try {
         (this.viewer as unknown as { dispose?: () => void }).dispose?.();
@@ -94,10 +95,22 @@ export class BundledViewer {
       // two stacked viewers in the DOM.
       while (this.container.firstChild) this.container.removeChild(this.container.firstChild);
     }
+    // On first mount, setupDefaultViewer (inside ensureViewer) reads the
+    // URL hash and applies any '#!{...}' state to the viewer — that's how
+    // a copy/pasted URL or a permalink gets its camera + selected segments
+    // back. If we then call restoreState(descriptorState) we *clobber*
+    // that with the descriptor's defaults (no position, no segments),
+    // which is what made copy-pasting the URL bar look like a fresh demo
+    // load. Skip the descriptor restore in that case and let NG own the
+    // state — the descriptor's layer URLs are already in the hash anyway,
+    // since the user copied from a tab on the same dataset.
     const viewer = this.ensureViewer();
     const state = descriptorToNgState(d);
     this.currentState = state;
-    viewer.state.restoreState(state as unknown as Record<string, unknown>);
+    const hashHasNgState = window.location.hash.startsWith("#!");
+    if (!(isFirstMount && hashHasNgState)) {
+      viewer.state.restoreState(state as unknown as Record<string, unknown>);
+    }
   }
 
   flyTo(

@@ -11,6 +11,11 @@ interface PermalinkState {
   // Restored after descriptor load so the recipient lands on the exact
   // same view the sharer had.
   viewerState?: Record<string, unknown>;
+  // True if viewerState was decoded from the NG-format `#!{...}` hash
+  // (which Neuroglancer's own UrlHashBinding already applied on viewer
+  // mount). False/absent for the legacy `?v=` form, which NG can't read,
+  // so we still need to apply it manually.
+  viewerStateFromHash?: boolean;
   // Recent custom-analysis prompts (most recent first). Populated into
   // the Custom analysis history dropdown so the recipient can re-run the
   // sharer's queries with one click.
@@ -112,6 +117,7 @@ export function decodeState(search: string, hash: string): PermalinkState {
     const ngEncoded = hashTrimmed.startsWith("!") ? hashTrimmed.slice(1) : hashTrimmed.slice(2);
     try {
       state.viewerState = JSON.parse(decodeURIComponent(ngEncoded));
+      state.viewerStateFromHash = true;
     } catch (err) {
       console.error("Failed to decode NG hash state:", err);
     }

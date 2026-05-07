@@ -225,11 +225,12 @@ async function init(): Promise<void> {
   if (permalinkState.analysisPrompts) {
     mergePrompts(permalinkState.analysisPrompts);
   }
-  // Restore the shared NG view state on top of the freshly-initialized
-  // viewer. We defer to the next tick because descriptorToNgState calls
-  // restoreState synchronously inside loadDescriptor, and we need our
-  // overlay to land afterwards.
-  if (permalinkState.viewerState) {
+  // For NG-hash permalinks (`#!{...}`), NG's own UrlHashBinding applies
+  // the state inside setupDefaultViewer the moment the viewer mounts —
+  // and loadDescriptor knows to skip its own restoreState in that case,
+  // so the hash-applied state survives. We only need to overlay manually
+  // for the legacy `?v=` form (pre-hash share links), which NG can't see.
+  if (permalinkState.viewerState && !permalinkState.viewerStateFromHash) {
     setTimeout(() => {
       try {
         viewer.applyNgState(permalinkState.viewerState as Record<string, unknown>);
