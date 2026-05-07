@@ -88,6 +88,21 @@ TOOLS:
     Volumes in nm^3, surface area in nm^2, positions in nm; convert to um^3
     (divide by 1e9) when plotting for readability.
 
+  run_python(python: string)
+    Run arbitrary Python via Pyodide for computation that doesn't need a
+    plot — e.g. statistics, transformations, intermediate results to feed
+    a later tool. Same environment as make_plot: df_<class> DataFrames as
+    globals, plus np / pd already imported. NOT terminal; the harness
+    feeds the captured stdout (and any value you assign to a global named
+    _out) back to you so you can call answer/fly_to next.
+    Conventions:
+      - print(...) anything you want returned; it lands in stdout.
+      - Set _out = <python value> for a structured return — DataFrames /
+        Series get to_dict()'d, otherwise json/repr.
+      - Globals persist across run_python calls within one user turn.
+    Use this for "what's the median volume?" / "compute X then fly to
+    the result" flows. For visual answers, prefer make_plot.
+
   answer(text: string)
     Deliver a final text answer to the user. Use for counts, means,
     informational questions. Keep it concise.
@@ -101,6 +116,22 @@ TYPICAL FLOWS:
   "plot mitochondrion volumes"     -> make_plot -> done
   "fly through the 3 biggest mitos" -> run_sql (LIMIT 3) -> fly_to (first) -> fly_to (second) -> fly_to (third) -> done
   "show only the largest 10 mitos" -> run_sql (ORDER BY volume DESC LIMIT 10) -> highlight_segments -> done
+  "densest region of mitos"        -> run_python (grid COMs, find max-count bin, set _out = (com, ids))
+                                      -> fly_to (bin center) -> highlight_segments (ids in bin) -> done
+  "median volume of nuclei"        -> run_python (df_nucleus["volume_(nm^3)"].median(); print) -> answer -> done
+  "two closest mito pairs"         -> run_python (pdist over com_*, argmin; print pairs)       -> answer -> done
+
+WHEN TO USE WHICH TOOL — IMPORTANT:
+  - Filter / sort / count / "the N biggest/smallest"           -> run_sql
+  - Distribution shape, scatter, histogram, "show on a chart"  -> make_plot
+  - Anything spatial (density, clusters, neighbors, distance,
+    "where are most of the X", "region", "near", bounding box,
+    convex hull) or anything statistical beyond simple aggregates
+    (median, percentile, std, IQR, correlation, regression)    -> run_python
+  - Never reach for run_sql when the question implies geometric
+    reasoning over com_x/com_y/com_z — SQL can't compute density
+    or pairwise distances. ORDER BY volume DESC LIMIT 1 is NOT
+    "the densest mito".
 
 Pick the minimum tool calls needed. Never repeat the same query. If a tool errors, read the error and adjust.
 `.trim();
@@ -237,6 +268,70 @@ async function execAnswer(
   return { delivered: true };
 }
 
+async function execRunPython(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<{ stdout: string; result?: string }> {
+  if (!ctx.db) throw new Error("No database loaded");
+  const code = String(args.python ?? args.code ?? "").trim();
+  if (!code) throw new Error("run_python requires 'python'");
+
+  ctx.callbacks.onProgress?.("Loading Pyodide…");
+  const py = await loadPyodide((m) => ctx.callbacks.onProgress?.(m));
+  // First use of Pyodide on this page: prime DataFrames + helpers. We
+  // reuse the same setup make_plot does so globals (df_*, np, pd, plt)
+  // are consistent regardless of which Python tool is called first.
+  py.globals.set("_tables_json", tablesToJson(ctx.db));
+  await py.runPythonAsync(SETUP_PY);
+  await py.runPythonAsync(`
+_dfs = _materialize_tables(_tables_json)
+for _k, _v in _dfs.items():
+    globals()[_k] = _v
+import numpy as np
+`);
+  ctx.callbacks.onProgress?.("Running Python…");
+  // Run the user code inside a try/finally so we always restore stdout,
+  // and capture (a) printed output, (b) whatever the model assigned to
+  // `_out`. Indenting under `try:` keeps multi-line code intact;
+  // imports / assignments inside still bind globally because
+  // runPythonAsync runs at module scope.
+  const indented = code.replace(/^/gm, "    ");
+  await py.runPythonAsync(`
+import sys, io, json as _json
+_buf = io.StringIO()
+_old_stdout = sys.stdout
+sys.stdout = _buf
+_out = None
+try:
+${indented}
+finally:
+    sys.stdout = _old_stdout
+_PY_STDOUT = _buf.getvalue()
+def _serialize_out(v):
+    if v is None:
+        return None
+    try:
+        if hasattr(v, "to_dict"):
+            return _json.dumps(v.to_dict(), default=str)
+    except Exception:
+        pass
+    try:
+        return _json.dumps(v, default=str)
+    except Exception:
+        return repr(v)
+_PY_OUT = _serialize_out(_out)
+`);
+  const stdoutRaw = String(py.globals.get("_PY_STDOUT") ?? "");
+  // Cap stdout so a chatty `print(df)` doesn't blow the LLM context.
+  const stdout =
+    stdoutRaw.length > 4000 ? stdoutRaw.slice(0, 4000) + "\n…(truncated)" : stdoutRaw;
+  const outVal = py.globals.get("_PY_OUT");
+  return {
+    stdout,
+    result: outVal === null || outVal === undefined ? undefined : String(outVal),
+  };
+}
+
 const SETUP_PY = `
 import json
 import io
@@ -270,6 +365,7 @@ const TOOL_EXECUTORS: Record<
   (args: Record<string, unknown>, ctx: AgentContext) => Promise<unknown>
 > = {
   run_sql: execRunSql,
+  run_python: execRunPython,
   fly_to: execFlyTo,
   highlight_segments: execHighlight,
   make_plot: execMakePlot,
@@ -364,7 +460,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       messages.push({ role: "assistant", content: JSON.stringify(call) });
       messages.push({
         role: "user",
-        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, fly_to, highlight_segments, make_plot, answer, done.`,
+        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, run_python, fly_to, highlight_segments, make_plot, answer, done.`,
       });
       continue;
     }
