@@ -75,10 +75,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             </div>
             <div class="analysis-layers-host" data-layers-host></div>
           </div>
-          <label class="mesh-toggle" data-mesh-row>
-            <input type="checkbox" data-make-meshes />
-            <span>Generate 3D meshes (zmesh, backend only) <em data-mesh-hint class="hint" style="font-style:italic;opacity:0.75;"></em></span>
-          </label>
+          <p class="hint" data-mesh-global-hint><strong>3D meshes</strong>: per-layer toggle in each row above. Available only when "Run on backend" is checked (zmesh ships only on the HF Space).</p>
         </div>
         <p class="hint" data-inspect-status>Each checked layer's scale + labeled dropdowns appear inline above. Default scale is the coarsest one that fits the budget; defaults to "Yes — values are segment ids".</p>
         <div class="analysis-progress" data-progress hidden>
@@ -112,17 +109,19 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   const remoteRow = $<HTMLLabelElement>("[data-remote-row]");
   const remoteToggle = $<HTMLInputElement>("[data-remote-toggle]");
   const remoteLabel = $<HTMLSpanElement>("[data-remote-label]");
-  const meshRow = $<HTMLLabelElement>("[data-mesh-row]");
-  const meshCheckbox = $<HTMLInputElement>("[data-make-meshes]");
-  const meshHint = $<HTMLElement>("[data-mesh-hint]");
-  // zmesh ships only on the HF backend; gate the option behind the remote
-  // toggle so the user can't pick it for a Pyodide run that would just
-  // ignore it.
+  // zmesh ships only on the HF backend; gate the per-layer mesh
+  // checkboxes behind the remote toggle so they can't be checked for
+  // a Pyodide run that would just ignore them.
   const refreshMeshAvailability = (): void => {
     const remoteOn = !!(analysisBackendUrl && remoteToggle.checked && !remoteToggle.disabled);
-    meshCheckbox.disabled = !remoteOn;
-    meshRow.title = remoteOn ? "" : "Available only when 'Run on backend' is checked.";
-    if (!remoteOn) meshCheckbox.checked = false;
+    layersHost
+      .querySelectorAll<HTMLInputElement>("[data-layer-mesh]")
+      .forEach((cb) => {
+        cb.disabled = !remoteOn;
+        if (!remoteOn) cb.checked = false;
+        const wrap = cb.closest<HTMLLabelElement>(".analysis-layer-mesh-toggle");
+        if (wrap) wrap.title = remoteOn ? "" : "Available only when 'Run on backend' is checked.";
+      });
   };
   // Auto-coarsen meshing for big inputs so zmesh stays under ~30 s.
   // Targets ≤32 M voxels of mesh input regardless of analyze scale.
@@ -137,26 +136,12 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     if (nvox <= 512e6) return 4;
     return 8;
   };
-  // Mesh-downsample hint reflects whichever layer is the FIRST checked
-  // — heuristic that's simple and good enough; a more accurate hint
-  // would need to enumerate every checked layer's scale, which crowds
-  // the UI for marginal value.
+  // No-op now that mesh selection is per-layer. The downsample hint
+  // used to live next to the global toggle; with per-row checkboxes
+  // we don't have a single place to put one without crowding rows.
+  // The auto-downsample factor still applies at run time per layer.
   const refreshMeshHint = (): void => {
-    const idxs = getCheckedLayerIdxs();
-    if (idxs.length === 0) {
-      meshHint.textContent = "";
-      return;
-    }
-    const slot = layerSlots[idxs[0]];
-    if (!slot.inspection || slot.selectedScaleIdx == null) {
-      meshHint.textContent = "";
-      return;
-    }
-    const sc = slot.inspection.scales[slot.selectedScaleIdx];
-    const f = chooseMeshDownsample(sc.shape);
-    meshHint.textContent = f === 1
-      ? "— meshes at full analyze resolution"
-      : `— meshes at ${f}× downsample (auto, for speed)`;
+    /* intentionally empty */
   };
 
   const client = new AnalysisClient();
@@ -238,6 +223,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             <option value="true" selected>Yes — values are segment ids</option>
             <option value="false">No — connected-components on mask</option>
           </select>
+        </label>
+        <label class="analysis-layer-control analysis-layer-mesh-toggle" data-layer-mesh-row="${i}" title="Generate 3D meshes (zmesh, backend only)">
+          <input type="checkbox" class="analysis-layer-mesh" data-layer-mesh="${i}" />
+          <span>3D meshes</span>
         </label>
         <span class="analysis-layer-status" data-layer-status="${i}"></span>
       </div>
@@ -342,10 +331,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     return job;
   };
 
-  // Show each row's controls (scale + labeled dropdowns) whenever its
-  // checkbox is checked. Inspection runs lazily on first check and
-  // populates the scale dropdown when ready; the labeled dropdown is
-  // immediately usable.
+  // Show each row's controls (scale + labeled + mesh dropdowns)
+  // whenever its checkbox is checked. Inspection runs lazily on first
+  // check and populates the scale dropdown when ready; labeled and
+  // mesh are immediately usable.
   const refreshPerRowScalePickers = (): void => {
     const idxs = getCheckedLayerIdxs();
     layersHost
@@ -354,6 +343,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         const idx = Number(ctrls.dataset.layerControls);
         ctrls.hidden = !idxs.includes(idx);
       });
+    // Mesh checkboxes need their disabled state synced after rows
+    // toggle visible (the global mesh-availability check runs on the
+    // remote toggle, but newly-shown rows haven't been processed yet).
+    refreshMeshAvailability();
     // Kick off inspection for any newly-checked layer that we haven't
     // probed yet. Already-inspected ones no-op.
     idxs.forEach((idx) => void ensureInspected(idx));
@@ -474,6 +467,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     useRemote: boolean,
     labelPrefix: string,
     alreadyLabeled: boolean,
+    makeMeshes: boolean,
   ): Promise<void> => {
     const scale: LayerScaleInfo = insp.scales[scaleIdx];
     let progressTimer = 0;
@@ -496,7 +490,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           await t.ready;
           tunnel = t;
         }
-        const makeMeshes = meshCheckbox.checked && !meshCheckbox.disabled;
+        // makeMeshes now comes in via the runOneLayer args (per-layer).
         // Rotate the progress label based on elapsed time so the bar
         // at least narrates roughly which phase is running. Backend
         // doesn't stream real progress (would need SSE), but the
@@ -643,6 +637,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       insp: LayerInspection;
       scaleIdx: number;
       alreadyLabeled: boolean;
+      makeMeshes: boolean;
     };
     const jobs: Job[] = [];
     try {
@@ -661,11 +656,15 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         const perRowLabeled = layersHost.querySelector<HTMLSelectElement>(
           `[data-layer-labeled="${i}"]`,
         );
+        const perRowMesh = layersHost.querySelector<HTMLInputElement>(
+          `[data-layer-mesh="${i}"]`,
+        );
         jobs.push({
           layer: segLayers[i],
           insp: slot.inspection,
           scaleIdx,
           alreadyLabeled: (perRowLabeled?.value ?? "true") === "true",
+          makeMeshes: !!(perRowMesh && perRowMesh.checked && !perRowMesh.disabled),
         });
       }
     } catch (err) {
@@ -694,10 +693,10 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
 
     const errors: { layer: string; message: string }[] = [];
     for (let i = 0; i < jobs.length; i++) {
-      const { layer, insp, scaleIdx, alreadyLabeled } = jobs[i];
+      const { layer, insp, scaleIdx, alreadyLabeled, makeMeshes } = jobs[i];
       const labelPrefix = jobs.length > 1 ? `[${i + 1}/${jobs.length}] ` : "";
       try {
-        await runOneLayer(layer, insp, scaleIdx, useRemote, labelPrefix, alreadyLabeled);
+        await runOneLayer(layer, insp, scaleIdx, useRemote, labelPrefix, alreadyLabeled, makeMeshes);
       } catch (err) {
         errors.push({ layer: layer.name, message: (err as Error).message });
       }

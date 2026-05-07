@@ -1009,36 +1009,56 @@ button {
   color: var(--fg-dim);
   font-style: italic;
 }
+/* CSS grid for the per-layer controls: scale (wider, longer text)
+ * + labeled + meshes checkbox, side-by-side regardless of option-
+ * text length. minmax(0, 1fr) lets the tracks shrink past their
+ * content's intrinsic min-width. mesh column is auto-width since
+ * it's just a checkbox + short label. */
 .analysis-layer-controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.6rem;
   flex: 1 1 auto;
-  flex-wrap: wrap;
   min-width: 0;
 }
+.analysis-layer-mesh-toggle {
+  cursor: pointer;
+  white-space: nowrap;
+}
+.analysis-layer-mesh-toggle input[disabled] + span {
+  opacity: 0.5;
+}
 .analysis-layer-control {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 0.3rem;
   font-size: 0.75rem;
   color: var(--fg-dim);
-  flex: 1 1 auto;
-  min-width: 220px;
+  min-width: 0; /* let the select shrink past its content width */
 }
 .analysis-layer-control > select {
   font-size: 0.78rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0.25rem 0.4rem;
   flex: 1;
-  min-width: 0;
-}
-.analysis-layer-scale {
-  /* Take more of the available width than 'labeled' since scale
-   * descriptions are longer ('s0  1300×1500×222  3.33 GB'). */
+  min-width: 0; /* same — required for shrinking */
+  text-overflow: ellipsis;
 }
 .analysis-layer-labeled {
   font-family: inherit;
+}
+
+/* Below ~900px viewport (or modal width capped to 96vw on mobile)
+ * the three-column grid gets cramped — fall back to one column so
+ * each select keeps full width and labels stay readable. */
+@media (max-width: 900px) {
+  .analysis-layer-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .analysis-layer-row {
+    align-items: flex-start;
+  }
 }
 .analysis-layer-status {
   font-size: 0.72rem;
