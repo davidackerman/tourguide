@@ -9,7 +9,14 @@ import { openAnalysisDialog } from "./analysis_ui.js";
 import { openCustomAnalysisDialog } from "./custom_analysis_ui.js";
 import { openDownloadDialog } from "./download_ui.js";
 import { loadSettings, backendFromSettings, type LLMBackend } from "./llm.js";
-import { decodeState, buildPermalinkURL, descriptorWithoutLocalLayers } from "./permalink.js";
+import {
+  decodeState,
+  buildPermalinkURL,
+  descriptorWithoutLocalLayers,
+  decodeSharedTablesFromUrl,
+  type SharedTable,
+} from "./permalink.js";
+import { runQuery } from "./db.js";
 import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
@@ -239,6 +246,72 @@ async function init(): Promise<void> {
       }
     }, 100);
   }
+
+  // Embedded analysis tables — recipient never ran Σ Analyze themselves
+  // so we ingest the rows directly into their sql.js DB. Decoded
+  // separately from decodeState because gunzip is async.
+  try {
+    const tables = await decodeSharedTablesFromUrl(window.location.search);
+    if (tables.length > 0) await ingestSharedTables(tables);
+  } catch (err) {
+    console.error("Failed to ingest shared analysis tables:", err);
+  }
+}
+
+// Add tables shipped in the permalink to the in-memory DB so the
+// structured browser picks them up alongside the layer-CSV-derived
+// ones. Mirrors the table-creation path in analysis_ui.ts (same
+// safe-name + replace-on-duplicate behavior).
+async function ingestSharedTables(tables: SharedTable[]): Promise<void> {
+  const { loadSqlJs } = await import("./db.js");
+  if (!currentDB) {
+    const SQL = await loadSqlJs();
+    currentDB = { db: new SQL.Database(), tables: [] };
+  }
+  const safeName = (s: string): string => s.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+  for (const t of tables) {
+    const tableName = safeName(t.organelle_class);
+    const types: Record<string, "INTEGER" | "REAL" | "TEXT"> = {};
+    t.columns.forEach((col, i) => {
+      let allInt = true;
+      let allNum = true;
+      for (const row of t.rows.slice(0, 200)) {
+        const v = row[i];
+        if (v === null || v === undefined) continue;
+        if (typeof v !== "number") { allInt = false; allNum = false; }
+        else if (!Number.isInteger(v)) allInt = false;
+      }
+      types[col] = allInt ? "INTEGER" : allNum ? "REAL" : "TEXT";
+    });
+    const cols = t.columns.map((c) => `"${c}" ${types[c]}`).join(", ");
+    currentDB.db.run(`DROP TABLE IF EXISTS "${tableName}";`);
+    currentDB.db.run(`CREATE TABLE "${tableName}" (${cols});`);
+    const stmt = currentDB.db.prepare(
+      `INSERT INTO "${tableName}" (${t.columns.map((c) => `"${c}"`).join(", ")}) VALUES (${t.columns.map(() => "?").join(", ")});`,
+    );
+    currentDB.db.run("BEGIN;");
+    try {
+      for (const row of t.rows) {
+        stmt.run(row.map((v) => (v === undefined ? null : v as number | string)));
+      }
+      currentDB.db.run("COMMIT;");
+    } finally {
+      stmt.free();
+    }
+    const existingIdx = currentDB.tables.findIndex((x) => x.table_name === tableName);
+    const ingested = {
+      table_name: tableName,
+      organelle_class: t.organelle_class,
+      layer_name: t.layer_name,
+      row_count: t.rows.length,
+      columns: t.columns,
+    };
+    if (existingIdx >= 0) currentDB.tables[existingIdx] = ingested;
+    else currentDB.tables.push(ingested);
+  }
+  // Refresh the structured browser so the imported tables show up
+  // in the dropdown immediately.
+  renderStructuredBrowser(browserHost, { db: currentDB, viewer });
 }
 
 function loadDescriptorDirect(d: DatasetDescriptor): void {
@@ -364,17 +437,64 @@ shareBtn.addEventListener("click", async () => {
   // prompts so the dropdown carries over.
   const viewerState = viewer.getNgState() ?? undefined;
   const analysisPrompts = loadPromptHistory().slice(0, 10);
-  const url = buildPermalinkURL({
+  // Computed analysis tables — anything in the local DB that the
+  // recipient can't get just by re-loading the descriptor (i.e., not
+  // backed by a layer.csv URL). Convention: organelle_class names
+  // produced by Σ Analyze include '_computed_'; λ Custom uses the
+  // table name. Either way, if the table doesn't match a layer.csv,
+  // it's a candidate for the permalink. Also confirm via the
+  // descriptor — a table whose name matches a layer.csv-derived one
+  // can be skipped (recipient re-fetches).
+  const sharedTables: SharedTable[] = [];
+  if (currentDB) {
+    const layerCsvOrganelles = new Set(
+      descriptorForShare.layers
+        .filter((l) => l.csv && l.organelle_class)
+        .map((l) => l.organelle_class as string),
+    );
+    for (const t of currentDB.tables) {
+      if (layerCsvOrganelles.has(t.organelle_class)) continue; // recipient gets this from layer.csv
+      try {
+        const colList = t.columns.map((c) => `"${c}"`).join(", ");
+        const result = runQuery(currentDB.db, `SELECT ${colList} FROM "${t.table_name}";`);
+        sharedTables.push({
+          organelle_class: t.organelle_class,
+          layer_name: t.layer_name,
+          columns: result.columns,
+          rows: result.rows,
+        });
+      } catch (err) {
+        console.warn(`[share] couldn't dump table ${t.table_name}:`, err);
+      }
+    }
+  }
+  const url = await buildPermalinkURL({
     catalogIndex: useCatalogIdx,
     descriptor: useCatalogIdx === undefined ? descriptorForShare : undefined,
     query,
     viewerState,
     analysisPrompts: analysisPrompts.length > 0 ? analysisPrompts : undefined,
+    analysisTables: sharedTables.length > 0 ? sharedTables : undefined,
   });
+  // Soft size warning — most browsers handle URLs up to ~32k chars
+  // fine, beyond that gets sketchy (Safari truncates at 80k, etc.).
+  // For really big tables tell the user to use the CSV download
+  // instead.
+  if (url.length > 60_000) {
+    const ok = confirm(
+      `Share URL is ${url.length.toLocaleString()} characters long — some browsers / chat apps will truncate it. ` +
+        `Embedded computed tables: ${sharedTables.length} (${sharedTables.reduce((s, t) => s + t.rows.length, 0).toLocaleString()} rows total).\n\n` +
+        `OK = copy anyway. Cancel = abort and download tables as CSV from the structured browser instead.`,
+    );
+    if (!ok) return;
+  }
   try {
     await navigator.clipboard.writeText(url);
-    shareBtn.textContent = "✓ Copied";
-    setTimeout(() => (shareBtn.textContent = "🔗 Share"), 1500);
+    const note = sharedTables.length > 0
+      ? `✓ Copied (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded)`
+      : "✓ Copied";
+    shareBtn.textContent = note;
+    setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2000);
   } catch {
     prompt("Copy this URL:", url);
   }

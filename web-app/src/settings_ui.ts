@@ -157,7 +157,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="settings-section" data-section="gemini">
           <label>
             Gemini API key
-            <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="AIza…" />
+            <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="(paste your key here)" autocomplete="off" />
           </label>
           <label>
             Gemini model
