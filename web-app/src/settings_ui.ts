@@ -5,11 +5,13 @@ import {
   GeminiBackend,
   WebLLMBackend,
   WEBLLM_MODELS,
+  webllmModelLabel,
   hasWebGPU,
   diagnoseWebGPU,
   DEFAULT_ANALYSIS_BACKEND,
   type Settings,
   type LLMBackend,
+  type WebLLMModelInfo,
 } from "./llm.js";
 import { waitForBackendReady, fetchHealth } from "./remote_analysis.js";
 
@@ -22,9 +24,31 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   const webgpu = hasWebGPU();
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
-  const webllmOptions = WEBLLM_MODELS.map(
-    (m) => `<option value="${m.id}" ${current.webllmModel === m.id ? "selected" : ""}>${m.label}</option>`,
-  ).join("");
+  // Sort the model list by either agent-suitability ('recommended', the
+  // default — strongest models on top, smaller / weaker beneath) or by
+  // download size ascending (when the user is on a slow link or
+  // memory-constrained machine and wants the smallest viable option
+  // first). Ties broken by size asc / recommended desc respectively.
+  type WebllmSort = "recommended" | "size";
+  const sortKey: WebllmSort =
+    (localStorage.getItem("tourguide.webllmSort") as WebllmSort) || "recommended";
+  const sortModels = (sort: WebllmSort): WebLLMModelInfo[] => {
+    const arr = [...WEBLLM_MODELS];
+    if (sort === "recommended") {
+      arr.sort((a, b) => b.recommended - a.recommended || a.sizeGB - b.sizeGB);
+    } else {
+      arr.sort((a, b) => a.sizeGB - b.sizeGB || b.recommended - a.recommended);
+    }
+    return arr;
+  };
+  const renderWebllmOptions = (sort: WebllmSort): string =>
+    sortModels(sort)
+      .map(
+        (m) =>
+          `<option value="${m.id}" ${current.webllmModel === m.id ? "selected" : ""}>${webllmModelLabel(m)}</option>`,
+      )
+      .join("");
+  const webllmOptions = renderWebllmOptions(sortKey);
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-label="Settings">
       <header class="modal-header">
@@ -68,11 +92,19 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         </div>
 
         <div class="settings-section" data-section="webllm">
+          <div class="webllm-sort-row">
+            <label class="webllm-sort-label">Sort by:
+              <select data-field="webllmSort">
+                <option value="recommended" ${sortKey === "recommended" ? "selected" : ""}>Recommended (best for agent first)</option>
+                <option value="size" ${sortKey === "size" ? "selected" : ""}>Size (smallest first)</option>
+              </select>
+            </label>
+          </div>
           <label>
             WebLLM model
             <select data-field="webllmModel">${webllmOptions}</select>
           </label>
-          <p class="hint">Model downloads to your browser cache on first use (~1–2 GB). Subsequent loads are instant and fully offline.</p>
+          <p class="hint">★★★★★ = best for the agent loop (multi-step SQL + Python). Lower scores = smaller / less code-tuned, may give up after one tool error. Model downloads to your browser cache on first use; subsequent loads are instant and fully offline.</p>
           <div class="webgpu-diagnosis" data-webgpu-diagnosis>Checking WebGPU…</div>
           <button class="btn-secondary" data-action="test-webllm">Load now (optional)</button>
           <span class="test-result" data-webllm-result></span>
@@ -122,6 +154,22 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
     const el = overlay.querySelector<HTMLInputElement>(`input[name="backend"]:checked`);
     return (el?.value as Settings["backend"]) ?? "none";
   };
+
+  // Sort toggle: re-render the model dropdown without losing the
+  // user's current selection. Persist the choice to localStorage so
+  // it sticks across sessions independently of the saved Settings
+  // (it's a UI preference, not a model choice).
+  const webllmSortEl = overlay.querySelector<HTMLSelectElement>(`[data-field="webllmSort"]`);
+  const webllmModelEl = overlay.querySelector<HTMLSelectElement>(`[data-field="webllmModel"]`);
+  if (webllmSortEl && webllmModelEl) {
+    webllmSortEl.addEventListener("change", () => {
+      const sort = webllmSortEl.value as "recommended" | "size";
+      localStorage.setItem("tourguide.webllmSort", sort);
+      const previousSelection = webllmModelEl.value;
+      webllmModelEl.innerHTML = renderWebllmOptions(sort);
+      if (previousSelection) webllmModelEl.value = previousSelection;
+    });
+  }
 
   const testBtn = overlay.querySelector<HTMLButtonElement>("[data-action='test-gemini']")!;
   const testResult = overlay.querySelector<HTMLSpanElement>("[data-test-result]")!;

@@ -203,23 +203,60 @@ export class WebLLMBackend implements LLMBackend {
   }
 }
 
-// Listed best-for-the-agent first (Qwen2.5-Coder 3B / 7B) since the
-// agent loop is mostly SQL + Python tool calls, which the Coder line
-// is finetuned for. The 1.5B Coder used to be the default but it's
-// too small to recover from tool errors on its own. 3B is the
-// realistic floor for reliable agent use; 7B is best if the user has
-// the VRAM headroom.
-export const WEBLLM_MODELS: Array<{ id: string; label: string }> = [
-  { id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 3B · f16 (best for agent / SQL / Python, ~2 GB) — recommended" },
-  { id: "Qwen2.5-Coder-3B-Instruct-q4f32_1-MLC", label: "Qwen2.5-Coder 3B · f32 (same, Intel Mac / older GPU, ~2.6 GB)" },
-  { id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 7B · f16 (strongest, needs ~6 GB VRAM)" },
-  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 1.5B · f16 (fastest, ~1 GB — may fail on multi-step agent tasks)" },
-  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f32_1-MLC", label: "Qwen2.5-Coder 1.5B · f32 (same, Intel Mac compatible, ~1.3 GB)" },
-  { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC", label: "Llama-3.2 3B · f16 (general, less code-tuned, ~2 GB)" },
-  { id: "Llama-3.2-3B-Instruct-q4f32_1-MLC", label: "Llama-3.2 3B · f32 (same, Intel Mac compatible, ~2.6 GB)" },
-  { id: "Qwen2.5-3B-Instruct-q4f16_1-MLC", label: "Qwen2.5 3B · f16 (general, ~2 GB)" },
-  { id: "Llama-3.2-1B-Instruct-q4f32_1-MLC", label: "Llama-3.2 1B · f32 (smallest, widest compat, ~700 MB — for testing only)" },
+// recommended: 1-5, agent-loop suitability (SQL + Python + structured-JSON
+// tool format). Code-tuned 3B+ models score highest because the loop is
+// dominated by code/SQL generation and JSON-mode output. Pure reasoning
+// models (R1 distills) score lower — they're verbose and can blow past
+// the JSON-only constraint. sizeGB is the approximate download / VRAM
+// footprint for q4f16 quantization.
+export interface WebLLMModelInfo {
+  id: string;
+  // Short human label (model family + size). Sort UI builds the full
+  // option text from family + size + score, so this stays terse.
+  family: string;
+  size: string;
+  sizeGB: number;
+  // 5 = best for agent, 1 = barely usable for agent. Doesn't reflect
+  // raw model strength — Qwen3-0.6B is a fine model, just not for a
+  // multi-tool loop with structured output.
+  recommended: 1 | 2 | 3 | 4 | 5;
+  // Free-form context note appended to the option label.
+  note?: string;
+}
+
+export const WEBLLM_MODELS: WebLLMModelInfo[] = [
+  // Tier 5 — strongest agent performance, large.
+  { id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "7B · f16", sizeGB: 4.0, recommended: 5, note: "best — code-tuned, needs ~6 GB VRAM" },
+  // Tier 4 — strong, more accessible.
+  { id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "3B · f16", sizeGB: 2.0, recommended: 4, note: "recommended sweet spot for agent" },
+  { id: "Qwen2.5-Coder-3B-Instruct-q4f32_1-MLC", family: "Qwen2.5-Coder", size: "3B · f32", sizeGB: 2.6, recommended: 4, note: "Intel Mac / older GPU compatible" },
+  { id: "Qwen3-8B-q4f16_1-MLC", family: "Qwen3", size: "8B · f16", sizeGB: 4.5, recommended: 4, note: "newer general, very capable" },
+  { id: "Llama-3.1-8B-Instruct-q4f16_1-MLC", family: "Llama-3.1", size: "8B · f16", sizeGB: 4.5, recommended: 4, note: "general, solid all-rounder" },
+  // Tier 3 — capable but smaller / less agent-tuned.
+  { id: "Qwen3-4B-q4f16_1-MLC", family: "Qwen3", size: "4B · f16", sizeGB: 2.5, recommended: 3, note: "newer mid-size general" },
+  { id: "Qwen2.5-7B-Instruct-q4f16_1-MLC", family: "Qwen2.5", size: "7B · f16", sizeGB: 4.0, recommended: 3, note: "general (non-coder)" },
+  { id: "Llama-3-8B-Instruct-q4f16_1-MLC", family: "Llama-3", size: "8B · f16", sizeGB: 4.5, recommended: 3, note: "older general" },
+  // Tier 2 — small / marginal for multi-step agent.
+  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "1.5B · f16", sizeGB: 1.0, recommended: 2, note: "fast, code-tuned, may fail on multi-step" },
+  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f32_1-MLC", family: "Qwen2.5-Coder", size: "1.5B · f32", sizeGB: 1.3, recommended: 2, note: "Intel Mac compatible" },
+  { id: "Qwen3-1.7B-q4f16_1-MLC", family: "Qwen3", size: "1.7B · f16", sizeGB: 1.1, recommended: 2, note: "newer, but small for agent" },
+  { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC", family: "Llama-3.2", size: "3B · f16", sizeGB: 2.0, recommended: 2, note: "general" },
+  { id: "Llama-3.2-3B-Instruct-q4f32_1-MLC", family: "Llama-3.2", size: "3B · f32", sizeGB: 2.6, recommended: 2, note: "Intel Mac compatible" },
+  { id: "Qwen2.5-3B-Instruct-q4f16_1-MLC", family: "Qwen2.5", size: "3B · f16", sizeGB: 2.0, recommended: 2, note: "general (non-coder)" },
+  { id: "Phi-3.5-mini-instruct-q4f16_1-MLC", family: "Phi-3.5-mini", size: "3.8B · f16", sizeGB: 2.4, recommended: 2, note: "Microsoft small model" },
+  // Tier 1 — too small for reliable agent use; kept for low-spec / testing.
+  { id: "Qwen3-0.6B-q4f16_1-MLC", family: "Qwen3", size: "0.6B · f16", sizeGB: 0.5, recommended: 1, note: "tiny — for testing only" },
+  { id: "Llama-3.2-1B-Instruct-q4f32_1-MLC", family: "Llama-3.2", size: "1B · f32", sizeGB: 0.7, recommended: 1, note: "smallest, widest compat" },
 ];
+
+// Build the user-facing label. Centralized so the settings dropdown
+// doesn't have to know about the field shape.
+export function webllmModelLabel(m: WebLLMModelInfo): string {
+  const stars = "★".repeat(m.recommended) + "☆".repeat(5 - m.recommended);
+  const sizeStr = `~${m.sizeGB.toFixed(m.sizeGB < 1 ? 1 : 1)} GB`;
+  const note = m.note ? ` — ${m.note}` : "";
+  return `${stars}  ${m.family} ${m.size} (${sizeStr})${note}`;
+}
 
 export class GeminiBackend implements LLMBackend {
   id = "gemini";

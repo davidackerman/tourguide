@@ -644,6 +644,21 @@ button {
   text-overflow: ellipsis;
 }
 
+.webllm-sort-row {
+  margin-bottom: 0.4rem;
+}
+.webllm-sort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.webllm-sort-label select {
+  font-size: 0.78rem;
+  padding: 0.2rem 0.4rem;
+}
+
 .webllm-progress-bar {
   height: 6px;
   background: var(--border);
