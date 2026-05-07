@@ -283,8 +283,11 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
     else:
         raise HTTPException(status_code=400, detail=f"unsupported layer URL scheme: {raw_proto}")
 
-    # Try zarr v2 first (CellMap default), fall back to v3.
-    last_err: Optional[Exception] = None
+    # Try zarr v2 first (CellMap default), fall back to v3. When both
+    # fail, surface BOTH errors — the previous behavior reported only
+    # the last (zarr3) error, which hid the real reason zarr2 didn't
+    # open (e.g., unsupported codec, dimension_separator quirk).
+    errors_by_driver: Dict[str, Exception] = {}
     ts_arr = None
     for driver in ("zarr", "zarr3"):
         spec = {
@@ -297,12 +300,16 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
             ts_arr = await ts.open(spec)
             break
         except Exception as exc:  # noqa: BLE001
-            last_err = exc
+            errors_by_driver[driver] = exc
             continue
     if ts_arr is None:
+        per_driver = " | ".join(
+            f"{drv}: {type(exc).__name__}: {exc}"
+            for drv, exc in errors_by_driver.items()
+        )
         raise HTTPException(
             status_code=400,
-            detail=f"tensorstore failed to open {url} path={layer.scalePath!r}: {type(last_err).__name__}: {last_err}",
+            detail=f"tensorstore failed to open {url} path={layer.scalePath!r}; tried both drivers — {per_driver}",
         )
 
     rank = ts_arr.rank

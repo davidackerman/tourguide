@@ -65,10 +65,16 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           Pyodide Python runtime (~6 MB, cached after).
         </p>
         <div class="form-row">
-          <label>
-            <span>Layer</span>
-            <select data-layer></select>
-          </label>
+          <div class="analysis-layers" data-layers-list>
+            <div class="analysis-layers-header">
+              <span>Layers <em class="hint" style="font-weight:normal;">(check one or more — multi-select runs them in series)</em></span>
+              <span class="analysis-layer-actions">
+                <button type="button" class="btn-tiny" data-action="select-all-layers">all</button>
+                <button type="button" class="btn-tiny" data-action="select-none-layers">none</button>
+              </span>
+            </div>
+            <div class="analysis-layers-host" data-layers-host></div>
+          </div>
           <label>
             <span>Already labeled?</span>
             <select data-labeled>
@@ -82,7 +88,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           </label>
         </div>
         <div data-scales-host>
-          <p class="hint" data-inspect-status>Pick a layer to list available scales.</p>
+          <p class="hint" data-inspect-status>Pick a layer (single-layer mode shows scales). With multiple layers checked, each layer auto-picks its coarsest scale that fits the budget.</p>
         </div>
         <div class="analysis-progress" data-progress hidden>
           <div class="progress-line" data-progress-text></div>
@@ -103,7 +109,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   document.body.appendChild(overlay);
 
   const $ = <T extends HTMLElement>(sel: string): T => overlay.querySelector<T>(sel)!;
-  const layerSel = $<HTMLSelectElement>("[data-layer]");
+  const layersHost = $<HTMLDivElement>("[data-layers-host]");
   const labeledSel = $<HTMLSelectElement>("[data-labeled]");
   const scalesHost = $<HTMLDivElement>("[data-scales-host]");
   const inspectStatus = $<HTMLParagraphElement>("[data-inspect-status]");
@@ -179,14 +185,46 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     })();
   }
 
+  // Render one checkbox per zarr layer. The first one starts checked
+  // so single-layer use looks like before; the user can check more to
+  // batch.
   segLayers.forEach((l, i) => {
-    const opt = document.createElement("option");
-    opt.value = String(i);
-    opt.textContent = `${l.name} [${l.type}]${l.organelle_class ? ` — ${l.organelle_class}` : ""}`;
-    layerSel.appendChild(opt);
+    const row = document.createElement("label");
+    row.className = "analysis-layer-row";
+    row.innerHTML = `
+      <input type="checkbox" data-layer-idx="${i}" ${i === 0 ? "checked" : ""} />
+      <span>${escapeHtml(l.name)} <em class="hint" style="opacity:0.7;">[${l.type}]${l.organelle_class ? ` — ${escapeHtml(l.organelle_class)}` : ""}</em></span>
+    `;
+    layersHost.appendChild(row);
+  });
+  const getCheckedLayerIdxs = (): number[] => {
+    const out: number[] = [];
+    layersHost
+      .querySelectorAll<HTMLInputElement>('input[type="checkbox"][data-layer-idx]')
+      .forEach((cb) => {
+        if (cb.checked) out.push(Number(cb.dataset.layerIdx));
+      });
+    return out;
+  };
+  const setAllLayers = (checked: boolean): void => {
+    layersHost
+      .querySelectorAll<HTMLInputElement>('input[type="checkbox"][data-layer-idx]')
+      .forEach((cb) => (cb.checked = checked));
+  };
+  $<HTMLButtonElement>('[data-action="select-all-layers"]').addEventListener("click", () => {
+    setAllLayers(true);
+    onLayerSelectionChange();
+  });
+  $<HTMLButtonElement>('[data-action="select-none-layers"]').addEventListener("click", () => {
+    setAllLayers(false);
+    onLayerSelectionChange();
   });
 
-  let currentLayer: DatasetLayer = segLayers[0];
+  // currentLayer / currentInspection / selectedScaleIdx are only
+  // used in single-layer mode (exactly one checkbox checked) — they
+  // drive the per-scale radio table. In multi-layer mode the scale
+  // selection is automatic per layer at run time.
+  let currentLayer: DatasetLayer | null = segLayers[0];
   let currentInspection: LayerInspection | null = null;
   let selectedScaleIdx: number | null = null;
 
@@ -339,33 +377,68 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     }
   };
 
-  layerSel.addEventListener("change", () => {
-    currentLayer = segLayers[Number(layerSel.value)];
-    void inspectLayer(currentLayer);
+  // When the layer selection changes:
+  //  - 0 checked → disable Run, show hint.
+  //  - 1 checked → inspect the layer, show scale picker (single-layer mode).
+  //  - 2+ checked → hide scale picker; each layer auto-picks its coarsest
+  //                 scale that fits the budget at run time.
+  const onLayerSelectionChange = (): void => {
+    const idxs = getCheckedLayerIdxs();
+    if (idxs.length === 0) {
+      currentLayer = null;
+      currentInspection = null;
+      selectedScaleIdx = null;
+      scalesHost.innerHTML = `<p class="hint warn">Check at least one layer.</p>`;
+      runBtn.disabled = true;
+      return;
+    }
+    if (idxs.length === 1) {
+      currentLayer = segLayers[idxs[0]];
+      void inspectLayer(currentLayer);
+      return;
+    }
+    // Multi-layer mode: skip per-scale UI; we'll auto-pick at run time.
+    currentLayer = null;
+    currentInspection = null;
+    selectedScaleIdx = null;
+    scalesHost.innerHTML = `<p class="hint">Multi-layer mode — ${idxs.length} layers selected. Each will run at its coarsest fitting scale${analysisBackendUrl && remoteToggle.checked ? "; backend lifts the WASM cap" : ""}. Click Run analysis to start.</p>`;
+    runBtn.disabled = false;
+  };
+  layersHost.addEventListener("change", (e) => {
+    if ((e.target as HTMLElement).matches('input[type="checkbox"][data-layer-idx]')) {
+      onLayerSelectionChange();
+    }
   });
 
-  runBtn.addEventListener("click", async () => {
-    if (!currentInspection || selectedScaleIdx == null) return;
-    clearError();
-    const scale: LayerScaleInfo = currentInspection.scales[selectedScaleIdx];
-    const useRemote = analysisBackendUrl && remoteToggle.checked;
-    let progressTimer = 0;
+  // Auto-pick a sensible scale for a layer when running in multi-layer
+  // mode. Mirrors the radio-table default in renderScales: coarsest
+  // scale that fits SAFE_INPUT_BYTES locally, finest (s0) when the
+  // backend is selected.
+  const autoPickScaleIdx = (insp: LayerInspection, useRemote: boolean): number => {
+    if (useRemote) return 0;
+    const reverseFitIdx = [...insp.scales].reverse().findIndex((s) => s.approxBytes <= SAFE_INPUT_BYTES);
+    if (reverseFitIdx !== -1) return insp.scales.length - 1 - reverseFitIdx;
+    const fallback = insp.scales.findIndex((s) => s.approxBytes <= 3 * SAFE_INPUT_BYTES);
+    return fallback !== -1 ? fallback : insp.scales.length - 1;
+  };
 
-    // WASM-cap warning only matters for the local Pyodide path. Backend
-    // has 16 GB real RAM; skip the prompt there.
-    if (!useRemote && scale.approxBytes > SAFE_INPUT_BYTES) {
-      const gb = (scale.approxBytes / 1024 ** 3).toFixed(2);
-      const ok = confirm(
-        `This scale is ${gb} GB. Pyodide has a ~4 GB WASM memory ceiling and ` +
-          `scipy typically allocates 6–10× the input size. Analysis may OOM. Continue?`,
-      );
-      if (!ok) return;
-    }
-    runBtn.disabled = true;
-    inspectStatus.textContent = "";
-    const axesOrder = currentInspection.axes.map((a) => a.name);
-    const url = normalizeZarrUrl(currentLayer.source);
-    showProgress("Starting …");
+  // Run a single layer end-to-end. Returns nothing on success; throws
+  // on failure (the caller decides whether to abort the rest of a
+  // batch or continue). Captures the surrounding UI state (mesh
+  // checkbox, labeled selector, remote toggle) once at call time —
+  // we don't want them mutating mid-batch.
+  const runOneLayer = async (
+    layer: DatasetLayer,
+    insp: LayerInspection,
+    scaleIdx: number,
+    useRemote: boolean,
+    labelPrefix: string,
+  ): Promise<void> => {
+    const scale: LayerScaleInfo = insp.scales[scaleIdx];
+    let progressTimer = 0;
+    const axesOrder = insp.axes.map((a) => a.name);
+    const url = normalizeZarrUrl(layer.source);
+    showProgress(`${labelPrefix}Starting ${layer.name}…`);
     let tunnel: { close: () => void } | null = null;
     try {
       if (useRemote) {
@@ -426,7 +499,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           code: buildRegionpropsCode(
             labeledSel.value === "true",
             makeMeshes,
-            currentLayer.name,
+            layer.name,
             chooseMeshDownsample(scale.shape),
           ),
           timeoutMs: 300_000,
@@ -443,8 +516,8 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           voxelNm: scale.voxelNm,
           labelCount: remote.table.rows.length,
         };
-        showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
-        await ingestResult(cb, currentLayer, scale, result);
+        showProgress(`${labelPrefix}Inserting ${result.rows.length.toLocaleString()} rows for ${layer.name}…`);
+        await ingestResult(cb, layer, scale, result);
         cb.onTableAdded();
         // Mesh layer (if the meshes checkbox was on). When the input was
         // already-labeled AND it's a segmentation layer in NG, the mesh
@@ -454,11 +527,11 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         // back to a standalone mesh-only layer to avoid mis-mapping ids.
         if (remote.meshLayer) {
           const isAlreadyLabeled = labeledSel.value === "true";
-          const canAttach = isAlreadyLabeled && currentLayer.type === "segmentation";
+          const canAttach = isAlreadyLabeled && layer.type === "segmentation";
           let attached = false;
           if (canAttach) {
             attached = cb.viewer.attachMeshSourceToLayer({
-              layerName: currentLayer.name,
+              layerName: layer.name,
               meshSource: remote.meshLayer.source,
               segments: remote.meshLayer.meshIds,
             });
@@ -472,17 +545,16 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             const desc = cb.getDescriptor();
             if (desc) {
               const i = desc.layers.findIndex((l) => l.name === remote.meshLayer!.name);
-              const layer = {
+              const newLayer = {
                 name: remote.meshLayer.name,
                 type: "segmentation" as const,
                 source: remote.meshLayer.source,
               };
-              if (i >= 0) desc.layers[i] = layer;
-              else desc.layers.push(layer);
+              if (i >= 0) desc.layers[i] = newLayer;
+              else desc.layers.push(newLayer);
             }
           }
         }
-        close();
       } else {
         // Local Pyodide path (unchanged).
         const maxVoxels = Math.floor((3 * SAFE_INPUT_BYTES) / Math.max(1, scale.approxBytes / productOf(scale.shape)));
@@ -496,24 +568,106 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
             maxVoxels,
             alreadyLabeled: labeledSel.value === "true",
           },
-          (message) => showProgress(message),
+          (message) => showProgress(`${labelPrefix}${message}`),
         );
-        showProgress(`Inserting ${result.rows.length.toLocaleString()} rows …`);
-        await ingestResult(cb, currentLayer, scale, result);
+        showProgress(`${labelPrefix}Inserting ${result.rows.length.toLocaleString()} rows for ${layer.name}…`);
+        await ingestResult(cb, layer, scale, result);
         cb.onTableAdded();
-        close();
       }
-    } catch (err) {
-      hideProgress();
-      showError((err as Error).message);
-      runBtn.disabled = false;
     } finally {
       if (progressTimer) window.clearInterval(progressTimer);
       tunnel?.close();
     }
+  };
+
+  // Top-level Run handler: figure out which layers to process, in
+  // single- or multi-layer mode, then call runOneLayer for each in
+  // series. Errors per layer are captured and shown as a final
+  // summary; we don't abort the batch on one bad layer.
+  runBtn.addEventListener("click", async () => {
+    clearError();
+    const checkedIdxs = getCheckedLayerIdxs();
+    if (checkedIdxs.length === 0) return;
+    const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
+    runBtn.disabled = true;
+    inspectStatus.textContent = "";
+
+    // Pre-resolve the (layer, scale) pairs. In single-layer mode we
+    // already inspected; in multi-layer mode we inspect each here.
+    type Job = { layer: DatasetLayer; insp: LayerInspection; scaleIdx: number };
+    const jobs: Job[] = [];
+    try {
+      if (checkedIdxs.length === 1 && currentInspection && selectedScaleIdx != null) {
+        jobs.push({
+          layer: segLayers[checkedIdxs[0]],
+          insp: currentInspection,
+          scaleIdx: selectedScaleIdx,
+        });
+      } else {
+        for (const i of checkedIdxs) {
+          const layer = segLayers[i];
+          showProgress(`Inspecting ${layer.name}…`);
+          const insp = await client.inspect(normalizeZarrUrl(layer.source), d.voxel_size_nm);
+          jobs.push({ layer, insp, scaleIdx: autoPickScaleIdx(insp, useRemote) });
+        }
+      }
+    } catch (err) {
+      hideProgress();
+      showError(`Inspection failed: ${(err as Error).message}`);
+      runBtn.disabled = false;
+      return;
+    }
+
+    // WASM-cap warning per local-mode job — one combined confirm.
+    if (!useRemote) {
+      const oversize = jobs.filter((j) => j.insp.scales[j.scaleIdx].approxBytes > SAFE_INPUT_BYTES);
+      if (oversize.length > 0) {
+        const lines = oversize
+          .map((j) => `  • ${j.layer.name}: ${(j.insp.scales[j.scaleIdx].approxBytes / 1024 ** 3).toFixed(2)} GB`)
+          .join("\n");
+        const ok = confirm(
+          `${oversize.length} layer(s) exceed Pyodide's ~4 GB cap (scipy needs 6–10× input). May OOM:\n${lines}\n\nContinue?`,
+        );
+        if (!ok) {
+          runBtn.disabled = false;
+          return;
+        }
+      }
+    }
+
+    const errors: { layer: string; message: string }[] = [];
+    for (let i = 0; i < jobs.length; i++) {
+      const { layer, insp, scaleIdx } = jobs[i];
+      const labelPrefix = jobs.length > 1 ? `[${i + 1}/${jobs.length}] ` : "";
+      try {
+        await runOneLayer(layer, insp, scaleIdx, useRemote, labelPrefix);
+      } catch (err) {
+        errors.push({ layer: layer.name, message: (err as Error).message });
+      }
+    }
+    hideProgress();
+    if (errors.length === 0) {
+      close();
+    } else if (errors.length === jobs.length) {
+      // All failed — surface the messages and let the user fix.
+      showError(
+        `All ${jobs.length} layer(s) failed:\n` +
+          errors.map((e) => `  • ${e.layer}: ${e.message}`).join("\n"),
+      );
+      runBtn.disabled = false;
+    } else {
+      // Partial success — succeeded layers are already in the DB.
+      const failed = errors.length;
+      const ok = jobs.length - failed;
+      showError(
+        `${ok}/${jobs.length} succeeded. Failed:\n` +
+          errors.map((e) => `  • ${e.layer}: ${e.message}`).join("\n"),
+      );
+      runBtn.disabled = false;
+    }
   });
 
-  void inspectLayer(currentLayer);
+  if (currentLayer) void inspectLayer(currentLayer);
 }
 
 function productOf(shape: number[]): number {

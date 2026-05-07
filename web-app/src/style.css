@@ -733,6 +733,43 @@ button {
   gap: 0.5rem;
   margin: 0.3rem 0;
 }
+
+.analysis-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.analysis-layers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+.analysis-layer-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+.analysis-layers-host {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+.analysis-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.analysis-layer-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
 .gemini-model-status {
   font-size: 0.75rem;
   color: var(--fg-dim);
