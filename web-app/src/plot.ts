@@ -8,6 +8,11 @@ const PYODIDE_MJS = `${PYODIDE_INDEX_URL}pyodide.mjs`;
 interface PyodideAPI {
   globals: { set(name: string, value: unknown): void; get(name: string): unknown };
   loadPackage(packages: string[]): Promise<void>;
+  // Scans Python source for import statements and loads any matching
+  // packages from Pyodide's prebuilt list (scipy, scikit-learn, sympy,
+  // statsmodels, networkx, etc.). Lets the model write `import scipy`
+  // without needing an explicit install step.
+  loadPackagesFromImports(code: string): Promise<void>;
   runPythonAsync(code: string): Promise<unknown>;
   toPy(obj: unknown): unknown;
 }

@@ -105,6 +105,13 @@ TOOLS:
     globals, plus np / pd already imported. NOT terminal; the harness
     feeds the captured stdout (and any value you assign to a global named
     _out) back to you so you can call answer/fly_to next.
+    Available packages: numpy, pandas, matplotlib are pre-imported. Other
+    Pyodide-prebuilt packages (scipy, scikit-learn, sympy, networkx,
+    statsmodels, etc.) auto-load when you import them — just write
+    'import scipy.stats' or 'from sklearn.cluster import DBSCAN' directly.
+    DO NOT call micropip.install or pyodide.loadPackage; the harness
+    handles it. If a package isn't available, you'll get
+    ModuleNotFoundError — pick a different approach.
     Conventions:
       - print(...) anything you want returned; it lands in stdout.
       - Set _out = <python value> for a structured return — DataFrames /
@@ -303,6 +310,13 @@ for _k, _v in _dfs.items():
     globals()[_k] = _v
 import numpy as np
 `);
+  // See execRunPython for why we auto-load imports — same problem
+  // here (e.g. 'import seaborn' would otherwise fail).
+  try {
+    await py.loadPackagesFromImports(code);
+  } catch (err) {
+    console.warn("[agent] loadPackagesFromImports failed:", (err as Error).message);
+  }
   ctx.callbacks.onProgress?.("Rendering plot…");
   await py.runPythonAsync(`
 plt.close("all")
@@ -351,6 +365,19 @@ for _k, _v in _dfs.items():
     globals()[_k] = _v
 import numpy as np
 `);
+  // Auto-load any prebuilt Pyodide packages the user code imports
+  // (scipy, scikit-learn, sympy, networkx, statsmodels, etc.). Without
+  // this the model has to know to call pyodide.loadPackage manually,
+  // which it never does — it just writes `import scipy` and gets a
+  // ModuleNotFoundError. Pyodide's loadPackagesFromImports is a
+  // no-op for already-loaded packages, so this is cheap to call every
+  // time.
+  ctx.callbacks.onProgress?.("Loading required Python packages…");
+  try {
+    await py.loadPackagesFromImports(code);
+  } catch (err) {
+    console.warn("[agent] loadPackagesFromImports failed:", (err as Error).message);
+  }
   ctx.callbacks.onProgress?.("Running Python…");
   // Run the user code inside a try/finally so we always restore stdout,
   // and capture (a) printed output, (b) whatever the model assigned to
@@ -502,6 +529,9 @@ function synthesizeErrorHint(
     }
     if (lower.includes("indentationerror") || lower.includes("syntaxerror")) {
       return `Python syntax error. Watch indentation; the harness wraps your code under a try block, so it must be valid as-is.`;
+    }
+    if (lower.includes("modulenotfounderror")) {
+      return `That package isn't in Pyodide's prebuilt list. Stick to numpy / pandas / matplotlib / scipy / scikit-learn / sympy / networkx / statsmodels — and DON'T call micropip.install or pyodide.loadPackage; the harness auto-loads anything you import. If your approach needs a missing package, use a different approach with the available ones.`;
     }
   }
   if (tool === "make_plot") {
