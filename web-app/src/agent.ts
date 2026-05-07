@@ -4,7 +4,14 @@ import type { DatasetDB } from "./db.js";
 import { runQuery } from "./db.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { loadPyodide } from "./plot.js";
-import type { DatasetDescriptor } from "./descriptor.js";
+import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
+import {
+  AnalysisClient,
+  isZarrSource,
+  normalizeZarrUrl,
+  SAFE_INPUT_BYTES,
+  type CustomAnalysisResult,
+} from "./analysis.js";
 
 export interface AgentTraceItem {
   tool: string;
@@ -147,6 +154,52 @@ TOOLS:
     Use this for "what's the median volume?" / "compute X then fly to
     the result" flows. For visual answers, prefer make_plot.
 
+  python_on_layers(python: string, layers: string[])
+    HEAVY-LIFT path. Runs Python in a Web Worker with the actual layer
+    voxels loaded as numpy arrays — use this when the user asks you to
+    OPERATE ON LAYERS (erode, dilate, threshold, skeletonize, mesh, find
+    contacts, distance transforms) or to PRODUCE A NEW LAYER.
+    'layers' is an array of layer names from describe_dataset (or from
+    the dataset header at the top of this prompt). Each layer is read
+    at the coarsest scale that fits the safe memory budget and bound to
+    a numpy array under its 'organelle_class' (or sanitized layer name).
+    Output channels — set any to deliver results:
+      _TG_NEW_LAYER       persist a derived volume as a new NG layer.
+                          Set to {"data": ndarray, "name": str,
+                          "type": "image"|"segmentation",
+                          "spacing_nm": [sx, sy, sz],
+                          "offset_nm": [ox, oy, oz]}.
+      _TG_NEW_MESH_LAYER  per-id meshing → precomputed mesh layer.
+      _TG_PLOT            matplotlib figure (auto-captured).
+      _TG_FLY             {"pos": [x,y,z], "segment_id": str?, "layer": str?}.
+      _TG_HIGHLIGHT       {"layer": str, "ids": list}.
+      _TG_NARRATION       short text shown to the user.
+      _TG_ANNOTATIONS     {"layer_name": str, "points": [{"pos": [x,y,z], "id"?, "description"?}]}.
+      _TG_ADD_SOURCE_LAYER add a remote zarr/n5/precomputed as a layer.
+    Available libraries: numpy / scipy.ndimage / skimage / pandas / matplotlib.
+    On the HF backend (when configured): cc3d, fastmorph (incl.
+    spherical_erode / spherical_dilate), fastremap, edt, kimimaro, zmesh.
+    Layer arrays come in array-axis order (typically z,y,x); 'spacing_nm'
+    on each layer is in the SAME axis order — pass it directly to
+    fastmorph.spherical_erode(anisotropy=...) without flipping.
+    Examples:
+      "erode mito by 50 nm" -> python_on_layers
+        layers=["mito"]
+        python="""
+import numpy as np
+from scipy.ndimage import binary_erosion
+arr = mito > 0
+# 50 nm radius in voxels along each array axis
+spacing = layers["mito"]["spacing"]
+r_vox = [max(1, int(round(50.0 / s))) for s in spacing]
+struct = np.ones([2*r+1 for r in r_vox], dtype=bool)
+out = binary_erosion(arr, structure=struct).astype(np.uint8)
+_TG_NEW_LAYER = {"data": out, "name": "mito_eroded_50nm",
+                 "type": "segmentation",
+                 "spacing_nm": spacing,
+                 "offset_nm": layers["mito"]["offset"]}
+"""
+
   answer(text: string)
     Deliver a final text answer to the user. Use for counts, means,
     informational questions. Keep it concise.
@@ -221,10 +274,17 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     "where are most of the X", "region", "near", bounding box,
     convex hull) or anything statistical beyond simple aggregates
     (median, percentile, std, IQR, correlation, regression)    -> run_python
+  - Operate on layer voxels (erode, dilate, threshold,
+    skeletonize, mesh, contact area between two label volumes)
+    OR persist a NEW LAYER ("add an eroded mito layer",
+    "show me the boundaries of X")                              -> python_on_layers
   - Never reach for run_sql when the question implies geometric
     reasoning over position columns — SQL can't compute density
     or pairwise distances. ORDER BY <size> DESC LIMIT 1 is NOT
     "the densest <class>".
+  - run_python operates on the SQL-derived DataFrames (df_<class>)
+    and pre-extracted COMs (com_<class>); it does NOT have access
+    to layer voxels. If you need pixels, use python_on_layers.
 
 BUDGET: You have AT MOST 5 tool calls per question. Plan accordingly — most flows above finish in 2-4. If you can't reach an answer in 5, end with answer() explaining what's missing rather than running out silently.
 
@@ -420,6 +480,204 @@ _PLOT_PNG = base64.b64encode(_buf.getvalue()).decode("ascii")
   return { rendered: true };
 }
 
+// python_on_layers — heavy-lift counterpart to run_python / make_plot.
+// Routes through AnalysisClient.customAnalyze (the same worker engine the
+// Custom Python dialog uses), so the agent can:
+//   - load actual layer voxels as numpy arrays
+//   - persist a derived volume via _TG_NEW_LAYER (e.g. eroded mito)
+//   - render a mesh layer via _TG_NEW_MESH_LAYER
+//   - add a remote source layer via _TG_ADD_SOURCE_LAYER
+//   - emit annotations / fly / highlight / plot / narration the same way
+// Auto-picks the coarsest scale under SAFE_INPUT_BYTES so the model never
+// has to think about scale paths. Errors back with an explicit message
+// when a requested layer isn't a zarr source (skeleton / precomputed
+// mesh layers aren't yet supported by the underlying engine).
+async function execPythonOnLayers(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<{ summary: string; produced: string[] }> {
+  if (!ctx.descriptor) throw new Error("No dataset loaded");
+  const code = coerceCodeArg(args, ["python", "code", "script", "source", "body"]);
+  if (!code) throw new Error("python_on_layers requires 'python'");
+  const layersArg = args.layers;
+  if (!Array.isArray(layersArg) || layersArg.length === 0) {
+    throw new Error(
+      "python_on_layers requires 'layers' (array of layer names from describe_dataset).",
+    );
+  }
+  const layerNames = (layersArg as unknown[]).map((v) => String(v));
+
+  // Resolve each name to a descriptor entry. Reject up front rather than
+  // letting the worker fail on a bad URL — the model will recover faster
+  // from a clear "no such layer" than from a worker error.
+  const resolved: { name: string; layer: DatasetLayer }[] = [];
+  for (const name of layerNames) {
+    const layer = ctx.descriptor.layers.find((l) => l.name === name);
+    if (!layer) {
+      const known = ctx.descriptor.layers.map((l) => l.name).join(", ");
+      throw new Error(
+        `No layer named '${name}'. Loaded layers: ${known || "(none)"}. Call describe_dataset to list them.`,
+      );
+    }
+    if (!isZarrSource(layer.source)) {
+      throw new Error(
+        `Layer '${name}' is not a zarr source — python_on_layers currently only supports zarr layers (skeleton / mesh-only sources need the Custom Analysis dialog or aren't yet supported).`,
+      );
+    }
+    resolved.push({ name, layer });
+  }
+
+  ctx.callbacks.onProgress?.("python_on_layers: inspecting layers…");
+  const client = new AnalysisClient();
+  const layersForRequest: {
+    varName: string;
+    url: string;
+    scalePath: string;
+    axesOrder: string[];
+    voxelNm: [number, number, number];
+    offsetNm: [number, number, number];
+  }[] = [];
+  try {
+    for (const { name, layer } of resolved) {
+      const url = normalizeZarrUrl(layer.source);
+      const insp = await client.inspect(url, ctx.descriptor.voxel_size_nm, (m) =>
+        ctx.callbacks.onProgress?.(`Inspecting ${name}: ${m}`),
+      );
+      // Pick the coarsest scale under the safe byte budget — same rule
+      // as custom_analysis_ui's default. Falls back to coarsest if every
+      // scale is over budget (Pyodide will OOM but the user sees what
+      // happened).
+      let idx = insp.scales.length - 1;
+      for (let i = insp.scales.length - 1; i >= 0; i--) {
+        if (insp.scales[i].approxBytes <= SAFE_INPUT_BYTES) {
+          idx = i;
+          break;
+        }
+      }
+      const scale = insp.scales[idx];
+      const varName = (layer.organelle_class ?? layer.name).replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+      layersForRequest.push({
+        varName,
+        url,
+        scalePath: scale.path,
+        axesOrder: insp.axes.map((a) => a.name),
+        voxelNm: scale.voxelNm,
+        offsetNm: scale.offsetNm,
+      });
+    }
+
+    // Tables already in the SQL DB are exposed as df_<class> just like
+    // run_python does, so a python_on_layers script can mix layer
+    // voxels with organelle metadata (e.g. erode mito where volume > X).
+    const tables = (ctx.db?.tables ?? []).map((t) => {
+      const result = runQuery(ctx.db!.db, `SELECT * FROM "${t.table_name}"`);
+      return {
+        name: t.organelle_class,
+        columns: result.columns,
+        rows: result.rows as (number | string | null)[][],
+      };
+    });
+
+    ctx.callbacks.onProgress?.("python_on_layers: running on layer voxels…");
+    const result = await client.customAnalyze(
+      {
+        kind: "custom",
+        layers: layersForRequest,
+        tables,
+        code,
+        timeoutMs: 60000,
+      },
+      (m) => ctx.callbacks.onProgress?.(m),
+    );
+
+    return applyCustomResult(result, code, ctx);
+  } finally {
+    client.terminate();
+  }
+}
+
+// Wire a CustomAnalysisResult through the agent's callbacks + viewer.
+// Mirrors what custom_analysis_ui's renderOutput does for layer-add
+// effects — keeps the two surfaces behaviourally consistent without
+// re-extracting the renderer in this commit.
+function applyCustomResult(
+  result: CustomAnalysisResult,
+  code: string,
+  ctx: AgentContext,
+): { summary: string; produced: string[] } {
+  const produced: string[] = [];
+
+  if (result.narration) {
+    ctx.callbacks.onAnswer?.(result.narration);
+    produced.push("narration");
+  }
+  if (result.plotPngDataUrl) {
+    ctx.callbacks.onPlot?.(result.plotPngDataUrl, code);
+    produced.push("plot");
+  }
+  if (result.fly) {
+    const pos = result.fly.pos;
+    const layer = result.fly.layer ?? "";
+    ctx.viewer.flyTo(pos, result.fly.segmentId, layer);
+    ctx.callbacks.onFly?.(pos, layer, result.fly.segmentId);
+    produced.push("fly");
+  }
+  if (result.highlight) {
+    ctx.viewer.highlightSegments(result.highlight.layer, result.highlight.ids);
+    ctx.callbacks.onHighlight?.(result.highlight.layer, result.highlight.ids);
+    produced.push("highlight");
+  }
+  if (result.annotations) {
+    ctx.viewer.addAnnotationLayer(result.annotations.layerName, result.annotations.points);
+    produced.push(`annotations(${result.annotations.points.length})`);
+  }
+  if (result.addSourceLayer) {
+    const { name, type, source } = result.addSourceLayer;
+    ctx.viewer.addLayerFromSpec({ type, name, source });
+    registerLayer(ctx.descriptor, { name, type, source });
+    produced.push(`addSourceLayer(${name})`);
+  }
+  if (result.meshLayer) {
+    ctx.viewer.addMeshOnlyLayer({
+      name: result.meshLayer.name,
+      source: result.meshLayer.source,
+      segments: result.meshLayer.meshIds,
+    });
+    registerLayer(ctx.descriptor, {
+      name: result.meshLayer.name,
+      type: "segmentation",
+      source: result.meshLayer.source,
+    });
+    produced.push(`meshLayer(${result.meshLayer.name})`);
+  }
+  if (result.newLayer) {
+    const { synthesizedId, name, type, shape, dtype } = result.newLayer;
+    const url = new URL(`synthesized/${synthesizedId}/`, window.location.href).toString();
+    const source = `zarr://${url}`;
+    ctx.viewer.addLayerFromSpec({ type, name, source });
+    registerLayer(ctx.descriptor, { name, type, source });
+    produced.push(`newLayer(${name}, ${shape.join("×")} ${dtype})`);
+  }
+  // Tables emitted by python_on_layers aren't ingested into the SQL DB
+  // here — that requires the dialog's helpers (loadSqlJs + create/insert)
+  // and would expand this commit too far. The agent can still see the
+  // table data via stdout if it printed; raw ingestion lands with the
+  // shared renderer in Theme D.
+  if (result.table) {
+    produced.push(`table(${result.table.name}, ${result.table.rows.length} rows; not ingested in this build)`);
+  }
+
+  const summary = produced.length > 0 ? `Produced: ${produced.join(", ")}` : "No output channels set.";
+  return { summary: result.stdout ? `${summary}\nstdout: ${result.stdout.slice(0, 1000)}` : summary, produced };
+}
+
+function registerLayer(d: DatasetDescriptor | null, layer: DatasetLayer): void {
+  if (!d) return;
+  const i = d.layers.findIndex((l) => l.name === layer.name);
+  if (i >= 0) d.layers[i] = layer;
+  else d.layers.push(layer);
+}
+
 async function execAnswer(
   args: Record<string, unknown>,
   ctx: AgentContext,
@@ -560,6 +818,7 @@ const TOOL_EXECUTORS: Record<
 > = {
   run_sql: execRunSql,
   run_python: execRunPython,
+  python_on_layers: execPythonOnLayers,
   fly_to: execFlyTo,
   highlight_segments: execHighlight,
   make_plot: execMakePlot,
@@ -776,7 +1035,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       messages.push({ role: "assistant", content: JSON.stringify(call) });
       messages.push({
         role: "user",
-        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, run_python, fly_to, highlight_segments, make_plot, answer, done.`,
+        content: `Error: tool "${call.tool}" does not exist. Pick from: run_sql, run_python, python_on_layers, fly_to, highlight_segments, make_plot, answer, done.`,
       });
       continue;
     }
