@@ -270,6 +270,8 @@ export const WEBLLM_MODELS: WebLLMModelInfo[] = [
   { id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "7B · f16", sizeGB: 4.0, recommended: 5, note: "code-tuned, needs ~6 GB VRAM" },
   // Tier 4 — strong, more accessible.
   { id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC", family: "Qwen2.5-Coder", size: "3B · f16", sizeGB: 2.0, recommended: 4, note: "recommended sweet spot for agent" },
+  { id: "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC", family: "DeepSeek-R1-Distill-Qwen", size: "7B · f16", sizeGB: 4.0, recommended: 4, note: "reasoning-model distill — best raw code quality, but rambles before answering (may slow agent loop)" },
+  { id: "DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC", family: "DeepSeek-R1-Distill-Llama", size: "8B · f16", sizeGB: 4.5, recommended: 4, note: "Llama-based R1 distill — same caveat re: <think> ramble" },
   { id: "Qwen2.5-Coder-3B-Instruct-q4f32_1-MLC", family: "Qwen2.5-Coder", size: "3B · f32", sizeGB: 2.6, recommended: 4, note: "Intel Mac / older GPU compatible" },
   { id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC", family: "Hermes-3 Llama-3.2", size: "3B · f16", sizeGB: 2.0, recommended: 4, note: "tool-tuned, accessible size" },
   { id: "Qwen3-8B-q4f16_1-MLC", family: "Qwen3", size: "8B · f16", sizeGB: 4.5, recommended: 4, note: "newer general, very capable" },
