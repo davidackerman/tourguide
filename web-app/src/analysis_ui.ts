@@ -193,6 +193,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     inspection: LayerInspection | null;
     selectedScaleIdx: number | null;
     inspecting: boolean;
+    inspectingPromise?: Promise<void>;
     inspectError: string | null;
   };
   const layerSlots: LayerSlot[] = segLayers.map(() => ({
@@ -267,33 +268,56 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     };
   };
 
-  // Lazy inspection: probe a layer for its scales when first needed
-  // in multi-layer mode. Already-inspected layers no-op.
-  const ensureInspected = async (layerIdx: number): Promise<void> => {
+  // AnalysisClient runs a single shared worker — only one inspect or
+  // analyze can be in flight at a time. When multiple layer checkboxes
+  // fire ensureInspected concurrently, all but the first would trip
+  // 'Analysis already in progress'. Serialize via a chained promise:
+  // each inspect waits for the previous to finish.
+  let inspectQueue: Promise<unknown> = Promise.resolve();
+  const ensureInspected = (layerIdx: number): Promise<void> => {
     const slot = layerSlots[layerIdx];
-    if (slot.inspection || slot.inspecting) return;
-    slot.inspecting = true;
+    if (slot.inspection) return Promise.resolve();
+    if (slot.inspecting && slot.inspectingPromise) return slot.inspectingPromise;
     const statusEl = layersHost.querySelector<HTMLSpanElement>(
       `[data-layer-status="${layerIdx}"]`,
     );
-    if (statusEl) statusEl.textContent = "inspecting…";
-    try {
-      const url = normalizeZarrUrl(segLayers[layerIdx].source);
-      const insp = await client.inspect(url, d.voxel_size_nm);
-      slot.inspection = insp;
-      const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
-      slot.selectedScaleIdx = autoPickScaleIdx(insp, useRemote);
-      if (statusEl) statusEl.textContent = "";
-      populateLayerScaleSelect(layerIdx);
-    } catch (err) {
-      slot.inspectError = (err as Error).message;
-      if (statusEl) {
-        statusEl.textContent = `✗ ${slot.inspectError.slice(0, 80)}`;
-        statusEl.classList.add("err");
+    if (statusEl) statusEl.textContent = "queued…";
+    slot.inspecting = true;
+    const job = inspectQueue.then(async () => {
+      // Re-check after we get the queue slot — the layer may have been
+      // inspected by a parallel path while we were waiting.
+      if (slot.inspection) {
+        slot.inspecting = false;
+        return;
       }
-    } finally {
-      slot.inspecting = false;
-    }
+      if (statusEl) statusEl.textContent = "inspecting…";
+      try {
+        const url = normalizeZarrUrl(segLayers[layerIdx].source);
+        const insp = await client.inspect(url, d.voxel_size_nm);
+        slot.inspection = insp;
+        const useRemote = !!(analysisBackendUrl && remoteToggle.checked);
+        slot.selectedScaleIdx = autoPickScaleIdx(insp, useRemote);
+        if (statusEl) {
+          statusEl.textContent = "";
+          statusEl.classList.remove("err");
+        }
+        populateLayerScaleSelect(layerIdx);
+      } catch (err) {
+        slot.inspectError = (err as Error).message;
+        if (statusEl) {
+          statusEl.textContent = `✗ ${slot.inspectError.slice(0, 80)}`;
+          statusEl.classList.add("err");
+        }
+      } finally {
+        slot.inspecting = false;
+      }
+    });
+    slot.inspectingPromise = job;
+    // Chain so the next caller queues behind this one. Catch swallows
+    // errors at the queue level — individual error handling already
+    // happened inside the job above.
+    inspectQueue = job.catch(() => {});
+    return job;
   };
 
   // Toggle visibility of per-row scale dropdowns based on how many
