@@ -69,18 +69,25 @@ export type ProgressCallback = (message: string, phase?: string) => void;
 
 // Strip Neuroglancer-style datasource prefixes so zarrita gets a plain URL.
 // "zarr://https://..." → "https://...", "zarr2://./x" → "./x", etc.
-// Pull the first zarr-prefixed entry out of a string-or-array source.
-// Lets analysis flows that need a single zarr URL keep working when a
-// layer's source is an array (e.g. zarr volume + precomputed mesh +
-// precomputed skeletons combined on one segmentation layer).
+// Pull the first zarr entry out of a string-or-array source. Recognizes
+// both NG-style scheme prefixes ('zarr://', 'zarr2://', 'zarr3://') and
+// bare URLs whose path makes them obviously zarr (contains '.zarr/' or
+// ends in '.zarr'). The latter handles NG state JSON, which omits the
+// scheme prefix because NG infers it from the URL.
 function pickZarrEntry(source: string | string[]): string | null {
   const list = Array.isArray(source) ? source : [source];
-  return list.find((s) => /^zarr(2|3)?:\/\//.test(s)) ?? null;
+  return (
+    list.find((s) => /^zarr(2|3)?:\/\//.test(s)) ??
+    list.find((s) => /\.zarr(\/|$)/i.test(s)) ??
+    null
+  );
 }
 
 export function normalizeZarrUrl(source: string | string[]): string {
   const entry = pickZarrEntry(source);
   if (!entry) throw new Error("Layer source has no zarr URL to load");
+  // Strip whichever prefix is present (zarr://, zarr2://, zarr3://);
+  // a bare URL passes through unchanged.
   return entry.replace(/^zarr(2|3)?:\/\//, "");
 }
 
