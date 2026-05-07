@@ -16,9 +16,15 @@ export interface OrganelleRow {
   object_id: number | string;
   volume_nm_3?: number;
   surface_area_nm_2?: number;
-  position_x_nm?: number;
-  position_y_nm?: number;
-  position_z_nm?: number;
+  // Canonical name 'com' (center of mass) matches the cellmap-analyze
+  // convention. Values are in world-space nm: skimage regionprops with
+  // spacing=voxel_size_nm returns centroids in nm relative to voxel
+  // (0,0,0); we add the layer's offset (also in nm) to get the world
+  // coordinate. Frontend flyTo expects nm and converts to NG runtime
+  // units using the live coordinateSpace.
+  com_x_nm?: number;
+  com_y_nm?: number;
+  com_z_nm?: number;
   [extra: string]: unknown;
 }
 
@@ -41,9 +47,9 @@ export interface DatasetDB {
 const STANDARD_NUMERIC_COLUMNS = [
   "volume_nm_3",
   "surface_area_nm_2",
-  "position_x_nm",
-  "position_y_nm",
-  "position_z_nm",
+  "com_x_nm",
+  "com_y_nm",
+  "com_z_nm",
 ];
 
 // Maps every common variant of a column name to one of the canonical
@@ -57,34 +63,33 @@ const COLUMN_ALIASES: Record<string, string> = {
   object: "object_id",
   segment_id: "object_id",
   label: "object_id",
-  // Position / centroid / center-of-mass — every flavor → position_*_nm
-  position_x: "position_x_nm",
-  position_y: "position_y_nm",
-  position_z: "position_z_nm",
-  com_x: "position_x_nm",
-  com_y: "position_y_nm",
-  com_z: "position_z_nm",
-  com_x_nm: "position_x_nm",
-  com_y_nm: "position_y_nm",
-  com_z_nm: "position_z_nm",
-  centroid_x: "position_x_nm",
-  centroid_y: "position_y_nm",
-  centroid_z: "position_z_nm",
-  centroid_x_nm: "position_x_nm",
-  centroid_y_nm: "position_y_nm",
-  centroid_z_nm: "position_z_nm",
-  x: "position_x_nm",
-  y: "position_y_nm",
-  z: "position_z_nm",
-  // Volume → volume_nm_3 (cellmap-analyze writes 'volume_(nm^3)' which
-  // the special-char sanitizer collapses to 'volume_nm_3' first; this
-  // pass catches anything else)
+  // Center of mass / centroid / position — every flavor → com_*_nm
+  // (matches the cellmap-analyze convention 'com_x_(nm)' which the
+  // special-char sanitizer collapses to 'com_x_nm' first).
+  com_x: "com_x_nm",
+  com_y: "com_y_nm",
+  com_z: "com_z_nm",
+  position_x: "com_x_nm",
+  position_y: "com_y_nm",
+  position_z: "com_z_nm",
+  position_x_nm: "com_x_nm",
+  position_y_nm: "com_y_nm",
+  position_z_nm: "com_z_nm",
+  centroid_x: "com_x_nm",
+  centroid_y: "com_y_nm",
+  centroid_z: "com_z_nm",
+  centroid_x_nm: "com_x_nm",
+  centroid_y_nm: "com_y_nm",
+  centroid_z_nm: "com_z_nm",
+  x: "com_x_nm",
+  y: "com_y_nm",
+  z: "com_z_nm",
+  // Volume → volume_nm_3
   volume: "volume_nm_3",
   size: "volume_nm_3",
   vol: "volume_nm_3",
   // Surface area → surface_area_nm_2
   surface_area: "surface_area_nm_2",
-  surface_area_nm_2_: "surface_area_nm_2",
   surface: "surface_area_nm_2",
   sa: "surface_area_nm_2",
 };

@@ -46,7 +46,7 @@ decide what to do and reply with a strict JSON object:
 Rules:
 - "navigate" when the user wants to be taken somewhere or see a specific object/example
   (e.g. "show me the largest mito", "fly to nucleus 5", "take me to a lysosome near X").
-  The SQL MUST select object_id, position_x, position_y, position_z, and any relevant
+  The SQL MUST select object_id, com_x_nm, com_y_nm, com_z_nm, and any relevant
   metric columns, ORDER BY the relevant column, LIMIT 1 (or a small N if user says "top 5").
 - "informational" when the user wants a number, count, or summary, not a location
   (e.g. "how many nuclei?", "average volume of mitochondria").
@@ -155,9 +155,11 @@ export async function runNLQuery(
   }
 
   if (plan.intent === "navigate") {
-    const px = rowObj.position_x;
-    const py = rowObj.position_y;
-    const pz = rowObj.position_z;
+    // Try canonical com_*_nm names first, fall back to legacy variants
+    // for already-cached / shared tables built before the rename.
+    const px = rowObj.com_x_nm ?? rowObj.position_x_nm ?? rowObj.position_x ?? rowObj.com_x;
+    const py = rowObj.com_y_nm ?? rowObj.position_y_nm ?? rowObj.position_y ?? rowObj.com_y;
+    const pz = rowObj.com_z_nm ?? rowObj.position_z_nm ?? rowObj.position_z ?? rowObj.com_z;
     if (typeof px === "number" && typeof py === "number" && typeof pz === "number") {
       const layer = layerForTable(db, plan.sql);
       if (layer) {

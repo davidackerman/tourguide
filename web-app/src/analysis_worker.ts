@@ -11,7 +11,7 @@
 //   4. Hand that TypedArray + shape + spacing to Pyodide.
 //   5. Run scipy.ndimage.label (if needed) + skimage.measure.regionprops_table.
 //   6. Post results back as columnar rows matching the existing CSV schema
-//      (object_id, volume, position_x/y/z, ...) so the rest of the app can
+//      (object_id, volume_nm_3, com_x_nm/y/z, ...) so the rest of the app can
 //      consume them with no changes.
 
 import * as zarr from "zarrita";
@@ -675,9 +675,9 @@ n_vox = [int(v / voxel_volume_nm3 + 0.5) for v in volume_col]
 columns = [
     "object_id",
     "volume_nm_3",
-    "position_x_nm",
-    "position_y_nm",
-    "position_z_nm",
+    "com_x_nm",
+    "com_y_nm",
+    "com_z_nm",
     "bbox_min_x_nm",
     "bbox_min_y_nm",
     "bbox_min_z_nm",

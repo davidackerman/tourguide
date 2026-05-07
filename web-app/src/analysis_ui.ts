@@ -835,11 +835,18 @@ def bbox_pair(world_axis):
 cx = axis_col("centroid", "x"); cy = axis_col("centroid", "y"); cz = axis_col("centroid", "z")
 bx0, bx1 = bbox_pair("x"); by0, by1 = bbox_pair("y"); bz0, bz1 = bbox_pair("z")
 
+# Coordinate math (both centroid + bbox columns end in 'world-space nm'):
+#   - regionprops_table with spacing=voxel_size_nm returns 'area' in
+#     nm^3, 'centroid-i' in nm relative to voxel (0,0,0).
+#   - 'bbox-i' is in voxel indices regardless of spacing — multiply by
+#     spacing[i] then add offsets[i] to get nm.
+#   - We add offsets[i] (the layer's world-space origin in nm) to land
+#     in Neuroglancer's frame. axis_col / bbox_pair above do this.
 import pandas as pd
 df = pd.DataFrame({
     "object_id":             [int(v) for v in tbl["label"].tolist()],
     "volume_nm_3":           [float(v) for v in tbl["area"].tolist()],
-    "position_x_nm": cx, "position_y_nm": cy, "position_z_nm": cz,
+    "com_x_nm": cx, "com_y_nm": cy, "com_z_nm": cz,
     "bbox_min_x_nm": bx0, "bbox_min_y_nm": by0, "bbox_min_z_nm": bz0,
     "bbox_max_x_nm": bx1, "bbox_max_y_nm": by1, "bbox_max_z_nm": bz1,
     "equivalent_diameter_nm": [float(v) for v in tbl["equivalent_diameter_area"].tolist()],

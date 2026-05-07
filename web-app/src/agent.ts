@@ -67,7 +67,7 @@ const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): strin
 You are the agent for a 3D microscopy viewer. You respond to user questions by calling one tool at a time.
 
 ${d ? `DATASET: ${d.display_name}  (voxel size: ${d.voxel_size_nm.join(" × ")} nm)` : ""}
-COORDINATES: ALL positions everywhere — CSV position_x/y/z columns, fly_to inputs, the viewer's display — are in NANOMETERS. Pass nm values directly; do NOT convert to voxels.
+COORDINATES: ALL positions everywhere — CSV com_x_nm / com_y_nm / com_z_nm columns, fly_to inputs, the viewer's display — are in NANOMETERS in Neuroglancer's reference frame. Pass nm values directly; do NOT convert to voxels and do NOT add the layer's offset (already baked in).
 
 ${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — only answer() and done() are useful."}
 
@@ -85,8 +85,9 @@ TOOLS:
 
   fly_to(position: [x, y, z], layer: string, object_id?: string)
     Move the viewer camera to these NANOMETER coordinates, switch on this
-    layer, and highlight object_id if given. Use position_x/position_y/
-    position_z values from run_sql results AS-IS — no scaling.
+    layer, and highlight object_id if given. Use com_x_nm / com_y_nm /
+    com_z_nm values from run_sql results AS-IS — no scaling, no offset
+    addition (already in nm in NG's frame).
 
   highlight_segments(layer: string, ids: number[] | string[])
     In a SEGMENTATION layer, show only these segment ids — everything
@@ -156,11 +157,18 @@ TOOLS:
 CRITICAL — TABLE AND COLUMN NAMES VARY PER DATASET. The schema above is
 the single source of truth. Tourguide normalizes incoming columns at
 ingest, so most tables use canonical names with explicit nm units:
-  - position_x_nm / position_y_nm / position_z_nm   (center of mass, nm)
-  - volume_nm_3 / surface_area_nm_2                 (sizes)
-  - object_id                                       (segment id)
+  - com_x_nm / com_y_nm / com_z_nm        (center of mass in nm,
+                                           = voxel_centroid * voxel_size + offset)
+  - volume_nm_3 / surface_area_nm_2       (sizes)
+  - bbox_min_x_nm / bbox_max_x_nm / etc.  (bounding box, nm)
+  - equivalent_diameter_nm                (sphere diameter, nm)
+  - object_id                             (segment id)
+All world coordinates are nanometers in Neuroglancer's reference frame:
+positions account for the layer's voxel size AND its offset. Pass
+them straight to fly_to without scaling.
+
 …but older / hand-authored / shared tables can have other names
-('com_x_nm', 'centroid_x', 'volume', etc.). ALWAYS pick names from
+('position_x', 'centroid_x', 'volume', etc.). ALWAYS pick names from
 the schema listed above. NEVER invent column names from a typical-
 flow example — those are illustrative, not literal. The same goes
 for table names: the actual table for a class might be 'mito',
@@ -340,7 +348,7 @@ async function execFlyTo(
     const v = (pos as number[])[i];
     if (!Number.isFinite(v) || Math.abs(v) > FLY_TO_MAX_NM) {
       throw new Error(
-        `fly_to position[${i}] = ${v} nm is out of dataset range. Positions must come from the schema's position columns (typically position_x_nm / position_y_nm / position_z_nm — check the schema), in nanometers. SELECT those columns alongside object_id, then pass them as fly_to's position. Do NOT pass volume / surface_area / object_id as position.`,
+        `fly_to position[${i}] = ${v} nm is out of dataset range. Positions must come from the schema's center-of-mass columns (typically com_x_nm / com_y_nm / com_z_nm — check the schema), in nanometers. SELECT those columns alongside object_id, then pass them as fly_to's position. Do NOT pass volume / surface_area / object_id as position.`,
       );
     }
   }
@@ -523,8 +531,8 @@ def _materialize_tables(_tables_json):
         # — same physical meaning.
         com_cols = None
         for cands in [
-            ["position_x_nm", "position_y_nm", "position_z_nm"],
             ["com_x_nm", "com_y_nm", "com_z_nm"],
+            ["position_x_nm", "position_y_nm", "position_z_nm"],
             ["com_x", "com_y", "com_z"],
             ["position_x", "position_y", "position_z"],
         ]:

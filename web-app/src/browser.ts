@@ -225,12 +225,12 @@ function toCsv(columns: string[], rows: unknown[][]): string {
 }
 
 function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<string, unknown>): void {
-  // Try canonical names first, fall back to legacy. Covers both
-  // freshly-ingested tables (post-rename) and old shared / cached
-  // tables that pre-date the canonical schema.
-  const px = row.position_x_nm ?? row.position_x ?? row.com_x_nm ?? row.com_x;
-  const py = row.position_y_nm ?? row.position_y ?? row.com_y_nm ?? row.com_y;
-  const pz = row.position_z_nm ?? row.position_z ?? row.com_z_nm ?? row.com_z;
+  // Try canonical com_*_nm names first, fall back to legacy variants.
+  // Values come straight from the row; flyTo handles the nm → NG-
+  // runtime-units conversion via the live coordinateSpace.
+  const px = row.com_x_nm ?? row.position_x_nm ?? row.position_x ?? row.com_x;
+  const py = row.com_y_nm ?? row.position_y_nm ?? row.position_y ?? row.com_y;
+  const pz = row.com_z_nm ?? row.position_z_nm ?? row.position_z ?? row.com_z;
   const id = row.object_id;
   if (typeof px === "number" && typeof py === "number" && typeof pz === "number") {
     viewer.flyTo([px, py, pz], id !== undefined ? String(id) : undefined, table.layer_name);

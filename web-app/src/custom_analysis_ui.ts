@@ -759,7 +759,7 @@ ${tableDescs.join("\n") || "(none)"}
 ${librariesBlock}
 
 OUTPUT CONTRACT (set zero or more):
-- \`_TG_TABLE\`: a pandas DataFrame — will be added to the sidebar as a new table. If it has object_id + position_x/y/z columns, rows become click-to-fly.
+- \`_TG_TABLE\`: a pandas DataFrame — will be added to the sidebar as a new table. If it has object_id + com_x_nm / com_y_nm / com_z_nm columns (nanometers in NG's frame), rows become click-to-fly.
 - \`_TG_TABLE_NAME\`: string — name for the table.
 - \`_TG_FLY\`: dict \`{"pos": [x, y, z], "segment_id": "...", "layer": "..."}\` — world-nm position to fly the viewer to.
 - \`_TG_NARRATION\`: string — short human-readable summary shown under the output.
