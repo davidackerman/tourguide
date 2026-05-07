@@ -154,15 +154,17 @@ TOOLS:
     End this turn. You MUST call this after delivering any answer / plot / fly_to.
 
 CRITICAL — TABLE AND COLUMN NAMES VARY PER DATASET. The schema above is
-the single source of truth. Different datasets use different conventions:
-  - cellmap-analyze CSVs: 'volume_(nm^3)', 'com_x_(nm)' / sanitized 'volume_nm_3', 'com_x_nm'
-  - tourguide-derived computed tables: plain 'volume', 'position_x', 'position_y', 'position_z'
-  - other sources may use 'centroid_x', 'centroid-0', 'cx', etc.
-ALWAYS pick column names from the SQL tables / DataFrames listed above.
-NEVER invent column names from a typical-flow example — those are
-illustrative, not literal. The same goes for table names: the actual
-table for a class might be 'mito', 'mito_computed_s0', 'mitochondria',
-or whatever's listed.
+the single source of truth. Tourguide normalizes incoming columns at
+ingest, so most tables use canonical names with explicit nm units:
+  - position_x_nm / position_y_nm / position_z_nm   (center of mass, nm)
+  - volume_nm_3 / surface_area_nm_2                 (sizes)
+  - object_id                                       (segment id)
+…but older / hand-authored / shared tables can have other names
+('com_x_nm', 'centroid_x', 'volume', etc.). ALWAYS pick names from
+the schema listed above. NEVER invent column names from a typical-
+flow example — those are illustrative, not literal. The same goes
+for table names: the actual table for a class might be 'mito',
+'mito_computed_s0', 'mitochondria', or whatever's listed.
 
 CRITICAL — fly_to expects POSITION coordinates in nanometers, NOT a
 volume / surface_area / id. ALWAYS include position columns (whatever
@@ -338,7 +340,7 @@ async function execFlyTo(
     const v = (pos as number[])[i];
     if (!Number.isFinite(v) || Math.abs(v) > FLY_TO_MAX_NM) {
       throw new Error(
-        `fly_to position[${i}] = ${v} nm is out of dataset range. Positions must come from com_x_nm / com_y_nm / com_z_nm columns of the SQL result, in nanometers. SELECT those columns alongside object_id (e.g. 'SELECT object_id, com_x_nm, com_y_nm, com_z_nm FROM mito ORDER BY volume_nm_3 DESC LIMIT 1'), then pass the COM values as position. Do NOT pass volume / surface_area / object_id as position.`,
+        `fly_to position[${i}] = ${v} nm is out of dataset range. Positions must come from the schema's position columns (typically position_x_nm / position_y_nm / position_z_nm — check the schema), in nanometers. SELECT those columns alongside object_id, then pass them as fly_to's position. Do NOT pass volume / surface_area / object_id as position.`,
       );
     }
   }
@@ -521,6 +523,7 @@ def _materialize_tables(_tables_json):
         # — same physical meaning.
         com_cols = None
         for cands in [
+            ["position_x_nm", "position_y_nm", "position_z_nm"],
             ["com_x_nm", "com_y_nm", "com_z_nm"],
             ["com_x", "com_y", "com_z"],
             ["position_x", "position_y", "position_z"],

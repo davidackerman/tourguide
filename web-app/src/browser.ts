@@ -2,7 +2,17 @@ import type { DatasetDB, IngestedTable, QueryResult } from "./db.js";
 import { runQuery } from "./db.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 
-const NAVIGABLE_NUMERIC_COLUMNS = ["volume", "surface_area"];
+// Columns that count as 'navigable numeric' — sortable, displayed in
+// the structured browser. Canonical names (with explicit nm units)
+// plus a few legacy aliases so already-cached / shared tables that
+// pre-date the rename still work.
+const NAVIGABLE_NUMERIC_COLUMNS = [
+  "volume_nm_3",
+  "surface_area_nm_2",
+  // Legacy:
+  "volume",
+  "surface_area",
+];
 
 export interface BrowserContext {
   db: DatasetDB;
@@ -215,9 +225,12 @@ function toCsv(columns: string[], rows: unknown[][]): string {
 }
 
 function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<string, unknown>): void {
-  const px = row.position_x;
-  const py = row.position_y;
-  const pz = row.position_z;
+  // Try canonical names first, fall back to legacy. Covers both
+  // freshly-ingested tables (post-rename) and old shared / cached
+  // tables that pre-date the canonical schema.
+  const px = row.position_x_nm ?? row.position_x ?? row.com_x_nm ?? row.com_x;
+  const py = row.position_y_nm ?? row.position_y ?? row.com_y_nm ?? row.com_y;
+  const pz = row.position_z_nm ?? row.position_z ?? row.com_z_nm ?? row.com_z;
   const id = row.object_id;
   if (typeof px === "number" && typeof py === "number" && typeof pz === "number") {
     viewer.flyTo([px, py, pz], id !== undefined ? String(id) : undefined, table.layer_name);

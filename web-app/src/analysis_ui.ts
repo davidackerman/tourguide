@@ -837,13 +837,13 @@ bx0, bx1 = bbox_pair("x"); by0, by1 = bbox_pair("y"); bz0, bz1 = bbox_pair("z")
 
 import pandas as pd
 df = pd.DataFrame({
-    "object_id":           [int(v) for v in tbl["label"].tolist()],
-    "volume":              [float(v) for v in tbl["area"].tolist()],
-    "position_x": cx, "position_y": cy, "position_z": cz,
-    "bbox_min_x": bx0, "bbox_min_y": by0, "bbox_min_z": bz0,
-    "bbox_max_x": bx1, "bbox_max_y": by1, "bbox_max_z": bz1,
-    "equivalent_diameter": [float(v) for v in tbl["equivalent_diameter_area"].tolist()],
-    "n_voxels":            [int(v / voxel_volume + 0.5) for v in tbl["area"].tolist()],
+    "object_id":             [int(v) for v in tbl["label"].tolist()],
+    "volume_nm_3":           [float(v) for v in tbl["area"].tolist()],
+    "position_x_nm": cx, "position_y_nm": cy, "position_z_nm": cz,
+    "bbox_min_x_nm": bx0, "bbox_min_y_nm": by0, "bbox_min_z_nm": bz0,
+    "bbox_max_x_nm": bx1, "bbox_max_y_nm": by1, "bbox_max_z_nm": bz1,
+    "equivalent_diameter_nm": [float(v) for v in tbl["equivalent_diameter_area"].tolist()],
+    "n_voxels":              [int(v / voxel_volume + 0.5) for v in tbl["area"].tolist()],
 })
 _TG_TABLE = df
 _TG_TABLE_NAME = "regionprops"

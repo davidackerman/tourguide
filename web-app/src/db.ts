@@ -14,11 +14,11 @@ export function loadSqlJs(): Promise<SqlJsStatic> {
 
 export interface OrganelleRow {
   object_id: number | string;
-  volume?: number;
-  surface_area?: number;
-  position_x?: number;
-  position_y?: number;
-  position_z?: number;
+  volume_nm_3?: number;
+  surface_area_nm_2?: number;
+  position_x_nm?: number;
+  position_y_nm?: number;
+  position_z_nm?: number;
   [extra: string]: unknown;
 }
 
@@ -35,32 +35,58 @@ export interface DatasetDB {
   tables: IngestedTable[];
 }
 
+// Canonical column names. Units explicit in the name so an agent
+// reading the schema doesn't have to guess (cellmap-analyze CSVs use
+// these conventions; tourguide-produced regionprops outputs match).
 const STANDARD_NUMERIC_COLUMNS = [
-  "volume",
-  "surface_area",
-  "position_x",
-  "position_y",
-  "position_z",
+  "volume_nm_3",
+  "surface_area_nm_2",
+  "position_x_nm",
+  "position_y_nm",
+  "position_z_nm",
 ];
 
+// Maps every common variant of a column name to one of the canonical
+// names above. Applied at CSV-ingest time so all tables — whether
+// produced by cellmap-analyze, tourguide's own Σ Analyze, or hand-
+// authored — converge on a single schema.
 const COLUMN_ALIASES: Record<string, string> = {
+  // Object id
   id: "object_id",
   obj_id: "object_id",
   object: "object_id",
   segment_id: "object_id",
-  com_x: "position_x",
-  com_y: "position_y",
-  com_z: "position_z",
-  centroid_x: "position_x",
-  centroid_y: "position_y",
-  centroid_z: "position_z",
-  x: "position_x",
-  y: "position_y",
-  z: "position_z",
-  size: "volume",
-  vol: "volume",
-  sa: "surface_area",
-  surface: "surface_area",
+  label: "object_id",
+  // Position / centroid / center-of-mass — every flavor → position_*_nm
+  position_x: "position_x_nm",
+  position_y: "position_y_nm",
+  position_z: "position_z_nm",
+  com_x: "position_x_nm",
+  com_y: "position_y_nm",
+  com_z: "position_z_nm",
+  com_x_nm: "position_x_nm",
+  com_y_nm: "position_y_nm",
+  com_z_nm: "position_z_nm",
+  centroid_x: "position_x_nm",
+  centroid_y: "position_y_nm",
+  centroid_z: "position_z_nm",
+  centroid_x_nm: "position_x_nm",
+  centroid_y_nm: "position_y_nm",
+  centroid_z_nm: "position_z_nm",
+  x: "position_x_nm",
+  y: "position_y_nm",
+  z: "position_z_nm",
+  // Volume → volume_nm_3 (cellmap-analyze writes 'volume_(nm^3)' which
+  // the special-char sanitizer collapses to 'volume_nm_3' first; this
+  // pass catches anything else)
+  volume: "volume_nm_3",
+  size: "volume_nm_3",
+  vol: "volume_nm_3",
+  // Surface area → surface_area_nm_2
+  surface_area: "surface_area_nm_2",
+  surface_area_nm_2_: "surface_area_nm_2",
+  surface: "surface_area_nm_2",
+  sa: "surface_area_nm_2",
 };
 
 function safeTableName(name: string): string {
@@ -114,6 +140,9 @@ function inferColumnTypes(
 ): Record<string, "INTEGER" | "REAL" | "TEXT"> {
   const out: Record<string, "INTEGER" | "REAL" | "TEXT"> = {};
   for (const col of columns) {
+    // object_id can land as either 'object_id' (preferred) or 'label'
+    // (skimage regionprops convention before COLUMN_ALIASES rewrites
+    // it). Treat both as integer up-front.
     if (col === "object_id") {
       out[col] = "INTEGER";
       continue;

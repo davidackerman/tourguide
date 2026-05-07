@@ -674,17 +674,17 @@ n_vox = [int(v / voxel_volume_nm3 + 0.5) for v in volume_col]
 
 columns = [
     "object_id",
-    "volume",
-    "position_x",
-    "position_y",
-    "position_z",
-    "bbox_min_x",
-    "bbox_min_y",
-    "bbox_min_z",
-    "bbox_max_x",
-    "bbox_max_y",
-    "bbox_max_z",
-    "equivalent_diameter",
+    "volume_nm_3",
+    "position_x_nm",
+    "position_y_nm",
+    "position_z_nm",
+    "bbox_min_x_nm",
+    "bbox_min_y_nm",
+    "bbox_min_z_nm",
+    "bbox_max_x_nm",
+    "bbox_max_y_nm",
+    "bbox_max_z_nm",
+    "equivalent_diameter_nm",
     "n_voxels",
 ]
 rows = []
