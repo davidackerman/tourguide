@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import tempfile
 import time
@@ -63,10 +64,34 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days; survives idle Space sleep
                                           # artifacts in /tmp are best-effort
                                           # persistence, not durable storage.
 
+# Persisted share-link store. Long permalink URLs (descriptor + viewer
+# state + computed tables) can hit 60k chars — chat apps and email
+# clients truncate beyond ~4k. The frontend POSTs the encoded suffix
+# here, gets back a short id, and shares `<origin>/?s=<id>`. On load,
+# `?s=<id>` is GETted, the suffix replayed, the decode path proceeds
+# unchanged. Same /tmp caveat as above — durable across idle, not
+# across container cycle.
+SHARE_ROOT = Path(os.environ.get("TG_SHARE_ROOT", "/tmp/tourguide-shares"))
+SHARE_ROOT.mkdir(parents=True, exist_ok=True)
+SHARE_MAX_BYTES = 1_000_000  # 1 MB — generous; the largest realistic
+                              # permalink suffix is in the low-100s of KB.
+SHARE_ID_BYTES = 6  # 12 hex chars → 48 bits, plenty for collision-free
+                    # ids at this scale and short enough to fit a chat
+                    # message comfortably.
+
 # Caps exposed to the frontend via /health — match the plan.
 MAX_CONCURRENT_ANALYSES = 2
 ANALYSIS_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
 QUEUE_DEPTH = 0  # updated inside the handler; read by /health
+
+# Session-id → cancel flag for in-flight runs. Set when the frontend
+# POSTs /api/analysis/cancel/<id>; checked in the sandbox poll loop
+# so an interactive Stop button can terminate the subprocess instead
+# of waiting out the (up to 5 min) timeout. Threading.Event because
+# run_sandboxed runs inside asyncio.to_thread.
+import threading as _threading
+
+CANCEL_EVENTS: Dict[str, "_threading.Event"] = {}
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="tourguide-analysis", version=APP_VERSION)
@@ -863,6 +888,12 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
     t0 = time.monotonic()
 
     import traceback
+    # Register a cancel event for this session so /api/analysis/cancel
+    # can flip it; run_sandboxed polls it and terminates the subprocess
+    # when set. Cleared in the outer finally so a stale flag doesn't
+    # spook a future request that happens to reuse the session id.
+    cancel_event = _threading.Event()
+    CANCEL_EVENTS[session_id] = cancel_event
     QUEUE_DEPTH += 1
     try:
         async with ANALYSIS_SEMAPHORE:
@@ -901,6 +932,7 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
                 body.code,
                 g,
                 timeout_s=timeout_s,
+                cancel_event=cancel_event,
             )
             log.info(
                 "sandbox finished in %.2fs ok=%s error=%s",
@@ -976,6 +1008,73 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
         }
     finally:
         QUEUE_DEPTH -= 1
+        # Drop the cancel-event registration even if the analysis failed
+        # / threw — leaking the dict entry is a slow memory leak across
+        # long-running Spaces. Use pop with default so a redundant
+        # cancel call (event already removed) doesn't KeyError.
+        CANCEL_EVENTS.pop(session_id, None)
+
+
+@app.post("/api/analysis/cancel/{session_id}")
+async def cancel_analysis(session_id: str) -> Dict[str, Any]:
+    """Tell an in-flight `run_analysis` to terminate its sandbox subprocess.
+
+    Best-effort and idempotent: if the session has already finished (or
+    never existed), returns ok=False. The frontend treats both ok=True
+    and 404-style ok=False as "stopped" — the local fetch was already
+    aborted, this just frees the backend slot earlier than the timeout.
+    """
+    event = CANCEL_EVENTS.get(session_id)
+    if event is None:
+        return {"ok": False, "reason": "no active session", "session": session_id}
+    event.set()
+    log.info("cancel requested for session=%s", session_id)
+    return {"ok": True, "session": session_id}
+
+
+# --- Share-link store --------------------------------------------------------
+
+
+class ShareCreateBody(BaseModel):
+    suffix: str = Field(..., min_length=1)
+
+
+@app.post("/api/share")
+async def create_share(body: ShareCreateBody) -> Dict[str, Any]:
+    """Store a permalink suffix and return a short id.
+
+    Suffix is the everything-after-the-page-URL string the frontend
+    builds — e.g. `?d=...&q=...#!{...}`. We just write it to disk
+    verbatim; no parsing here, the frontend's decode logic handles
+    that on the load side. Caps payload size to keep a flood from
+    filling /tmp.
+    """
+    if len(body.suffix.encode("utf-8")) > SHARE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="share payload too large")
+    # Retry on the (extremely unlikely) collision; bail after a few
+    # tries rather than spin.
+    for _ in range(5):
+        sid = uuid.uuid4().hex[: SHARE_ID_BYTES * 2]
+        target = SHARE_ROOT / f"{sid}.txt"
+        if target.exists():
+            continue
+        target.write_text(body.suffix, encoding="utf-8")
+        return {"id": sid}
+    raise HTTPException(status_code=500, detail="couldn't allocate share id")
+
+
+@app.get("/api/share/{share_id}")
+async def get_share(share_id: str) -> Dict[str, Any]:
+    """Return the previously-stored permalink suffix for `share_id`."""
+    # Defense-in-depth — reject anything that could escape SHARE_ROOT.
+    # The id we generate is hex, but the frontend will pass through
+    # whatever's in the URL.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", share_id):
+        raise HTTPException(status_code=400, detail="invalid share id")
+    target = SHARE_ROOT / f"{share_id}.txt"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="share not found")
+    return {"suffix": target.read_text(encoding="utf-8")}
 
 
 # --- Dev entrypoint ----------------------------------------------------------

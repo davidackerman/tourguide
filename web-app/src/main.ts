@@ -19,6 +19,7 @@ import {
 import { runQuery } from "./db.js";
 import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
+import { createShareLink, fetchHealth, fetchShareLink } from "./remote_analysis.js";
 import { openWelcomeDialog, hasSeenWelcome } from "./welcome_ui.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
@@ -58,6 +59,24 @@ const viewer = new BundledViewer(ngHost);
 // Expose for ad-hoc devtools debugging:
 //   __tg.viewer.getNgState() / .getNgViewer().navigationState.coordinateSpace.value
 (window as unknown as { __tg?: unknown }).__tg = { viewer };
+
+// Neuroglancer's bindTitle helper rewrites document.title to
+// 'neuroglancer' (or '<state> - neuroglancer') whenever the viewer's
+// title signal fires. That clobbers our index.html <title>Tourguide</title>
+// the moment the viewer mounts. Watch the <title> element and snap
+// it back; the rewrite is idempotent so the observer's own writes
+// don't re-trigger it.
+(() => {
+  const TITLE = "Tourguide";
+  document.title = TITLE;
+  const titleEl = document.querySelector("title");
+  if (!titleEl) return;
+  new MutationObserver(() => {
+    if (document.title !== TITLE && !document.title.endsWith(`- ${TITLE}`)) {
+      document.title = TITLE;
+    }
+  }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+})();
 
 let entries: CatalogEntry[] = [];
 let currentDB: DatasetDB | null = null;
@@ -263,6 +282,29 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+async function maybeExpandShareId(): Promise<void> {
+  const params = new URLSearchParams(window.location.search);
+  const sid = params.get("s");
+  if (!sid) return;
+  const backendUrl = loadSettings().analysisBackendUrl.trim();
+  if (!backendUrl) {
+    console.warn("[share] ?s= present but no analysisBackendUrl configured — can't expand");
+    return;
+  }
+  try {
+    const suffix = await fetchShareLink(backendUrl, sid);
+    // Replace the page URL with the long form and proceed. Suffix is
+    // already the `?...#!...` part — strip our own ?s= bit cleanly
+    // by rebuilding from origin + pathname.
+    const base = window.location.origin + window.location.pathname;
+    history.replaceState(null, "", base + suffix);
+  } catch (err) {
+    console.error("[share] failed to expand short link:", err);
+    // Leave the URL as-is; init proceeds with no decoded state and the
+    // user lands on the empty welcome screen rather than a broken page.
+  }
+}
+
 async function init(): Promise<void> {
   try {
     const catalog = await fetchCatalog(CATALOG_URL);
@@ -291,6 +333,13 @@ async function init(): Promise<void> {
     const entry = entries[idx];
     if (entry) void loadEntry(entry, idx);
   });
+
+  // Short-link expansion: `?s=<id>` means the real permalink suffix
+  // lives in the backend's share store. Fetch it and replace the URL
+  // before decode so the rest of the init logic sees a normal
+  // permalink. We don't trigger a navigation — pushState keeps the
+  // user on the page.
+  await maybeExpandShareId();
 
   const permalinkState = decodeState(window.location.search, window.location.hash);
   if (permalinkState.descriptor) {
@@ -578,15 +627,46 @@ shareBtn.addEventListener("click", async () => {
     );
     if (!ok) return;
   }
+  // If the backend is configured + reachable, swap the long URL for a
+  // short `${origin}/?s=<id>` form by storing the suffix server-side.
+  // Long URLs become unwieldy in chat apps and email; the short form
+  // is ~30 chars regardless of payload size. Falls back to the long
+  // URL if the backend is offline / errors / not configured.
+  const backendUrl = loadSettings().analysisBackendUrl.trim();
+  let finalUrl = url;
+  let shortened = false;
+  if (backendUrl) {
+    try {
+      const suffix = url.slice(url.indexOf("?") >= 0 ? url.indexOf("?") : url.indexOf("#"));
+      if (suffix.length > 200) {
+        // Check liveness quickly — don't make the user wait on a sleeping
+        // Space; if it's not awake, just use the long URL.
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 3000);
+        const h = await fetchHealth(backendUrl, ac.signal);
+        clearTimeout(timer);
+        if (h?.ok) {
+          const id = await createShareLink(backendUrl, suffix);
+          const base = url.split("?")[0].split("#")[0];
+          finalUrl = `${base}?s=${id}`;
+          shortened = true;
+        }
+      }
+    } catch (err) {
+      console.warn("[share] short-link failed, using long URL:", err);
+    }
+  }
   try {
-    await navigator.clipboard.writeText(url);
-    const note = sharedTables.length > 0
-      ? `✓ Copied (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded)`
-      : "✓ Copied";
-    shareBtn.textContent = note;
-    setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2000);
+    await navigator.clipboard.writeText(finalUrl);
+    const tablesHint = sharedTables.length > 0
+      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded)`
+      : "";
+    shareBtn.textContent = shortened
+      ? `✓ Copied short link${tablesHint}`
+      : `✓ Copied${tablesHint}`;
+    setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2200);
   } catch {
-    prompt("Copy this URL:", url);
+    prompt("Copy this URL:", finalUrl);
   }
 });
 

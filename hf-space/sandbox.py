@@ -21,6 +21,7 @@ import multiprocessing
 import os
 import re
 import resource
+import threading
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -266,6 +267,7 @@ def run_sandboxed(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     mem_bytes: int = DEFAULT_MEM_BYTES,
     cpu_s: int = DEFAULT_CPU_S,
+    cancel_event: Optional[threading.Event] = None,
 ) -> SandboxResult:
     """Run `source` with `globals_dict` in a child process with rlimits.
 
@@ -317,6 +319,15 @@ def run_sandboxed(
             if proc.is_alive():
                 proc.kill()
             return SandboxResult(ok=False, error=f"timed out after {timeout_s}s")
+        if cancel_event is not None and cancel_event.is_set():
+            # Stop button pressed on the frontend → /api/analysis/cancel
+            # set this flag. Same termination dance as the timeout path,
+            # different verdict so the caller can distinguish.
+            proc.terminate()
+            proc.join(5)
+            if proc.is_alive():
+                proc.kill()
+            return SandboxResult(ok=False, error="cancelled by user")
         if not proc.is_alive():
             # Subprocess exited without producing a result — shouldn't
             # happen in normal operation, but bail rather than spin.

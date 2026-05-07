@@ -20,6 +20,7 @@ import {
 } from "./analysis.js";
 import { loadSettings } from "./llm.js";
 import {
+  cancelAnalysisRequest,
   fetchHealth,
   openBrowserTunnel,
   postAnalysisRequest,
@@ -63,6 +64,8 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           Runs connected-components + regionprops on a downsampled scale of a
           zarr segmentation, entirely in your browser. First run downloads the
           Pyodide Python runtime (~6 MB, cached after).
+          <strong>3D meshes</strong> require <em>Run on backend</em>
+          (zmesh ships only on the HF Space).
         </p>
         <div class="analysis-layers" data-layers-list>
           <div class="analysis-layers-header">
@@ -87,6 +90,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           <input type="checkbox" data-remote-toggle />
           <span data-remote-label>Run on backend</span>
         </label>
+        <button class="btn-secondary" data-stop hidden>Stop analysis</button>
         <button class="btn-primary" data-run disabled>Run analysis</button>
       </div>
     </div>
@@ -101,6 +105,7 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   const progressBar = $<HTMLDivElement>("[data-progress-bar]");
   const errEl = $<HTMLParagraphElement>("[data-error]");
   const runBtn = $<HTMLButtonElement>("[data-run]");
+  const stopBtn = $<HTMLButtonElement>("[data-stop]");
   const cancelBtn = $<HTMLButtonElement>("[data-cancel]");
   const closeBtn = $<HTMLButtonElement>(".modal-close");
   const remoteRow = $<HTMLLabelElement>("[data-remote-row]");
@@ -385,6 +390,22 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     if (e.target === overlay) close();
   });
 
+  // Stop button: abort the in-flight fetch (so the frontend stops
+  // waiting on the response) and POST a cancel to the backend (so
+  // the sandbox subprocess gets terminated and frees the semaphore
+  // slot). Both are best-effort — if the run finished a millisecond
+  // before the user clicked, the abort is a no-op; if the backend
+  // already returned, the cancel POST is a no-op. The userAborted
+  // flag short-circuits the per-layer loop so a multi-layer batch
+  // stops at the current layer instead of plowing through the rest.
+  stopBtn.addEventListener("click", () => {
+    userAborted = true;
+    showProgress("Stopping…");
+    const sid = activeRemoteSession;
+    activeRemoteAbort?.abort();
+    if (sid) void cancelAnalysisRequest(analysisBackendUrl, sid);
+  });
+
   const showError = (msg: string): void => {
     errEl.textContent = msg;
   };
@@ -456,6 +477,16 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     return fallback !== -1 ? fallback : insp.scales.length - 1;
   };
 
+  // Active remote-run state — set by the run handler when a remote
+  // request is in flight, cleared in finally. The Stop button reads
+  // these to (a) abort the local fetch and (b) POST a cancel to the
+  // backend so the sandbox process actually stops, not just the
+  // response wait. Only one remote call is in flight at a time
+  // (multi-layer runs go in series), so a single slot is enough.
+  let activeRemoteAbort: AbortController | null = null;
+  let activeRemoteSession: string | null = null;
+  let userAborted = false;
+
   // Run a single layer end-to-end. Returns nothing on success; throws
   // on failure (the caller decides whether to abort the rest of a
   // batch or continue). Captures the surrounding UI state (mesh
@@ -520,27 +551,42 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
         };
         tickProgress();
         progressTimer = window.setInterval(tickProgress, 1000);
-        const remote: CustomAnalysisResult = await postAnalysisRequest(analysisBackendUrl, {
-          layers: [
+        const ac = new AbortController();
+        activeRemoteAbort = ac;
+        activeRemoteSession = sessionId;
+        stopBtn.hidden = false;
+        let remote: CustomAnalysisResult;
+        try {
+          remote = await postAnalysisRequest(
+            analysisBackendUrl,
             {
-              varName: "image",
-              url,
-              scalePath: scale.path,
-              axesOrder,
-              voxelNm: scale.voxelNm,
-              offsetNm: scale.offsetNm,
+              layers: [
+                {
+                  varName: "image",
+                  url,
+                  scalePath: scale.path,
+                  axesOrder,
+                  voxelNm: scale.voxelNm,
+                  offsetNm: scale.offsetNm,
+                },
+              ],
+              tables: [],
+              code: buildRegionpropsCode(
+                alreadyLabeled,
+                makeMeshes,
+                layer.name,
+                chooseMeshDownsample(scale.shape),
+              ),
+              timeoutMs: 300_000,
+              sessionId,
             },
-          ],
-          tables: [],
-          code: buildRegionpropsCode(
-            alreadyLabeled,
-            makeMeshes,
-            layer.name,
-            chooseMeshDownsample(scale.shape),
-          ),
-          timeoutMs: 300_000,
-          sessionId,
-        });
+            ac.signal,
+          );
+        } finally {
+          activeRemoteAbort = null;
+          activeRemoteSession = null;
+          stopBtn.hidden = true;
+        }
         window.clearInterval(progressTimer);
         if (!remote.table) throw new Error("Backend returned no table.");
         // Adapt the {table: {columns, rows}} response into the AnalysisResult
@@ -692,17 +738,37 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
       }
     }
 
+    userAborted = false;
     const errors: { layer: string; message: string }[] = [];
     for (let i = 0; i < jobs.length; i++) {
+      if (userAborted) break;
       const { layer, insp, scaleIdx, alreadyLabeled, makeMeshes } = jobs[i];
       const labelPrefix = jobs.length > 1 ? `[${i + 1}/${jobs.length}] ` : "";
       try {
         await runOneLayer(layer, insp, scaleIdx, useRemote, labelPrefix, alreadyLabeled, makeMeshes);
       } catch (err) {
-        errors.push({ layer: layer.name, message: (err as Error).message });
+        // AbortError surfaces as a normal exception — translate to a
+        // 'cancelled by user' message instead of a scary stack trace.
+        const msg = (err as Error).name === "AbortError" || userAborted
+          ? "cancelled"
+          : (err as Error).message;
+        errors.push({ layer: layer.name, message: msg });
       }
     }
     hideProgress();
+    if (userAborted) {
+      // Stop button was clicked — show a clean status, don't pop a
+      // multi-line error. Successful layers (if any) are already in
+      // the DB; the Run button stays enabled so the user can retry.
+      const ok = jobs.length - errors.length;
+      showError(
+        ok > 0
+          ? `Stopped. ${ok} layer(s) finished before stop; remaining cancelled.`
+          : `Stopped — analysis cancelled.`,
+      );
+      runBtn.disabled = false;
+      return;
+    }
     if (errors.length === 0) {
       close();
     } else if (errors.length === jobs.length) {
@@ -725,9 +791,15 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
   });
 
   // First run: the default-checked layer (idx 0) needs its controls
-  // visible immediately. onLayerSelectionChange triggers the lazy
-  // inspection + dropdown population.
+  // visible immediately. onLayerSelectionChange triggers inspection
+  // for the checked rows; we then queue inspection for *all* other
+  // layers up front too, so by the time the user toggles their
+  // checkboxes the scale dropdowns are already populated. The
+  // shared inspectQueue serializes them — no races, no extra HTTP
+  // pressure beyond what'd happen if the user clicked them all
+  // anyway.
   onLayerSelectionChange();
+  segLayers.forEach((_, i) => void ensureInspected(i));
 }
 
 function productOf(shape: number[]): number {

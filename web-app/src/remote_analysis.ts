@@ -193,15 +193,20 @@ export interface RemoteRunBody {
 }
 
 /** POST to the backend and return the parsed result, mapped into the same
- *  shape the Pyodide worker emits so the existing renderer can consume it. */
+ *  shape the Pyodide worker emits so the existing renderer can consume it.
+ *  Optional `signal` lets the caller abort the in-flight request — pair
+ *  it with `cancelAnalysisRequest` below to also tell the server to
+ *  terminate the subprocess (the abort alone just drops the response). */
 export async function postAnalysisRequest(
   backendUrl: string,
   body: RemoteRunBody,
+  signal?: AbortSignal,
 ): Promise<CustomAnalysisResult> {
   const res = await fetch(new URL("api/analysis/run", ensureTrailingSlash(backendUrl)).toString(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -256,6 +261,63 @@ interface RemoteResponse {
     meshIds: string[];
     serveUrl?: string;
   };
+}
+
+/** Push a long permalink suffix (everything after the page URL —
+ *  `?d=...&q=...#!{...}`) to the backend's share store and return a
+ *  short id. Throws on failure so the caller can fall back to the
+ *  full URL. */
+export async function createShareLink(
+  backendUrl: string,
+  suffix: string,
+): Promise<string> {
+  const res = await fetch(new URL("api/share", ensureTrailingSlash(backendUrl)).toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ suffix }),
+  });
+  if (!res.ok) {
+    throw new Error(`share create failed: HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as { id?: string };
+  if (!body.id) throw new Error("share response missing id");
+  return body.id;
+}
+
+/** Fetch a previously-stored permalink suffix by id. Returns the raw
+ *  string the frontend can splice back into window.location. */
+export async function fetchShareLink(
+  backendUrl: string,
+  shareId: string,
+): Promise<string> {
+  const res = await fetch(
+    new URL(`api/share/${encodeURIComponent(shareId)}`, ensureTrailingSlash(backendUrl)).toString(),
+    { method: "GET" },
+  );
+  if (!res.ok) {
+    throw new Error(`share fetch failed: HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as { suffix?: string };
+  if (typeof body.suffix !== "string") throw new Error("share response missing suffix");
+  return body.suffix;
+}
+
+/** Tell the backend to terminate the subprocess running `sessionId`'s
+ *  analysis. Best-effort — the backend may have already finished, or the
+ *  Space may be sleeping again. We don't surface failures to the user;
+ *  the caller has already aborted the local fetch. */
+export async function cancelAnalysisRequest(
+  backendUrl: string,
+  sessionId: string,
+): Promise<void> {
+  try {
+    await fetch(
+      new URL(`api/analysis/cancel/${encodeURIComponent(sessionId)}`, ensureTrailingSlash(backendUrl)).toString(),
+      { method: "POST" },
+    );
+  } catch {
+    /* swallow — best-effort */
+  }
 }
 
 function adaptResponse(raw: RemoteResponse, backendUrl: string): CustomAnalysisResult {
