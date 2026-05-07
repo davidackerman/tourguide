@@ -203,13 +203,22 @@ export class WebLLMBackend implements LLMBackend {
   }
 }
 
+// Listed best-for-the-agent first (Qwen2.5-Coder 3B / 7B) since the
+// agent loop is mostly SQL + Python tool calls, which the Coder line
+// is finetuned for. The 1.5B Coder used to be the default but it's
+// too small to recover from tool errors on its own. 3B is the
+// realistic floor for reliable agent use; 7B is best if the user has
+// the VRAM headroom.
 export const WEBLLM_MODELS: Array<{ id: string; label: string }> = [
-  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 1.5B · f16 (fast, code/SQL focused, ~1 GB) — Apple Silicon / modern GPU" },
-  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f32_1-MLC", label: "Qwen2.5-Coder 1.5B · f32 (same, Intel Mac / older GPU compatible, ~1.3 GB)" },
-  { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC", label: "Llama-3.2 3B · f16 (better general, ~2 GB)" },
+  { id: "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 3B · f16 (best for agent / SQL / Python, ~2 GB) — recommended" },
+  { id: "Qwen2.5-Coder-3B-Instruct-q4f32_1-MLC", label: "Qwen2.5-Coder 3B · f32 (same, Intel Mac / older GPU, ~2.6 GB)" },
+  { id: "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 7B · f16 (strongest, needs ~6 GB VRAM)" },
+  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 1.5B · f16 (fastest, ~1 GB — may fail on multi-step agent tasks)" },
+  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f32_1-MLC", label: "Qwen2.5-Coder 1.5B · f32 (same, Intel Mac compatible, ~1.3 GB)" },
+  { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC", label: "Llama-3.2 3B · f16 (general, less code-tuned, ~2 GB)" },
   { id: "Llama-3.2-3B-Instruct-q4f32_1-MLC", label: "Llama-3.2 3B · f32 (same, Intel Mac compatible, ~2.6 GB)" },
-  { id: "Qwen2.5-3B-Instruct-q4f16_1-MLC", label: "Qwen2.5 3B · f16 (balanced, ~2 GB)" },
-  { id: "Llama-3.2-1B-Instruct-q4f32_1-MLC", label: "Llama-3.2 1B · f32 (smallest, widest compat, ~700 MB)" },
+  { id: "Qwen2.5-3B-Instruct-q4f16_1-MLC", label: "Qwen2.5 3B · f16 (general, ~2 GB)" },
+  { id: "Llama-3.2-1B-Instruct-q4f32_1-MLC", label: "Llama-3.2 1B · f32 (smallest, widest compat, ~700 MB — for testing only)" },
 ];
 
 export class GeminiBackend implements LLMBackend {
