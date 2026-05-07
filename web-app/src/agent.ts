@@ -57,7 +57,10 @@ const SCHEMA_GUIDE = (db: DatasetDB): string => {
   const dataframes = db.tables
     .map((t) => `  df_${t.organelle_class}  columns: ${t.columns.join(", ")}  rows: ${t.row_count}`)
     .join("\n");
-  return `SQL tables:\n${tableLines}\n\nPython DataFrames (available to make_plot):\n${dataframes}`;
+  const numpy = db.tables
+    .map((t) => `  com_${t.organelle_class}  numpy (N, 3) array of COMs in nm — already extracted, use directly`)
+    .join("\n");
+  return `SQL tables:\n${tableLines}\n\nPython DataFrames:\n${dataframes}\n\nPre-extracted numpy arrays (USE THESE for spatial / scipy work — no need to convert from DataFrame):\n${numpy}`;
 };
 
 const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): string => `
@@ -112,6 +115,16 @@ TOOLS:
     DO NOT call micropip.install or pyodide.loadPackage; the harness
     handles it. If a package isn't available, you'll get
     ModuleNotFoundError — pick a different approach.
+
+    DATA SHAPES — read carefully:
+      df_<class>   pandas DataFrame. Index columns by name: df_mito["volume_nm_3"].
+                   DO NOT use bracket-name on a numpy array.
+      com_<class>  numpy (N, 3) float64 array of COMs in nanometers, ALREADY
+                   extracted. Index by integer/slice: com_mito[:, 0] for x,
+                   com_mito[i] for the i-th point. Pass com_<class>.T to
+                   scipy.stats.gaussian_kde (it expects (D, N), not (N, D)).
+                   USE com_<class> directly — do NOT rebuild it via
+                   np.array(df_x[["com_x_nm",...]]).
     Conventions:
       - print(...) anything you want returned; it lands in stdout.
       - Set _out = <python value> for a structured return — DataFrames /
@@ -142,8 +155,23 @@ TYPICAL FLOWS:
   "fly through the 3 biggest mitos" -> run_sql (SELECT object_id, com_x_nm, com_y_nm, com_z_nm, volume_nm_3 FROM mito ORDER BY volume_nm_3 DESC LIMIT 3)
                                       -> fly_to (row 1) -> fly_to (row 2) -> fly_to (row 3) -> done
   "show only the largest 10 mitos" -> run_sql (SELECT object_id FROM mito ORDER BY volume_nm_3 DESC LIMIT 10) -> highlight_segments -> done
-  "densest region of mitos"        -> run_python (grid COMs, find max-count bin, set _out = (com, ids))
-                                      -> fly_to (bin center) -> highlight_segments (ids in bin) -> done
+  "densest region of mitos"        -> run_python using com_mito (already an Nx3 numpy array — DO NOT
+                                      reconstruct from df_mito): grid into bins, count per bin, find
+                                      argmax bin center, set _out = bin_center_xyz.
+                                      Example body:
+                                        bins = 20
+                                        idx = np.floor((com_mito - com_mito.min(0)) /
+                                                       ((com_mito.max(0) - com_mito.min(0)) / bins)
+                                                      ).astype(int).clip(0, bins-1)
+                                        flat = idx[:,0]*bins*bins + idx[:,1]*bins + idx[:,2]
+                                        counts = np.bincount(flat, minlength=bins**3)
+                                        max_bin = counts.argmax()
+                                        b = np.unravel_index(max_bin, (bins, bins, bins))
+                                        cell = (com_mito.max(0) - com_mito.min(0)) / bins
+                                        center = com_mito.min(0) + (np.array(b) + 0.5) * cell
+                                        print(center)
+                                        _out = center.tolist()
+                                      -> fly_to (position = center) -> done
   "median volume of nuclei"        -> run_python (df_nucleus["volume_(nm^3)"].median(); print) -> answer -> done
   "two closest mito pairs"         -> run_python (pdist over com_*, argmin; print pairs)       -> answer -> done
 
@@ -425,6 +453,7 @@ const SETUP_PY = `
 import json
 import io
 import base64
+import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
@@ -436,6 +465,23 @@ def _materialize_tables(_tables_json):
     for name, payload in tables.items():
         df = pd.DataFrame(payload["rows"], columns=payload["columns"])
         out[f"df_{name}"] = df
+        # Convenience: pre-extract center-of-mass coordinates as an
+        # (N, 3) numpy array under com_<class>. Saves the model from
+        # writing 'np.array(df_x[["com_x_nm", "com_y_nm", "com_z_nm"]])'
+        # every time, which is exactly where it confuses DataFrame and
+        # numpy syntax. We accept either com_*_nm or position_* columns
+        # — same physical meaning.
+        com_cols = None
+        for cands in [
+            ["com_x_nm", "com_y_nm", "com_z_nm"],
+            ["com_x", "com_y", "com_z"],
+            ["position_x", "position_y", "position_z"],
+        ]:
+            if all(c in df.columns for c in cands):
+                com_cols = cands
+                break
+        if com_cols is not None:
+            out[f"com_{name}"] = df[com_cols].to_numpy(dtype=np.float64)
     return out
 `;
 
@@ -526,6 +572,12 @@ function synthesizeErrorHint(
     }
     if (lower.includes("attributeerror")) {
       return `Wrong type / method. If you're calling a Series method on a DataFrame (or vice versa), index into the column first: df["col"].mean(), not df.mean()["col"].`;
+    }
+    if (lower.includes("indexerror") && lower.includes("only integers")) {
+      return `You're using DataFrame syntax (arr["col_name"]) on a numpy array. Numpy arrays index by integer/slice: arr[:, 0] for the first column, arr[i] for the i-th row. Use the pre-extracted com_<class> arrays for COM data — they're already numpy. com_mito[:, 0] = x coords, com_mito[:, 1] = y, com_mito[:, 2] = z.`;
+    }
+    if (lower.includes("singular data covariance") || (lower.includes("dimensions") && lower.includes("samples"))) {
+      return `gaussian_kde expects (D, N) shape — D dimensions, N samples. Pass com_<class>.T not com_<class>. Example: kde = gaussian_kde(com_mito.T) where com_mito is (N, 3).`;
     }
     if (lower.includes("indentationerror") || lower.includes("syntaxerror")) {
       return `Python syntax error. Watch indentation; the harness wraps your code under a try block, so it must be valid as-is.`;
