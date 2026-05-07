@@ -64,18 +64,15 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
           zarr segmentation, entirely in your browser. First run downloads the
           Pyodide Python runtime (~6 MB, cached after).
         </p>
-        <div class="form-row">
-          <div class="analysis-layers" data-layers-list>
-            <div class="analysis-layers-header">
-              <span>Layers <em class="hint" style="font-weight:normal;">(check one or more — multi-select runs them in series)</em></span>
-              <span class="analysis-layer-actions">
-                <button type="button" class="btn-tiny" data-action="select-all-layers">all</button>
-                <button type="button" class="btn-tiny" data-action="select-none-layers">none</button>
-              </span>
-            </div>
-            <div class="analysis-layers-host" data-layers-host></div>
+        <div class="analysis-layers" data-layers-list>
+          <div class="analysis-layers-header">
+            <span>Layers <em class="hint" style="font-weight:normal;">(check one or more — multi-select runs them in series)</em></span>
+            <span class="analysis-layer-actions">
+              <button type="button" class="btn-tiny" data-action="select-all-layers">all</button>
+              <button type="button" class="btn-tiny" data-action="select-none-layers">none</button>
+            </span>
           </div>
-          <p class="hint" data-mesh-global-hint><strong>3D meshes</strong>: per-layer toggle in each row above. Available only when "Run on backend" is checked (zmesh ships only on the HF Space).</p>
+          <div class="analysis-layers-host" data-layers-host></div>
         </div>
         <p class="hint" data-inspect-status>Each checked layer's scale + labeled dropdowns appear inline above. Default scale is the coarsest one that fits the budget; defaults to "Yes — values are segment ids".</p>
         <div class="analysis-progress" data-progress hidden>
@@ -234,17 +231,21 @@ export function openAnalysisDialog(cb: AnalysisUICallbacks): void {
     layersHost.appendChild(row);
   });
 
-  // Format an option label for one scale: 's0  1300×1500×220, 388 MB'
-  // plus a 'beyond cap' badge if it'd OOM in Pyodide and we're not on
-  // the backend.
+  // Format an option label for one scale. Wide modal gives us room
+  // for voxel-size info too — matches what the dropped radio table
+  // showed: 's5 · 27×162×193 · 64×64×64 nm/vx · 12.9 MB'. Bullet-
+  // separated so the columns scan even though a <select> can't be
+  // a real grid. Trailing 'beyond cap' / 'may OOM' badge when the
+  // scale would blow Pyodide's memory and we're not on the backend.
   const scaleOptionLabel = (s: LayerScaleInfo, useRemote: boolean): string => {
     const path = s.path || "(root)";
     const shape = s.shape.join("×");
+    const vox = s.voxelNm.map((v) => format1(v)).join("×");
     const size = humanSize(s.approxBytes);
     const veryRisky = !useRemote && s.approxBytes > 3 * SAFE_INPUT_BYTES;
     const risky = !useRemote && s.approxBytes > SAFE_INPUT_BYTES;
-    const tag = veryRisky ? " — beyond WASM cap" : risky ? " — may OOM" : "";
-    return `${path}  ${shape}  ${size}${tag}`;
+    const tag = veryRisky ? " · beyond WASM cap" : risky ? " · may OOM" : "";
+    return `${path} · ${shape} · ${vox} nm/vx · ${size}${tag}`;
   };
 
   // Build the dropdown options for a layer's scale picker. Coarsest
@@ -738,6 +739,10 @@ function humanSize(n: number): string {
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function format1(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
 function escapeHtml(s: string): string {
