@@ -2,7 +2,7 @@ import type { LLMBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
-import { runAgent, type AgentTraceItem } from "./agent.js";
+import { runAgent, type AgentTraceItem, type AgentTurnSummary } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 
 export interface QueryUIContext {
@@ -20,6 +20,13 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     <div class="query-ai-hint" data-ai-hint hidden>
       ⚠ AI not configured — plain-English questions, agent trace, and 🐍 Custom Python need an AI backend.
       <button class="btn-link" data-action="open-settings">Set up in Settings</button>
+    </div>
+    <div class="session-turns" data-session hidden>
+      <div class="session-turns-header">
+        <span class="session-turns-label">This session</span>
+        <button class="btn-link session-clear" type="button" data-action="new-session">New session</button>
+      </div>
+      <ol class="session-turns-list" data-session-list></ol>
     </div>
     <form class="query-form">
       <input
@@ -90,6 +97,28 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       }, 1500);
     }
   });
+  // Session memory — last ~3 turns are passed back to the agent on each
+  // follow-up so "now do the same for ER" / "redo with a smaller radius"
+  // resolves. Cleared by the "New session" button.
+  const SESSION_CONTEXT_TURNS = 3;
+  const sessionTurns: AgentTurnSummary[] = [];
+  const sessionEl = box.querySelector<HTMLDivElement>("[data-session]")!;
+  const sessionListEl = box.querySelector<HTMLOListElement>("[data-session-list]")!;
+  const newSessionBtn = box.querySelector<HTMLButtonElement>("[data-action='new-session']")!;
+  const renderSessionTurns = (): void => {
+    sessionEl.hidden = sessionTurns.length === 0;
+    sessionListEl.innerHTML = sessionTurns
+      .map(
+        (t) =>
+          `<li><div class="session-turn-q">${escapeHtml(t.question)}</div><div class="session-turn-a">${escapeHtml(t.summary)}</div></li>`,
+      )
+      .join("");
+  };
+  newSessionBtn.addEventListener("click", () => {
+    sessionTurns.length = 0;
+    renderSessionTurns();
+  });
+
   const historyList = box.querySelector<HTMLDataListElement>("[data-history-list]")!;
   const refreshHistoryList = (): void => {
     const items = loadPromptHistory("agent");
@@ -302,6 +331,10 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       traceQuestionEl.textContent = `Query: ${question}`;
     }
     let answeredOrFlew = false;
+    // Capture a one-line outcome from this turn so the next turn's
+    // priorTurns has something concrete to reference. We prefer the
+    // textual answer; failing that, the highest-signal viewer change.
+    let turnSummary = "";
     // Fresh AbortController per query — Stop button calls abort()
     // which cascades through to the LLM backend (fetch / WebLLM
     // interrupt) and unwinds the agent loop's awaits.
@@ -314,30 +347,37 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
         viewer: ctx.viewer,
         backend,
         signal: abortController.signal,
+        priorTurns: sessionTurns.slice(-SESSION_CONTEXT_TURNS),
         callbacks: {
           onTrace: (t) => appendTrace(t),
           onProgress: (m) => setStatus(m, "pending"),
           onAnswer: (text) => {
             answerEl.textContent = text;
             answeredOrFlew = true;
+            turnSummary = text;
           },
-          onPlot: (png, code, title, explanation) => {
-            renderPlot(png, code, title, explanation);
+          onPlot: (_png, _code, title) => {
+            renderPlot(_png, _code, title);
             answeredOrFlew = true;
+            if (!turnSummary) turnSummary = title ? `Showed plot: ${title}` : "Showed a plot";
           },
           onFly: (_pos, layer, id) => {
             setStatus(`Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
             answeredOrFlew = true;
+            if (!turnSummary) turnSummary = `Flew to ${layer}${id ? ` ${id}` : ""}`;
           },
           onHighlight: (layer, ids) => {
             setStatus(`Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
             answeredOrFlew = true;
+            if (!turnSummary) turnSummary = `Highlighted ${ids.length} segments in ${layer}`;
           },
         },
       });
       if (!answeredOrFlew) {
         setStatus("Agent finished without delivering an answer.", "");
       }
+      sessionTurns.push({ question, summary: turnSummary || "(no visible result)" });
+      renderSessionTurns();
     } catch (err) {
       // AbortError is the user clicking Stop — show a calmer message
       // than "Error: ..." since they did this on purpose.

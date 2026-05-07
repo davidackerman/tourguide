@@ -741,6 +741,44 @@ button {
   margin-bottom: 0.75rem;
 }
 
+.session-turns {
+  margin-bottom: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 0.78rem;
+}
+.session-turns-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  color: var(--fg-dim);
+  margin-bottom: 0.25rem;
+}
+.session-turns-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+}
+.session-turns-list {
+  list-style: decimal inside;
+  margin: 0;
+  padding: 0;
+  max-height: 140px;
+  overflow: auto;
+}
+.session-turns-list li {
+  margin-bottom: 0.35rem;
+}
+.session-turn-q {
+  font-weight: 500;
+}
+.session-turn-a {
+  color: var(--fg-dim);
+  margin-left: 1em;
+}
+
 .query-form {
   display: flex;
   gap: 0.4rem;

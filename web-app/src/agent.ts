@@ -29,12 +29,27 @@ export interface AgentCallbacks {
   onHighlight?: (layer: string, ids: string[]) => void;
 }
 
+export interface AgentTurnSummary {
+  // The user's question.
+  question: string;
+  // A short recap of what the agent did/answered. We don't replay full
+  // tool traces — at ~3 prior turns × multi-step flow that would
+  // dominate the context window. A single sentence per turn is enough
+  // for "now do the same for ER" follow-ups to make sense.
+  summary: string;
+}
+
 export interface AgentContext {
   db: DatasetDB | null;
   descriptor: DatasetDescriptor | null;
   viewer: BundledViewer;
   backend: LLMBackend;
   callbacks: AgentCallbacks;
+  // Last few turns in this session, oldest-first. The agent gets these
+  // as a compressed context so follow-up prompts ("now do the same for
+  // X", "redo with a different threshold") can refer back. Capped by
+  // the caller — typically last 3.
+  priorTurns?: AgentTurnSummary[];
   // When this aborts, the agent stops between iterations (and the
   // current LLM call gets aborted via fetch/interruptGenerate). Lets
   // the user hit a Stop button mid-question instead of waiting out
@@ -1038,8 +1053,19 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     ctx.callbacks.onProgress?.("Loading WebLLM model (first use, ~1 GB one-time download)…");
     await ctx.backend.ensureInit();
   }
+  // Compress prior turns of this session into the system prompt so
+  // follow-ups ("now do the same for ER") can resolve. We deliberately
+  // do NOT replay full tool traces — that would balloon context
+  // immediately. One Q + one short summary per turn is enough.
+  const priorBlock = (ctx.priorTurns ?? [])
+    .map((t, i) => `(${i + 1}) user: ${t.question}\n    you: ${t.summary}`)
+    .join("\n");
+  const systemContent = priorBlock
+    ? `${SYSTEM_PROMPT(ctx.db, ctx.descriptor)}\n\nEARLIER IN THIS SESSION (most recent last) — refer back when the user says "now do the same for X", "redo with …", or "the previous":\n${priorBlock}`
+    : SYSTEM_PROMPT(ctx.db, ctx.descriptor);
+
   const messages: LLMMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT(ctx.db, ctx.descriptor) },
+    { role: "system", content: systemContent },
     { role: "user", content: question },
   ];
 
