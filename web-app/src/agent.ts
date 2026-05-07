@@ -60,7 +60,7 @@ const SCHEMA_GUIDE = (db: DatasetDB): string => {
   const numpy = db.tables
     .map((t) => `  com_${t.organelle_class}  numpy (N, 3) array of COMs in nm — already extracted, use directly`)
     .join("\n");
-  return `SQL tables:\n${tableLines}\n\nPython DataFrames:\n${dataframes}\n\nPre-extracted numpy arrays (USE THESE for spatial / scipy work — no need to convert from DataFrame):\n${numpy}`;
+  return `SQL tables (THIS is the truth — table and column names below are what actually exist; never invent or copy from examples):\n${tableLines}\n\nPython DataFrames:\n${dataframes}\n\nPre-extracted numpy arrays (USE THESE for spatial / scipy work — no need to convert from DataFrame):\n${numpy}`;
 };
 
 const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): string => `
@@ -153,43 +153,56 @@ TOOLS:
   done()
     End this turn. You MUST call this after delivering any answer / plot / fly_to.
 
-CRITICAL — fly_to expects POSITION coordinates (com_x_nm, com_y_nm, com_z_nm
-or position_x, position_y, position_z), NOT a volume / surface_area / id.
-ALWAYS include position columns in your SQL when you plan to fly_to a
-result. Pass [com_x, com_y, com_z] from the row as position. If the
-schema's position columns are named differently, use whatever the schema
-shows — never invent values.
+CRITICAL — TABLE AND COLUMN NAMES VARY PER DATASET. The schema above is
+the single source of truth. Different datasets use different conventions:
+  - cellmap-analyze CSVs: 'volume_(nm^3)', 'com_x_(nm)' / sanitized 'volume_nm_3', 'com_x_nm'
+  - tourguide-derived computed tables: plain 'volume', 'position_x', 'position_y', 'position_z'
+  - other sources may use 'centroid_x', 'centroid-0', 'cx', etc.
+ALWAYS pick column names from the SQL tables / DataFrames listed above.
+NEVER invent column names from a typical-flow example — those are
+illustrative, not literal. The same goes for table names: the actual
+table for a class might be 'mito', 'mito_computed_s0', 'mitochondria',
+or whatever's listed.
 
-TYPICAL FLOWS:
-  "show me the largest mito"       -> run_sql (SELECT object_id, com_x_nm, com_y_nm, com_z_nm, volume_nm_3 FROM mito ORDER BY volume_nm_3 DESC LIMIT 1)
-                                      -> fly_to (position = [com_x, com_y, com_z], object_id from row) -> done
-  "how many nuclei are there?"     -> run_sql (COUNT) -> answer -> done
-  "plot mitochondrion volumes"     -> make_plot -> done
-  "fly through the 3 biggest mitos" -> run_sql (SELECT object_id, com_x_nm, com_y_nm, com_z_nm, volume_nm_3 FROM mito ORDER BY volume_nm_3 DESC LIMIT 3)
-                                      -> fly_to (row 1) -> fly_to (row 2) -> fly_to (row 3) -> done
-  "show only the largest 10 mitos" -> run_sql (SELECT object_id FROM mito ORDER BY volume_nm_3 DESC LIMIT 10) -> highlight_segments -> done
-  "densest region of mitos"        -> run_python using com_mito (already an Nx3 numpy array — DO NOT
-                                      reconstruct from df_mito): grid into bins, count per bin, find
-                                      argmax bin center, set _out = bin_center_xyz.
-                                      Example body:
-                                        bins = 20
-                                        idx = np.floor((com_mito - com_mito.min(0)) /
-                                                       ((com_mito.max(0) - com_mito.min(0)) / bins)
-                                                      ).astype(int).clip(0, bins-1)
-                                        flat = idx[:,0]*bins*bins + idx[:,1]*bins + idx[:,2]
-                                        counts = np.bincount(flat, minlength=bins**3)
-                                        max_bin = counts.argmax()
-                                        b = np.unravel_index(max_bin, (bins, bins, bins))
-                                        cell = (com_mito.max(0) - com_mito.min(0)) / bins
-                                        center = com_mito.min(0) + (np.array(b) + 0.5) * cell
-                                        print(center)
-                                        _out = center.tolist()
-                                      -> fly_to (position = center) -> done
-  "median volume of nuclei"        -> run_python (df_nucleus["volume_(nm^3)"].median(); print) -> answer -> done
-  "two closest mito pairs"         -> run_python (pdist over com_mito, argmin; set
-                                      _out = {"ids": [id1, id2], "coms": [[x,y,z],[x,y,z]]}
-                                      so the next tool can use both without another SQL lookup)
-                                      -> highlight_segments (ids) -> done
+CRITICAL — fly_to expects POSITION coordinates in nanometers, NOT a
+volume / surface_area / id. ALWAYS include position columns (whatever
+they're called in the schema) in your SQL when you plan to fly_to a
+result. Pass the row's position values as fly_to's position argument.
+
+TYPICAL FLOWS (placeholders in <angle brackets> — substitute with the
+actual schema names):
+  "show me the largest <class>"      -> run_sql (SELECT object_id, <pos_x>, <pos_y>, <pos_z>, <size>
+                                                  FROM <table> ORDER BY <size> DESC LIMIT 1)
+                                        -> fly_to (position = [<pos_x>, <pos_y>, <pos_z>] from row,
+                                                   object_id from row) -> done
+  "how many <class>?"                 -> run_sql (SELECT COUNT(*) FROM <table>) -> answer -> done
+  "plot <class> volumes"              -> make_plot -> done
+  "fly through the 3 biggest <class>" -> run_sql (... ORDER BY <size> DESC LIMIT 3)
+                                        -> fly_to (row 1) -> fly_to (row 2) -> fly_to (row 3) -> done
+  "show only the largest 10 <class>"  -> run_sql (SELECT object_id FROM <table>
+                                                  ORDER BY <size> DESC LIMIT 10)
+                                        -> highlight_segments (ids) -> done
+  "densest region of <class>"         -> run_python on com_<class> (already an Nx3 numpy array
+                                        of COMs in nm — DO NOT reconstruct from df_<class>):
+                                          bins = 20
+                                          coms = com_<class>
+                                          idx = np.floor((coms - coms.min(0)) /
+                                                         ((coms.max(0) - coms.min(0)) / bins)
+                                                        ).astype(int).clip(0, bins-1)
+                                          flat = idx[:,0]*bins*bins + idx[:,1]*bins + idx[:,2]
+                                          counts = np.bincount(flat, minlength=bins**3)
+                                          b = np.unravel_index(counts.argmax(), (bins, bins, bins))
+                                          cell = (coms.max(0) - coms.min(0)) / bins
+                                          center = coms.min(0) + (np.array(b) + 0.5) * cell
+                                          print(center)
+                                          _out = center.tolist()
+                                        -> fly_to (position = center) -> done
+  "median volume of <class>"          -> run_python (df_<class>[<size_col>].median(); print)
+                                        -> answer -> done
+  "two closest <class> pairs"         -> run_python on com_<class>: pdist + argmin; set
+                                        _out = {"ids": [id1, id2], "coms": [[x,y,z],[x,y,z]]}
+                                        so the next tool uses both without another SQL lookup.
+                                        -> highlight_segments (ids) -> done
 
 WHEN TO USE WHICH TOOL — IMPORTANT:
   - Filter / sort / count / "the N biggest/smallest"           -> run_sql
@@ -199,9 +212,9 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     convex hull) or anything statistical beyond simple aggregates
     (median, percentile, std, IQR, correlation, regression)    -> run_python
   - Never reach for run_sql when the question implies geometric
-    reasoning over com_x/com_y/com_z — SQL can't compute density
-    or pairwise distances. ORDER BY volume DESC LIMIT 1 is NOT
-    "the densest mito".
+    reasoning over position columns — SQL can't compute density
+    or pairwise distances. ORDER BY <size> DESC LIMIT 1 is NOT
+    "the densest <class>".
 
 BUDGET: You have AT MOST 5 tool calls per question. Plan accordingly — most flows above finish in 2-4. If you can't reach an answer in 5, end with answer() explaining what's missing rather than running out silently.
 
