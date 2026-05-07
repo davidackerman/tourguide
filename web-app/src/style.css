@@ -522,6 +522,149 @@ button {
   cursor: not-allowed;
 }
 
+/* Callout in Settings that nudges users toward forking the analysis
+ * Space rather than relying on the default shared one. */
+.analysis-backend-fork-callout {
+  background: rgba(110, 167, 255, 0.07);
+  border-left: 3px solid #6ea7ff;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.82rem;
+  color: var(--fg);
+  margin: 0.5rem 0;
+  border-radius: 4px;
+  line-height: 1.5;
+}
+.analysis-backend-fork-callout code {
+  font-size: 0.78rem;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.05rem 0.25rem;
+  border-radius: 3px;
+}
+
+/* Empty-state placeholder for the viewer when no dataset is loaded.
+ * Centered card with the next-step actions. Replaces the auto-loaded
+ * demo that used to greet users. */
+.empty-viewer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  padding: 2rem;
+}
+.empty-viewer-card {
+  max-width: 540px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2rem;
+  background: var(--bg-elev);
+}
+.empty-viewer-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.2rem;
+  color: var(--fg);
+}
+.empty-viewer-card p {
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+}
+.empty-viewer-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 1.2rem 0;
+  flex-wrap: wrap;
+}
+
+/* Welcome modal — first-run onboarding. Wider than other modals to
+ * accommodate the side-by-side radio layout for AI / analysis choices. */
+.modal-welcome {
+  max-width: 720px;
+}
+.welcome-blurb {
+  margin: 0 0 1rem;
+  color: var(--fg);
+  font-size: 0.92rem;
+}
+.welcome-step {
+  margin: 1.2rem 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.welcome-step:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.welcome-step h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.welcome-step-tag {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-weight: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.welcome-radio-group,
+.welcome-backend-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.welcome-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  background: var(--bg);
+  transition: border-color 0.1s;
+}
+.welcome-radio:hover {
+  border-color: var(--fg-dim);
+}
+.welcome-radio input[type="radio"] {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+.welcome-radio.welcome-disabled {
+  opacity: 0.5;
+}
+.welcome-radio > div {
+  flex: 1;
+  min-width: 0;
+}
+.welcome-radio strong {
+  font-size: 0.9rem;
+}
+.welcome-radio p.hint {
+  margin: 0.2rem 0 0.3rem;
+}
+.welcome-radio input[type="text"],
+.welcome-radio input[type="password"],
+.welcome-radio select {
+  width: 100%;
+  margin-top: 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
 /* Persistent hint above the Ask box: shown when no AI backend is
  * configured. Clicking the inline link opens Settings. Calmer than a
  * hard error since the rest of the app still works without AI. */

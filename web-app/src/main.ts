@@ -19,6 +19,7 @@ import {
 import { runQuery } from "./db.js";
 import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
+import { openWelcomeDialog, hasSeenWelcome } from "./welcome_ui.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
 const CATALOG_URL = "./catalog.json";
@@ -63,6 +64,61 @@ let currentDB: DatasetDB | null = null;
 let currentDescriptor: DatasetDescriptor | null = null;
 let currentCatalogIndex: number | null = null;
 let currentIsCustom = false;
+
+// Empty-state placeholder shown in the viewer area when no dataset is
+// loaded. Replaces what used to be an auto-loaded demo. Gives the user
+// big obvious next-step buttons instead of waiting for a load they
+// didn't ask for.
+function renderEmptyViewerState(): void {
+  ngHost.innerHTML = `
+    <div class="empty-viewer">
+      <div class="empty-viewer-card">
+        <h2>No dataset loaded</h2>
+        <p>Pick how you'd like to start:</p>
+        <div class="empty-viewer-actions">
+          <button class="btn-primary" data-empty-action="load">+ Load your data</button>
+          <button class="btn-secondary" data-empty-action="catalog" ${entries.length === 0 ? "disabled" : ""}>Browse demo catalog</button>
+          <button class="btn-secondary" data-empty-action="welcome">Show welcome again</button>
+        </div>
+        <p class="hint">
+          Tourguide reads OME-Zarr / N5 / precomputed sources directly
+          from S3, your lab server, or a local folder. Paste a
+          Neuroglancer state JSON to import an existing view.
+        </p>
+      </div>
+    </div>
+  `;
+  ngHost.querySelector("[data-empty-action='load']")?.addEventListener("click", () => loadBtn.click());
+  ngHost.querySelector("[data-empty-action='catalog']")?.addEventListener("click", () => {
+    if (entries.length > 0) {
+      select.value = "0";
+      void loadEntry(entries[0], 0);
+    }
+  });
+  ngHost.querySelector("[data-empty-action='welcome']")?.addEventListener("click", () => {
+    openWelcomeDialog({
+      onOpenLoader: () => loadBtn.click(),
+      onSettingsChanged: () => {
+        backend = backendFromSettings(loadSettings());
+        updateBackendIndicator();
+      },
+    });
+  });
+}
+
+// On first run, surface the welcome modal automatically. Re-runs are
+// silent — user can always reopen via the empty-state's 'Show welcome
+// again' button or from Settings.
+function maybeShowWelcome(): void {
+  if (hasSeenWelcome()) return;
+  openWelcomeDialog({
+    onOpenLoader: () => loadBtn.click(),
+    onSettingsChanged: () => {
+      backend = backendFromSettings(loadSettings());
+      updateBackendIndicator();
+    },
+  });
+}
 let backend: LLMBackend = backendFromSettings(loadSettings());
 
 function updateBackendIndicator(): void {
@@ -234,7 +290,15 @@ async function init(): Promise<void> {
     select.value = String(permalinkState.catalogIndex);
     await loadEntry(entries[permalinkState.catalogIndex], permalinkState.catalogIndex);
   } else {
-    await loadEntry(entries[0], 0);
+    // No permalink → don't auto-load anything. The empty state in
+    // #ng-host gives the user clear next-step buttons (Load / pick
+    // from catalog / open Welcome). Auto-loading the first catalog
+    // entry was confusing — users who wanted to start clean had to
+    // wait for the demo to load before they could load their own.
+    renderEmptyViewerState();
+    // Show the first-run Welcome modal automatically. Returns
+    // immediately if the user has dismissed it before.
+    void maybeShowWelcome();
   }
   if (permalinkState.query) {
     const input = document.querySelector<HTMLInputElement>(".query-input");

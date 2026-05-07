@@ -109,6 +109,19 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <h3>Analysis backend</h3>
         <div class="settings-section" data-section="analysis-backend">
           <p class="hint">Where to run heavy analyses that don't fit in Pyodide's ~4 GB ceiling. Leave empty to disable the remote path (everything still runs locally in your browser).</p>
+          <div class="analysis-backend-fork-callout">
+            <strong>Recommended for real use:</strong> fork the Space.
+            The default URL points to a shared demo Space with limited
+            CPU + memory and possible cold starts; it's fine for trying
+            things out, not for sustained work.
+            <a class="btn-link" href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space →</a>
+            (~5 min, one-time). Paste the resulting URL below.
+            <br /><br />
+            <strong>Keeping your fork updated:</strong> on your Space's
+            <em>Files</em> tab on huggingface.co, click <em>"Sync with
+            upstream"</em> when an update is available. One click pulls
+            in the maintainer's latest <code>app.py</code>.
+          </div>
           <label>
             Backend URL
             <input type="text" data-field="analysisBackendUrl" value="${escapeAttr(current.analysisBackendUrl)}" placeholder="${DEFAULT_ANALYSIS_BACKEND}" />
@@ -117,9 +130,6 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             <button class="btn-secondary" data-action="test-analysis-backend">Test backend</button>
             <span class="test-result" data-analysis-backend-result></span>
           </div>
-          <p class="hint">
-            Want isolated compute? <a href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space</a> into your own free HF account (~5 min, one-time), then paste the resulting URL above.
-          </p>
         </div>
 
         <h3>AI backend</h3>
@@ -174,6 +184,8 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         </div>
       </div>
       <div class="modal-footer">
+        <button class="btn-link" data-action="show-welcome" type="button">Show welcome again</button>
+        <span style="flex:1"></span>
         <button class="btn-secondary" data-action="cancel">Cancel</button>
         <button class="btn-primary" data-action="save">Save</button>
       </div>
@@ -185,6 +197,23 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   overlay.querySelector("[data-action='cancel']")!.addEventListener("click", close);
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) close();
+  });
+  // Lazy-import the welcome dialog so this Settings module doesn't drag
+  // in welcome_ui's dependencies on every Settings open. Imported on
+  // click only.
+  overlay.querySelector("[data-action='show-welcome']")?.addEventListener("click", async () => {
+    close();
+    const { openWelcomeDialog, clearWelcomeSeen } = await import("./welcome_ui.js");
+    clearWelcomeSeen();
+    openWelcomeDialog({
+      onOpenLoader: () => document.getElementById("load-data-btn")?.click(),
+      onSettingsChanged: () => {
+        // Re-trigger the parent caller's onChange so the topbar
+        // indicator etc. update. Fire by simulating settings change
+        // via the existing onChange callback.
+        opts.onChange(backendFromSettings(loadSettings()));
+      },
+    });
   });
 
   const get = (f: string): string => {
