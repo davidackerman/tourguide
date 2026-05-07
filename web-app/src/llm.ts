@@ -295,12 +295,13 @@ export const WEBLLM_MODELS: WebLLMModelInfo[] = [
 ];
 
 // Build the user-facing label. Centralized so the settings dropdown
-// doesn't have to know about the field shape.
+// doesn't have to know about the field shape. Order in the dropdown
+// already reflects agent suitability (recommended desc) — no need to
+// repeat it visually.
 export function webllmModelLabel(m: WebLLMModelInfo): string {
-  const stars = "★".repeat(m.recommended) + "☆".repeat(5 - m.recommended);
-  const sizeStr = `~${m.sizeGB.toFixed(m.sizeGB < 1 ? 1 : 1)} GB`;
+  const sizeStr = `~${m.sizeGB.toFixed(1)} GB`;
   const note = m.note ? ` — ${m.note}` : "";
-  return `${stars}  ${m.family} ${m.size} (${sizeStr})${note}`;
+  return `${m.family} ${m.size} (${sizeStr})${note}`;
 }
 
 export class GeminiBackend implements LLMBackend {

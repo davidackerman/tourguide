@@ -144,7 +144,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             WebLLM model
             <select data-field="webllmModel">${webllmOptions}</select>
           </label>
-          <p class="hint">★★★★★ = best for the agent loop (multi-step SQL + Python). Lower scores = smaller / less code-tuned, may give up after one tool error. Sizes shown for download / VRAM planning. Model downloads to your browser cache on first use; subsequent loads are instant and fully offline.</p>
+          <p class="hint">Listed best-for-agent first — top entries handle multi-step SQL + Python reliably; lower entries are smaller / less code-tuned and may give up after one tool error. Sizes shown for download / VRAM planning. Model downloads to your browser cache on first use; subsequent loads are instant and fully offline.</p>
           <div class="webgpu-diagnosis" data-webgpu-diagnosis>Checking WebGPU…</div>
           <button class="btn-secondary" data-action="test-webllm">Load now (optional)</button>
           <span class="test-result" data-webllm-result></span>
