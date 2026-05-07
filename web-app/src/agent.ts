@@ -177,6 +177,10 @@ function parseToolCall(raw: string): ToolCall {
 }
 
 const TERMINAL_TOOLS = new Set(["answer", "make_plot"]);
+// Tools that produce something the user actually sees — viewer
+// changes count, since the camera move IS the answer to "show me X".
+// Used to decide whether `done` is acceptable (vs. an empty-trace bail).
+const DELIVERED_BY_TOOL = new Set(["answer", "make_plot", "fly_to", "highlight_segments"]);
 
 function guardSqlReadOnly(sql: string): void {
   const banned = /\b(create|drop|alter|insert|update|delete|attach|pragma)\b/i;
@@ -379,6 +383,59 @@ const TOOL_EXECUTORS: Record<
   answer: execAnswer,
 };
 
+// Translate raw SQLite / Pyodide errors into a short, directive hint
+// the model can act on. WebLLM small models in particular don't
+// recover from "unrecognized token" or "no such column" without one.
+// Returns "" when no useful hint is available.
+function synthesizeErrorHint(
+  tool: string,
+  args: Record<string, unknown>,
+  errMsg: string,
+): string {
+  const lower = errMsg.toLowerCase();
+  if (tool === "run_sql") {
+    const sql = String(args.sql ?? "");
+    if (lower.includes("unrecognized token")) {
+      // SQLite gives this when a column name has a special char (^, /,
+      // parens) and isn't quoted. The schema lists the real column
+      // names — re-emphasize that they go between double quotes.
+      return `Column names with special characters like '(', ')', '^' must be wrapped in double quotes: "volume_(nm^3)" not volume_(nm^3). Or use only the alphanumeric prefix if it's unique.`;
+    }
+    if (lower.includes("no such column")) {
+      return `That column doesn't exist on this table. Check the schema in the system prompt for the exact column name (column names are case-sensitive when quoted).`;
+    }
+    if (lower.includes("no such table")) {
+      return `That table doesn't exist. Use one of the tables listed in the SQL tables section of the system prompt.`;
+    }
+    if (lower.includes("syntax error")) {
+      return `SQL syntax error. Re-check the SELECT clause, table name, and any quoted identifiers. Note: SQLite dialect.`;
+    }
+    if (sql.length === 0) {
+      return `run_sql expects {"sql": "SELECT ..."}.`;
+    }
+  }
+  if (tool === "run_python") {
+    if (lower.includes("nameerror") || lower.includes("name '") && lower.includes("' is not defined")) {
+      return `That variable doesn't exist. The DataFrames are named df_<organelle_class> (see the system prompt schema). np and pd are imported.`;
+    }
+    if (lower.includes("keyerror") || lower.includes("not in index")) {
+      return `That column isn't on the DataFrame. Use df.columns to discover names — they include the suffix (e.g. 'volume_(nm^3)' is a literal column key in pandas, write df["volume_(nm^3)"]).`;
+    }
+    if (lower.includes("attributeerror")) {
+      return `Wrong type / method. If you're calling a Series method on a DataFrame (or vice versa), index into the column first: df["col"].mean(), not df.mean()["col"].`;
+    }
+    if (lower.includes("indentationerror") || lower.includes("syntaxerror")) {
+      return `Python syntax error. Watch indentation; the harness wraps your code under a try block, so it must be valid as-is.`;
+    }
+  }
+  if (tool === "make_plot") {
+    if (lower.includes("did not produce a figure")) {
+      return `Your code ran but no matplotlib figure was open. Make sure you call plt.figure() / plt.plot() / plt.bar() etc. — at least one plot command before the script ends.`;
+    }
+  }
+  return "";
+}
+
 function summarizeResult(result: unknown): string {
   if (result === undefined || result === null) return "null";
   if (typeof result === "object") {
@@ -417,6 +474,14 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
   // N calls" — the actual number that matters when you're hitting a
   // free-tier quota. Local backends (WebLLM) leave this at 0.
   const startReqCount = GeminiBackend.requestCount;
+
+  // Track whether the model has delivered any user-visible output
+  // (answer text or a plot). If it tries to `done` without one — which
+  // small models do after a single tool error — we push back once,
+  // asking for a written answer summarizing what happened. Avoids the
+  // 'Agent finished without delivering an answer' dead end.
+  let deliveredOutput = false;
+  let nudgedForAnswer = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const stepStart = performance.now();
@@ -459,6 +524,19 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     }
 
     if (call.tool === "done") {
+      // If the model bails without ever calling answer / make_plot,
+      // push back once and ask it to summarize. Some flows are valid
+      // visual-only (fly_to → done) but most "I errored, give up"
+      // flows silently leave the user with nothing on screen.
+      if (!deliveredOutput && !nudgedForAnswer) {
+        nudgedForAnswer = true;
+        messages.push({ role: "assistant", content: JSON.stringify(call) });
+        messages.push({
+          role: "user",
+          content: `You called done without delivering an answer or plot. Call answer(text) summarizing what you found, or — if a tool kept failing — explain in one sentence what blocked you. Don't call done again until you've called answer.`,
+        });
+        continue;
+      }
       ctx.callbacks.onTrace?.({ tool: "done", args: {} });
       return;
     }
@@ -485,6 +563,14 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       const result = await executor(call.args ?? {}, ctx);
       trace.result = result;
       ctx.callbacks.onTrace?.(trace);
+      // answer / make_plot are clearly user-visible. fly_to and
+      // highlight_segments also produce a visible viewer change, so
+      // count them as "delivered" — the user sees the camera move
+      // even if no text answer follows. This means a single fly_to
+      // without an answer() is still considered a successful turn.
+      if (DELIVERED_BY_TOOL.has(call.tool)) {
+        deliveredOutput = true;
+      }
       if (TERMINAL_TOOLS.has(call.tool)) {
         // answer / make_plot are inherently terminal — no need for a separate done call.
         return;
@@ -494,11 +580,20 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         content: `tool_result: ${summarizeResult(result)}\n\nCall the next tool, or {"tool":"done"} when finished.`,
       });
     } catch (err) {
-      trace.error = (err as Error).message;
+      const errMsg = (err as Error).message;
+      trace.error = errMsg;
       ctx.callbacks.onTrace?.(trace);
+      // Synthesize a hint specific to common error shapes so the model
+      // can self-correct. Small WebLLM models can't translate raw
+      // SQLite / Python errors into the right fix on their own — they
+      // just trip into 'done' if the message ends with "give up".
+      // Don't offer 'done' as an option here at all; the model can
+      // still emit it, but biasing toward retry-with-hint catches the
+      // common 80%.
+      const hint = synthesizeErrorHint(call.tool, call.args ?? {}, errMsg);
       messages.push({
         role: "user",
-        content: `tool_error: ${(err as Error).message}\n\nAdjust and try again, or {"tool":"done"} to give up.`,
+        content: `tool_error: ${errMsg}${hint ? `\n\nHint: ${hint}` : ""}\n\nFix the call and try again. If you've tried twice with no progress, call answer() to explain what's blocking you.`,
       });
     }
   }

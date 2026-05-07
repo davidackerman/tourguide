@@ -67,8 +67,21 @@ function safeTableName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
 }
 
+// Sanitize CSV headers to SQL-safe identifiers. cellmap-analyze emits
+// columns like 'volume_(nm^3)', 'surface_area_(nm^2)', 'com_x_(nm)' —
+// the parens and '^' are tokens to SQLite, so any unquoted reference
+// errors with 'unrecognized token: "^"'. Gemini reliably quotes
+// identifiers; WebLLM small models don't, and the resulting failures
+// are unrecoverable. Easier to make the columns not need quoting at
+// all: collapse anything non-alphanumeric to '_', squash repeats,
+// trim edges. 'volume_(nm^3)' -> 'volume_nm_3'.
 function normalizeHeader(h: string): string {
-  const k = h.trim().toLowerCase().replace(/\s+/g, "_");
+  const k = h
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
   return COLUMN_ALIASES[k] ?? k;
 }
 
