@@ -969,22 +969,23 @@ button {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  max-height: 200px;
+  max-height: 360px; /* tall enough for ~10 single-row layers without scroll */
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0.4rem 0.5rem;
 }
-/* Two-row per-layer layout so the name + type never collide with the
- * scale / labeled dropdowns. Row 1 = checkbox + name + type; row 2 =
- * controls (only visible in multi-layer mode). */
+/* Single-row per-layer layout — name on the left, scale + labeled
+ * dropdowns on the right. The wider modal (1200px) gives each cell
+ * enough room without wrapping. Below ~900px the controls wrap under
+ * the name (graceful degradation on narrow windows). */
 .analysis-layer-row {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+  align-items: center;
+  gap: 0.6rem;
   font-size: 0.85rem;
   padding: 0.3rem 0.1rem;
-  border-bottom: 1px dashed transparent;
+  flex-wrap: wrap;
 }
 .analysis-layer-row + .analysis-layer-row {
   border-top: 1px dashed var(--border);
@@ -994,6 +995,7 @@ button {
   align-items: baseline;
   gap: 0.4rem;
   cursor: pointer;
+  flex: 0 0 200px; /* fixed left column for name+type */
   min-width: 0;
 }
 .analysis-layer-name {
@@ -1011,8 +1013,9 @@ button {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+  flex: 1 1 auto;
   flex-wrap: wrap;
-  margin-left: 1.4rem; /* indent under the checkbox */
+  min-width: 0;
 }
 .analysis-layer-control {
   display: inline-flex;
@@ -1020,17 +1023,21 @@ button {
   gap: 0.3rem;
   font-size: 0.75rem;
   color: var(--fg-dim);
+  flex: 1 1 auto;
+  min-width: 220px;
 }
 .analysis-layer-control > select {
   font-size: 0.78rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 0.2rem 0.3rem;
+  padding: 0.25rem 0.4rem;
+  flex: 1;
+  min-width: 0;
 }
 .analysis-layer-scale {
-  min-width: 240px;
+  /* Take more of the available width than 'labeled' since scale
+   * descriptions are longer ('s0  1300×1500×222  3.33 GB'). */
 }
 .analysis-layer-labeled {
-  min-width: 200px;
   font-family: inherit;
 }
 .analysis-layer-status {
@@ -1209,8 +1216,13 @@ button {
   background: var(--bg);
 }
 
+/* Analyze modal goes wide so per-layer controls (scale + labeled
+ * dropdowns) sit side-by-side instead of wrapping under the layer
+ * name. Capped to 96vw so it doesn't overflow on narrow viewports;
+ * 1200px is enough for the longest scale-option text plus the labeled
+ * dropdown plus the layer-name column without any wrapping. */
 .modal-analysis {
-  width: min(820px, 94vw);
+  width: min(1200px, 96vw);
 }
 
 .analysis-scales-table {
