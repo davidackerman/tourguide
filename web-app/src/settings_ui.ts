@@ -310,37 +310,38 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       geminiUsageEl.innerHTML = "";
       return;
     }
-    const { rpdUsed, rpmUsed } = GeminiBackend.getUsage(id);
+    const { rpdUsed, rpmUsed, tpmUsed, dayTokens } = GeminiBackend.getUsage(id);
     // Look up known free-tier limits via the cached models list
     // (which has them populated by listGeminiModels).
     const cached = loadCachedGeminiModels();
     const m = cached?.find((x) => x.id === id);
     const rpd = m?.rpd;
     const rpm = m?.rpm;
-    const cells: string[] = [];
-    if (rpm !== undefined) {
-      const pct = Math.min(100, (rpmUsed / rpm) * 100);
-      const cls = rpmUsed >= rpm ? "exceeded" : rpmUsed >= rpm * 0.8 ? "warn" : "ok";
-      cells.push(
-        `<div class="gemini-usage-cell ${cls}"><div class="gemini-usage-label">${rpmUsed}/${rpm} RPM</div><div class="gemini-usage-bar"><div style="width:${pct}%"></div></div></div>`,
-      );
-    } else {
-      cells.push(`<div class="gemini-usage-cell"><div class="gemini-usage-label">${rpmUsed} RPM (no known limit)</div></div>`);
-    }
-    if (rpd !== undefined) {
-      const pct = Math.min(100, (rpdUsed / rpd) * 100);
-      const cls = rpdUsed >= rpd ? "exceeded" : rpdUsed >= rpd * 0.8 ? "warn" : "ok";
-      cells.push(
-        `<div class="gemini-usage-cell ${cls}"><div class="gemini-usage-label">${rpdUsed}/${rpd} today</div><div class="gemini-usage-bar"><div style="width:${pct}%"></div></div></div>`,
-      );
-    } else {
-      cells.push(`<div class="gemini-usage-cell"><div class="gemini-usage-label">${rpdUsed} today (no known daily limit)</div></div>`);
-    }
+    const tpm = m?.tpm;
+    const cell = (label: string, used: number, max: number | undefined): string => {
+      if (max === undefined) {
+        return `<div class="gemini-usage-cell"><div class="gemini-usage-label">${label.replace("{used}", String(used)).replace(" / {max}", " (no known limit)")}</div></div>`;
+      }
+      const pct = Math.min(100, (used / max) * 100);
+      const cls = used >= max ? "exceeded" : used >= max * 0.8 ? "warn" : "ok";
+      const text = label.replace("{used}", String(used)).replace("{max}", formatNumber(max));
+      return `<div class="gemini-usage-cell ${cls}"><div class="gemini-usage-label">${text}</div><div class="gemini-usage-bar"><div style="width:${pct}%"></div></div></div>`;
+    };
+    const cells = [
+      cell("{used} / {max} RPM", rpmUsed, rpm),
+      cell("{used} / {max} TPM (real Google tokens)", tpmUsed, tpm),
+      cell("{used} / {max} req today", rpdUsed, rpd),
+    ];
     geminiUsageEl.innerHTML = `
       <div class="gemini-usage-row">${cells.join("")}</div>
-      <div class="gemini-usage-note">From this browser only. Resets at Pacific midnight (Google's RPD reset). Check <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio</a> for cross-device totals.</div>
+      <div class="gemini-usage-note">${formatNumber(dayTokens)} tokens used today (from generateContent's usageMetadata). RPM / RPD counted from this browser only — Google has no public usage API. Resets at Pacific midnight. Cross-device totals: <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio</a>.</div>
     `;
   };
+  function formatNumber(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+    return String(n);
+  }
   renderGeminiUsage();
   geminiModelEl.addEventListener("change", renderGeminiUsage);
 

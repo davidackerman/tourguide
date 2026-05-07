@@ -186,7 +186,10 @@ TYPICAL FLOWS:
                                         _out = center.tolist()
                                       -> fly_to (position = center) -> done
   "median volume of nuclei"        -> run_python (df_nucleus["volume_(nm^3)"].median(); print) -> answer -> done
-  "two closest mito pairs"         -> run_python (pdist over com_*, argmin; print pairs)       -> answer -> done
+  "two closest mito pairs"         -> run_python (pdist over com_mito, argmin; set
+                                      _out = {"ids": [id1, id2], "coms": [[x,y,z],[x,y,z]]}
+                                      so the next tool can use both without another SQL lookup)
+                                      -> highlight_segments (ids) -> done
 
 WHEN TO USE WHICH TOOL — IMPORTANT:
   - Filter / sort / count / "the N biggest/smallest"           -> run_sql

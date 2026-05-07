@@ -12,6 +12,13 @@ interface GeminiUsageEntry {
   date: string; // YYYY-MM-DD in Pacific time
   dayCount: number;
   recentMs: number[]; // recent request timestamps (last ~90s)
+  // Token usage harvested from generateContent's usageMetadata.
+  // recentTokens are timestamp+count pairs in the same 90s window
+  // used for RPM tracking, so we can compute live TPM. dayTokens is
+  // the cumulative total today (informational; Google's TPM cap is
+  // per-minute, not per-day).
+  recentTokens?: Array<[ts: number, tokens: number]>;
+  dayTokens?: number;
 }
 function pacificDateString(): string {
   // 'en-CA' yields YYYY-MM-DD which is what we want for date comparison.
@@ -357,12 +364,20 @@ export class GeminiBackend implements LLMBackend {
       const today = pacificDateString();
       const raw = localStorage.getItem(GEMINI_USAGE_KEY);
       const data = raw ? (JSON.parse(raw) as GeminiUsageStore) : {};
-      const entry = data[modelId] ?? { date: today, dayCount: 0, recentMs: [] };
+      const entry = data[modelId] ?? {
+        date: today,
+        dayCount: 0,
+        recentMs: [],
+        recentTokens: [],
+        dayTokens: 0,
+      };
       // Roll over at PT midnight.
       if (entry.date !== today) {
         entry.date = today;
         entry.dayCount = 0;
         entry.recentMs = [];
+        entry.recentTokens = [];
+        entry.dayTokens = 0;
       }
       const now = Date.now();
       entry.dayCount += 1;
@@ -376,20 +391,58 @@ export class GeminiBackend implements LLMBackend {
     }
   }
 
-  static getUsage(modelId: string): { rpdUsed: number; rpmUsed: number } {
-    if (typeof localStorage === "undefined") return { rpdUsed: 0, rpmUsed: 0 };
+  // Record token usage harvested from a generateContent response's
+  // usageMetadata block. Called after we successfully parse a response.
+  // Tokens get folded into both the cumulative day total and a sliding
+  // window for live TPM display.
+  static recordTokens(modelId: string, tokens: number): void {
+    if (typeof localStorage === "undefined" || !Number.isFinite(tokens) || tokens <= 0) return;
     try {
       const today = pacificDateString();
       const raw = localStorage.getItem(GEMINI_USAGE_KEY);
-      if (!raw) return { rpdUsed: 0, rpmUsed: 0 };
+      const data = raw ? (JSON.parse(raw) as GeminiUsageStore) : {};
+      const entry = data[modelId];
+      if (!entry || entry.date !== today) return; // recordUsage runs first; if not, nothing to attach to
+      const now = Date.now();
+      entry.dayTokens = (entry.dayTokens ?? 0) + tokens;
+      entry.recentTokens = [...(entry.recentTokens ?? []), [now, tokens] as [number, number]].filter(
+        ([t]) => now - t < 90_000,
+      );
+      data[modelId] = entry;
+      localStorage.setItem(GEMINI_USAGE_KEY, JSON.stringify(data));
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  static getUsage(modelId: string): {
+    rpdUsed: number;
+    rpmUsed: number;
+    tpmUsed: number;
+    dayTokens: number;
+  } {
+    const empty = { rpdUsed: 0, rpmUsed: 0, tpmUsed: 0, dayTokens: 0 };
+    if (typeof localStorage === "undefined") return empty;
+    try {
+      const today = pacificDateString();
+      const raw = localStorage.getItem(GEMINI_USAGE_KEY);
+      if (!raw) return empty;
       const data = JSON.parse(raw) as GeminiUsageStore;
       const entry = data[modelId];
-      if (!entry || entry.date !== today) return { rpdUsed: 0, rpmUsed: 0 };
+      if (!entry || entry.date !== today) return empty;
       const now = Date.now();
       const rpmUsed = entry.recentMs.filter((t) => now - t < 60_000).length;
-      return { rpdUsed: entry.dayCount, rpmUsed };
+      const tpmUsed = (entry.recentTokens ?? [])
+        .filter(([t]) => now - t < 60_000)
+        .reduce((sum, [, n]) => sum + n, 0);
+      return {
+        rpdUsed: entry.dayCount,
+        rpmUsed,
+        tpmUsed,
+        dayTokens: entry.dayTokens ?? 0,
+      };
     } catch {
-      return { rpdUsed: 0, rpmUsed: 0 };
+      return empty;
     }
   }
 
@@ -467,9 +520,13 @@ export class GeminiBackend implements LLMBackend {
     if (!useStream) {
       const data = (await res.json()) as {
         candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        usageMetadata?: { totalTokenCount?: number; promptTokenCount?: number; candidatesTokenCount?: number };
       };
       const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
       if (!text) throw new Error("Gemini returned empty response");
+      // Record real Google-reported token usage for the TPM bar.
+      const total = data.usageMetadata?.totalTokenCount;
+      if (total !== undefined) GeminiBackend.recordTokens(this.model, total);
       return text;
     }
     const reader = res.body?.getReader();
@@ -477,6 +534,7 @@ export class GeminiBackend implements LLMBackend {
     const decoder = new TextDecoder();
     let buffer = "";
     let accumulated = "";
+    let lastUsageTotal: number | undefined;
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -490,11 +548,17 @@ export class GeminiBackend implements LLMBackend {
         try {
           const chunk = JSON.parse(json) as {
             candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+            usageMetadata?: { totalTokenCount?: number };
           };
           const t = chunk.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
           if (t) {
             accumulated += t;
             options.onToken?.(t, accumulated);
+          }
+          // Gemini emits usageMetadata cumulatively in each SSE chunk;
+          // the last seen value is the final total for the request.
+          if (chunk.usageMetadata?.totalTokenCount !== undefined) {
+            lastUsageTotal = chunk.usageMetadata.totalTokenCount;
           }
         } catch {
           /* ignore partial-JSON SSE noise */
@@ -502,6 +566,7 @@ export class GeminiBackend implements LLMBackend {
       }
     }
     if (!accumulated) throw new Error("Gemini returned empty stream");
+    if (lastUsageTotal !== undefined) GeminiBackend.recordTokens(this.model, lastUsageTotal);
     return accumulated;
   }
 

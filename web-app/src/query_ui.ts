@@ -35,6 +35,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
         <button class="btn-secondary btn-tiny" data-action="copy-trace" type="button">📋 Copy trace</button>
         <span class="agent-trace-copy-status" data-copy-status></span>
       </div>
+      <div class="agent-trace-question" data-trace-question hidden></div>
       <div class="agent-trace" data-trace></div>
     </details>
   `;
@@ -73,9 +74,13 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   // as plain text — DOM-walking the rendered HTML is fragile and loses
   // collapsed sections.
   const traceItems: AgentTraceItem[] = [];
+  // Captured at submit time so 'Copy trace' includes the user's prompt
+  // alongside the tool calls. Cleared at the start of each new query.
+  let currentQuestion = "";
 
   const formatTraceForCopy = (): string => {
     const lines: string[] = [];
+    if (currentQuestion) lines.push(`# Query\n${currentQuestion}\n`);
     if (statusEl.textContent) lines.push(`# Status\n${statusEl.textContent}\n`);
     if (answerEl.textContent) lines.push(`# Answer\n${answerEl.textContent}\n`);
     lines.push(`# Trace (${traceItems.length} step${traceItems.length === 1 ? "" : "s"})`);
@@ -195,6 +200,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     e.preventDefault();
     const question = input.value.trim();
     if (!question) return;
+    currentQuestion = question;
     const db = ctx.getDB();
     if (!db) {
       setStatus("Load a dataset with organelle CSVs first.", "err");
@@ -218,6 +224,11 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     // on the first appendTrace, which hid the copy path on early
     // errors (model parse failures, 429s on first call, etc.).
     detailsEl.hidden = false;
+    const traceQuestionEl = box.querySelector<HTMLDivElement>("[data-trace-question]");
+    if (traceQuestionEl) {
+      traceQuestionEl.hidden = false;
+      traceQuestionEl.textContent = `Query: ${question}`;
+    }
     let answeredOrFlew = false;
     // Fresh AbortController per query — Stop button calls abort()
     // which cascades through to the LLM backend (fetch / WebLLM
