@@ -47,6 +47,16 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       <summary>Show agent trace</summary>
       <div class="agent-trace-toolbar">
         <button class="btn-secondary btn-tiny" data-action="copy-trace" type="button">📋 Copy trace</button>
+        <div class="download-menu">
+          <button class="btn-secondary btn-tiny" data-action="download-toggle" type="button">⬇ Download…</button>
+          <div class="download-popover" data-download-popover hidden>
+            <label><input type="checkbox" data-dl-trace checked> Trace</label>
+            <label><input type="checkbox" data-dl-plots checked> Plots</label>
+            <label><input type="checkbox" data-dl-scripts checked> Python scripts</label>
+            <label><input type="checkbox" data-dl-session checked> Session history</label>
+            <button class="btn-primary btn-tiny" data-action="download-go" type="button">Download .md</button>
+          </div>
+        </div>
         <span class="agent-trace-copy-status" data-copy-status></span>
       </div>
       <div class="agent-trace-question" data-trace-question hidden></div>
@@ -172,6 +182,11 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   // Captured at submit time so 'Copy trace' includes the user's prompt
   // alongside the tool calls. Cleared at the start of each new query.
   let currentQuestion = "";
+  // Plots emitted this turn (captured for the Download bundle alongside
+  // the trace). We accumulate within a turn so a single download can
+  // bundle multiple plots (rare but possible if make_plot is followed
+  // by another).
+  const plotsThisTurn: { png: string; code: string; title?: string }[] = [];
 
   const formatTraceForCopy = (): string => {
     const lines: string[] = [];
@@ -199,6 +214,85 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     }
     setTimeout(() => (copyStatus.textContent = ""), 1500);
   });
+
+  // Download popover — single button, all categories checked by default,
+  // user can deselect. Generates one self-contained .md so the result
+  // opens cleanly in any markdown viewer (plots embed as data URLs).
+  const dlToggle = box.querySelector<HTMLButtonElement>("[data-action='download-toggle']")!;
+  const dlPopover = box.querySelector<HTMLDivElement>("[data-download-popover]")!;
+  const dlGoBtn = box.querySelector<HTMLButtonElement>("[data-action='download-go']")!;
+  const dlTrace = box.querySelector<HTMLInputElement>("[data-dl-trace]")!;
+  const dlPlots = box.querySelector<HTMLInputElement>("[data-dl-plots]")!;
+  const dlScripts = box.querySelector<HTMLInputElement>("[data-dl-scripts]")!;
+  const dlSession = box.querySelector<HTMLInputElement>("[data-dl-session]")!;
+  dlToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    dlPopover.hidden = !dlPopover.hidden;
+  });
+  // Click-outside dismisses the popover. Listen on document so a click
+  // anywhere not on the popover or the toggle closes it.
+  document.addEventListener("click", (e) => {
+    if (dlPopover.hidden) return;
+    const t = e.target as Node;
+    if (!dlPopover.contains(t) && t !== dlToggle) dlPopover.hidden = true;
+  });
+  dlGoBtn.addEventListener("click", () => {
+    const md = buildSessionMarkdown({
+      includeTrace: dlTrace.checked,
+      includePlots: dlPlots.checked,
+      includeScripts: dlScripts.checked,
+      includeSession: dlSession.checked,
+    });
+    downloadBlob(new Blob([md], { type: "text/markdown" }), `tourguide-session-${Date.now()}.md`);
+    dlPopover.hidden = true;
+  });
+
+  const buildSessionMarkdown = (opts: {
+    includeTrace: boolean;
+    includePlots: boolean;
+    includeScripts: boolean;
+    includeSession: boolean;
+  }): string => {
+    const out: string[] = [];
+    out.push(`# Tourguide session\n`);
+    out.push(`Generated ${new Date().toISOString()}\n`);
+    if (currentQuestion) out.push(`## Question\n${currentQuestion}\n`);
+    if (answerEl.textContent) out.push(`## Answer\n${answerEl.textContent}\n`);
+    if (opts.includePlots && plotsThisTurn.length > 0) {
+      out.push(`## Plots`);
+      plotsThisTurn.forEach((p, i) => {
+        const label = p.title ?? `Plot ${i + 1}`;
+        out.push(`\n### ${label}\n`);
+        out.push(`![${label}](${p.png})\n`);
+      });
+    }
+    if (opts.includeScripts) {
+      const scripts = traceItems
+        .filter((t) => ["run_python", "make_plot", "python_on_layers"].includes(t.tool))
+        .map((t) => ({ tool: t.tool, code: String((t.args as Record<string, unknown>)?.python ?? "") }))
+        .filter((s) => s.code.length > 0);
+      if (scripts.length > 0) {
+        out.push(`\n## Python scripts`);
+        scripts.forEach((s, i) => {
+          out.push(`\n### Script ${i + 1} (${s.tool})\n`);
+          out.push("```python\n" + s.code + "\n```\n");
+        });
+      }
+    }
+    if (opts.includeTrace && traceItems.length > 0) {
+      out.push(`\n## Trace (${traceItems.length} steps)`);
+      traceItems.forEach((it, i) => {
+        out.push("\n" + formatStepForCopy(it, i));
+      });
+    }
+    if (opts.includeSession && sessionTurns.length > 0) {
+      out.push(`\n## Session history (most recent last)`);
+      sessionTurns.forEach((t, i) => {
+        out.push(`\n### Turn ${i + 1}\n- **Q:** ${t.question}\n- **A:** ${t.summary}`);
+      });
+    }
+    return out.join("\n");
+  };
 
   const setStatus = (msg: string, kind: "" | "err" | "ok" | "pending" = ""): void => {
     statusEl.textContent = msg;
@@ -401,6 +495,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     plotEl.hidden = true;
     traceEl.innerHTML = "";
     traceItems.length = 0;
+    plotsThisTurn.length = 0;
     // Show the trace panel up front (collapsed by default) so even if
     // the agent fails or is stopped before any tool fires, the Copy
     // trace button is still reachable. Previously we only revealed it
@@ -440,6 +535,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
           },
           onPlot: (_png, _code, title) => {
             renderPlot(_png, _code, title);
+            plotsThisTurn.push({ png: _png, code: _code, title });
             answeredOrFlew = true;
             if (!turnSummary) turnSummary = title ? `Showed plot: ${title}` : "Showed a plot";
           },
