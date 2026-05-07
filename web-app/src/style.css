@@ -652,6 +652,17 @@ button {
 .welcome-radio p.hint {
   margin: 0.2rem 0 0.3rem;
 }
+.welcome-getstarted-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+.welcome-getstarted-row > button {
+  flex: 1 1 240px;
+  min-height: 2.4rem;
+}
+
 .welcome-radio input[type="text"],
 .welcome-radio input[type="password"],
 .welcome-radio select {

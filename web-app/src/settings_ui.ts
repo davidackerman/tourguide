@@ -207,10 +207,26 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
     clearWelcomeSeen();
     openWelcomeDialog({
       onOpenLoader: () => document.getElementById("load-data-btn")?.click(),
+      onLoadDemo: () => {
+        // The demo loader lives in main.ts (it has access to the
+        // catalog). Defer to the dataset dropdown — picking the first
+        // non-synthetic entry there triggers the same load path. The
+        // dropdown's change handler does the work.
+        const sel = document.getElementById("dataset-select") as HTMLSelectElement | null;
+        if (sel && sel.options.length > 0) {
+          // Pick whichever option index isn't 'demo_synthetic'.
+          let target = 0;
+          for (let i = 0; i < sel.options.length; i++) {
+            if (!/synthetic/i.test(sel.options[i].textContent ?? "")) {
+              target = i;
+              break;
+            }
+          }
+          sel.value = String(target);
+          sel.dispatchEvent(new Event("change"));
+        }
+      },
       onSettingsChanged: () => {
-        // Re-trigger the parent caller's onChange so the topbar
-        // indicator etc. update. Fire by simulating settings change
-        // via the existing onChange callback.
         opts.onChange(backendFromSettings(loadSettings()));
       },
     });

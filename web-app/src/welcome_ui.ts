@@ -44,6 +44,10 @@ export interface WelcomeOptions {
   // Called when the user clicks "Open loader" so the caller can
   // bring up the regular dataset loader dialog.
   onOpenLoader: () => void;
+  // Called when the user clicks "Load demo dataset" — caller loads
+  // a public OpenOrganelle / cellmap dataset from the catalog so a
+  // first-time user can poke around without bringing their own data.
+  onLoadDemo: () => void;
   // Called when settings change so the topbar AI indicator etc.
   // refresh without a page reload.
   onSettingsChanged: () => void;
@@ -184,16 +188,22 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
         </section>
 
         <section class="welcome-step">
-          <h3>3. Load your data</h3>
+          <h3>3. Get started</h3>
           <p class="hint">
-            Paste a public OME-Zarr or precomputed URL, drop a Neuroglancer
-            state JSON, or pick a YAML descriptor / local folder.
+            New here? Load a small public OpenOrganelle dataset so you
+            can poke around before bringing your own. Otherwise jump
+            straight into the loader to paste a URL, drop a Neuroglancer
+            state, or pick a YAML / local folder.
           </p>
+          <div class="welcome-getstarted-row">
+            <button class="btn-secondary" data-welcome-load-demo type="button">🧬 Load demo dataset (jrc_hela-2, ~public S3)</button>
+            <button class="btn-primary" data-welcome-load-mine type="button">📂 Load my data</button>
+          </div>
+          <p class="hint">Both will save your settings first, then start loading.</p>
         </section>
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" data-welcome-skip>Skip — I'll set up later</button>
-        <button class="btn-primary" data-welcome-save>Save &amp; load data</button>
       </div>
     </div>
   `;
@@ -218,7 +228,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     }
   });
 
-  overlay.querySelector("[data-welcome-save]")!.addEventListener("click", async () => {
+  // Save settings (extracted so both 'Load demo' and 'Load my data'
+  // commit the user's AI / analysis-backend choices before navigating).
+  // Returns false if the user cancelled an invalid-Gemini-key warning.
+  const persistSettings = async (): Promise<boolean> => {
     const aiChoice = (overlay.querySelector<HTMLInputElement>('input[name="welcome-ai"]:checked')?.value as "none" | "gemini" | "webllm") ?? "none";
     const geminiKey = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? settings.geminiApiKey;
     const webllmModel = overlay.querySelector<HTMLSelectElement>("[data-welcome-webllm-model]")?.value ?? settings.webllmModel;
@@ -226,7 +239,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     let analysisUrl: string;
     if (analysisChoice === "custom") {
       const typed = overlay.querySelector<HTMLInputElement>("[data-welcome-analysis-url]")?.value.trim() ?? "";
-      analysisUrl = typed; // empty falls through to disabled — fine
+      analysisUrl = typed;
     } else {
       analysisUrl = DEFAULT_ANALYSIS_BACKEND;
     }
@@ -238,8 +251,6 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
       analysisBackendUrl: analysisUrl,
     };
     saveSettings(next);
-    // Lightweight key validation if the user picked Gemini and pasted
-    // a key — non-fatal if it fails, just warn.
     if (aiChoice === "gemini" && geminiKey) {
       try {
         const backend = new GeminiBackend(geminiKey, next.geminiModel);
@@ -248,16 +259,23 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
         const ok = confirm(
           `Gemini API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
         );
-        if (!ok) return;
+        if (!ok) return false;
       }
     }
     opts.onSettingsChanged();
+    return true;
+  };
+
+  overlay.querySelector("[data-welcome-load-demo]")!.addEventListener("click", async () => {
+    if (!(await persistSettings())) return;
     markWelcomeSeen();
     close(true);
-    // Open the loader so the user can pick data right after
-    // configuring backends — finishing the welcome flow with
-    // 'now load something' is more useful than dropping them
-    // back into an empty viewer.
+    opts.onLoadDemo();
+  });
+  overlay.querySelector("[data-welcome-load-mine]")!.addEventListener("click", async () => {
+    if (!(await persistSettings())) return;
+    markWelcomeSeen();
+    close(true);
     opts.onOpenLoader();
   });
 }

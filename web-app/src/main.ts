@@ -96,14 +96,32 @@ function renderEmptyViewerState(): void {
     }
   });
   ngHost.querySelector("[data-empty-action='welcome']")?.addEventListener("click", () => {
-    openWelcomeDialog({
-      onOpenLoader: () => loadBtn.click(),
-      onSettingsChanged: () => {
-        backend = backendFromSettings(loadSettings());
-        updateBackendIndicator();
-      },
-    });
+    openWelcomeDialog(makeWelcomeOptions());
   });
+}
+
+// Centralized factory so every welcome-dialog opener uses the same
+// callbacks (load-demo / open-loader / settings-changed) without
+// having to duplicate the wiring everywhere it's invoked.
+function makeWelcomeOptions(): Parameters<typeof openWelcomeDialog>[0] {
+  return {
+    onOpenLoader: () => loadBtn.click(),
+    onLoadDemo: () => {
+      // Prefer a non-synthetic catalog entry — the demo catalog has
+      // 'demo_synthetic' first (placeholder) and a real OpenOrganelle
+      // dataset second. Pick whichever real entry we can find.
+      const realIdx = entries.findIndex((e) => !/synthetic|demo_synthetic/i.test(e.name));
+      const idx = realIdx >= 0 ? realIdx : 0;
+      if (entries[idx]) {
+        select.value = String(idx);
+        void loadEntry(entries[idx], idx);
+      }
+    },
+    onSettingsChanged: () => {
+      backend = backendFromSettings(loadSettings());
+      updateBackendIndicator();
+    },
+  };
 }
 
 // On first run, surface the welcome modal automatically. Re-runs are
@@ -111,13 +129,7 @@ function renderEmptyViewerState(): void {
 // again' button or from Settings.
 function maybeShowWelcome(): void {
   if (hasSeenWelcome()) return;
-  openWelcomeDialog({
-    onOpenLoader: () => loadBtn.click(),
-    onSettingsChanged: () => {
-      backend = backendFromSettings(loadSettings());
-      updateBackendIndicator();
-    },
-  });
+  openWelcomeDialog(makeWelcomeOptions());
 }
 let backend: LLMBackend = backendFromSettings(loadSettings());
 
