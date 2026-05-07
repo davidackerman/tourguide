@@ -95,11 +95,15 @@ layers:
           </div>
         </section>
         <section class="modal-pane" data-pane="ngstate">
-          <p class="hint">Paste a Neuroglancer state JSON — what lives after <code>#!</code> in an NG URL, or what you'd see in NG's <strong>{ } JSON</strong> panel. Tourguide extracts the layers, auto-fills voxel size from the first source, and overlays the camera + selected segments after load. Optionally attach a CSV per segmentation layer to enable the structured browser.</p>
+          <p class="hint">Paste any of:
+            <strong>(a)</strong> a full Neuroglancer URL like <code>https://neuroglancer-demo.appspot.com/#!{...}</code> — the prefix gets stripped automatically;
+            <strong>(b)</strong> just the <code>#!{...}</code> hash fragment;
+            <strong>(c)</strong> the raw JSON from NG's <strong>{ } JSON</strong> panel.
+            Tourguide extracts layers (adding the right <code>zarr://</code> / <code>precomputed://</code> scheme prefixes), auto-fills voxel size from the first source, and overlays the camera + selected segments after load. Optionally attach a CSV per segmentation layer to enable the structured browser.</p>
           <div class="form-row">
             <label>Name <input data-ngstate-name placeholder="my_dataset" /></label>
           </div>
-          <textarea class="ngstate-input" rows="10" data-ngstate-input placeholder='{"dimensions":{"x":[4e-9,"m"],...},"layers":[{"type":"image","name":"em","source":"zarr://..."}],"position":[...],...}'></textarea>
+          <textarea class="ngstate-input" rows="10" data-ngstate-input placeholder='https://neuroglancer-demo.appspot.com/#!{"layers":[...]}  — or paste just the JSON'></textarea>
           <div class="form-actions" style="display:flex;gap:8px;align-items:center;">
             <button class="btn-secondary" data-action="parse-ngstate" type="button">Parse layers</button>
             <span class="ngstate-status" data-ngstate-status></span>
@@ -510,11 +514,27 @@ layers:
     } else {
       throw new Error("NG state 'layers' must be an array or object");
     }
+    // NG infers the data-source kind from URL shape (a path containing
+    // .zarr/ → zarr datasource), so its state JSON often omits the
+    // 'zarr://' prefix. Tourguide downstream code (analysis_ui, etc.)
+    // identifies zarr layers by checking for that prefix, so we re-add
+    // it here when the URL is clearly a zarr path. Keeps existing
+    // schemes intact (precomputed://, n5://, gs://, etc.).
+    const ensureScheme = (url: string): string => {
+      if (/^[a-z][a-z0-9+]*:\/\//i.test(url)) return url; // already has scheme
+      // Heuristic: '.zarr/' or trailing '.zarr' → zarr datasource.
+      // 'precomputed' segment in the path → precomputed source.
+      // Otherwise leave bare (n5 etc. is harder to detect from URL alone).
+      if (/\.zarr(\/|$)/i.test(url)) return `zarr://${url}`;
+      if (/\/(precomputed|neuroglancer\/(mesh|skeleton))\b/i.test(url)) return `precomputed://${url}`;
+      if (/\.n5(\/|$)/i.test(url)) return `n5://${url}`;
+      return url;
+    };
     const flattenSource = (s: unknown): string | string[] | null => {
       const one = (x: unknown): string | null => {
-        if (typeof x === "string") return x;
+        if (typeof x === "string") return ensureScheme(x);
         if (x && typeof x === "object" && typeof (x as { url?: unknown }).url === "string") {
-          return (x as { url: string }).url;
+          return ensureScheme((x as { url: string }).url);
         }
         return null;
       };
@@ -531,10 +551,15 @@ layers:
       const type = entry.type === "segmentation" ? "segmentation" : "image";
       const src = flattenSource(entry.source);
       if (!src) continue;
+      // Keep multi-source layers as arrays — preserves NG's
+      // zarr-volume + precomputed-mesh + precomputed-skeleton bundle.
+      // Analysis tools that need ONE zarr URL pick the right one via
+      // pickZarrEntry; the viewer renders all sources together.
+      const nameSource = Array.isArray(src) ? src[0] : src;
       out.push({
-        name: name || defaultLayerName(Array.isArray(src) ? src[0] : src, type),
+        name: name || defaultLayerName(nameSource, type),
         type,
-        source: Array.isArray(src) ? src[0] : src, // descriptor.layer.source is string-only
+        source: src,
       });
     }
     if (out.length === 0) {

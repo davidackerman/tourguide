@@ -10,7 +10,10 @@ import {
 export interface PastedLayerInput {
   name: string;
   type: LayerType;
-  source: string;
+  // Single URL or an array of URLs for multi-source layers (zarr volume
+  // + precomputed mesh + precomputed skeleton bundled on one
+  // segmentation layer is the typical case from NG state pastes).
+  source: string | string[];
   organelle_class?: string;
   csv?: string;
 }
@@ -25,13 +28,17 @@ export interface PastedDatasetInput {
 }
 
 export function buildDescriptorFromInput(input: PastedDatasetInput): DatasetDescriptor {
+  const sourceHasContent = (s: string | string[]): boolean =>
+    Array.isArray(s) ? s.some((u) => u.trim().length > 0) : s.trim().length > 0;
+  const trimSource = (s: string | string[]): string | string[] =>
+    Array.isArray(s) ? s.map((u) => u.trim()).filter((u) => u.length > 0) : s.trim();
   let layers: DatasetLayer[] = input.layers
-    .filter((l) => l.name.trim() && l.source.trim())
+    .filter((l) => l.name.trim() && sourceHasContent(l.source))
     .map((l) => {
       const layer: DatasetLayer = {
         name: l.name.trim(),
         type: l.type,
-        source: l.source.trim(),
+        source: trimSource(l.source),
       };
       if (l.organelle_class?.trim()) layer.organelle_class = l.organelle_class.trim();
       if (l.csv?.trim()) layer.csv = l.csv.trim();
