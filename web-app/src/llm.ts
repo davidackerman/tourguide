@@ -451,6 +451,41 @@ export interface GeminiModelInfo {
   description?: string;
   // True if this model supports the generateContent action we use.
   supportsGenerateContent: boolean;
+  // Free-tier rate limits, when known. NOT returned by the API —
+  // hand-curated by id prefix below. Optional because the map will
+  // miss freshly-released models until updated.
+  rpm?: number;
+  tpm?: number;
+  rpd?: number;
+}
+
+// Hand-curated free-tier limits as of 2026-05. Google has tightened
+// these multiple times this year — updates land here when reported.
+// Keys are ID prefixes (most-specific-first wins). When in doubt the
+// user's AI Studio dashboard is authoritative.
+//
+// Source: aistudio.google.com/usage 'Rate limits by model' panel.
+const KNOWN_GEMINI_FREE_TIER: Array<{
+  prefix: string;
+  rpm: number;
+  tpm: number;
+  rpd: number;
+}> = [
+  { prefix: "gemini-2.5-flash-lite", rpm: 15, tpm: 250_000, rpd: 500 },
+  { prefix: "gemini-2.5-flash",      rpm: 10, tpm: 250_000, rpd: 250 },
+  { prefix: "gemini-2.5-pro",        rpm: 5,  tpm: 250_000, rpd: 100 },
+  { prefix: "gemini-flash-lite",     rpm: 15, tpm: 250_000, rpd: 500 },
+  { prefix: "gemini-flash",          rpm: 10, tpm: 250_000, rpd: 250 },
+  { prefix: "gemini-pro",            rpm: 5,  tpm: 250_000, rpd: 100 },
+];
+
+function lookupKnownLimits(id: string): { rpm?: number; tpm?: number; rpd?: number } {
+  // Longest-prefix match so 'gemini-2.5-flash-lite' beats 'gemini-2.5-flash'.
+  const sorted = [...KNOWN_GEMINI_FREE_TIER].sort((a, b) => b.prefix.length - a.prefix.length);
+  for (const entry of sorted) {
+    if (id.startsWith(entry.prefix)) return { rpm: entry.rpm, tpm: entry.tpm, rpd: entry.rpd };
+  }
+  return {};
 }
 
 // Fetch the list of Gemini models the given key can access. Filters
@@ -485,11 +520,15 @@ export async function listGeminiModels(apiKey: string): Promise<GeminiModelInfo[
     if (!supportsGenerateContent) continue;
     // Skip Gemini 1.x — long retired, just clutter.
     if (/^gemini-1\./i.test(id) || /^chat-bison/i.test(id) || /^text-bison/i.test(id)) continue;
+    const limits = lookupKnownLimits(id);
     out.push({
       id,
       displayName: m.displayName ?? id,
       description: m.description,
       supportsGenerateContent: true,
+      rpm: limits.rpm,
+      tpm: limits.tpm,
+      rpd: limits.rpd,
     });
   }
   // Sort: newest major version first, then 'flash-lite' before 'flash'

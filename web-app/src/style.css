@@ -700,6 +700,20 @@ button {
   gap: 0.5rem;
   margin: 0.3rem 0;
 }
+.gemini-sort-row {
+  margin-bottom: 0.4rem;
+}
+.gemini-sort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.gemini-sort-label select {
+  font-size: 0.78rem;
+  padding: 0.2rem 0.4rem;
+}
 .gemini-model-status {
   font-size: 0.75rem;
   color: var(--fg-dim);

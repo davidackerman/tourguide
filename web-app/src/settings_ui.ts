@@ -53,27 +53,67 @@ export interface SettingsUIOptions {
   onChange: (backend: LLMBackend) => void;
 }
 
+type GeminiSortMode = "default" | "rpd" | "rpm";
+
+function geminiSortMode(): GeminiSortMode {
+  return (localStorage.getItem("tourguide.geminiSort") as GeminiSortMode) || "default";
+}
+
+function formatGeminiLimits(m: GeminiModelInfo): string {
+  // Compact "15rpm · 250K tpm · 500/day" — known limits only. Empty
+  // string when nothing's known so the option label stays terse.
+  if (m.rpm === undefined && m.rpd === undefined) return "";
+  const parts: string[] = [];
+  if (m.rpm !== undefined) parts.push(`${m.rpm} RPM`);
+  if (m.tpm !== undefined) parts.push(`${(m.tpm / 1000).toFixed(0)}K TPM`);
+  if (m.rpd !== undefined) parts.push(`${m.rpd}/day`);
+  return ` (${parts.join(" · ")} free)`;
+}
+
+function sortGeminiModels(models: GeminiModelInfo[], mode: GeminiSortMode): GeminiModelInfo[] {
+  const arr = [...models];
+  if (mode === "rpd") {
+    // Highest free RPD first. Models with unknown limits sink to the
+    // bottom (they may or may not be generous; treat as 0 for sort).
+    arr.sort((a, b) => (b.rpd ?? -1) - (a.rpd ?? -1) || a.id.localeCompare(b.id));
+  } else if (mode === "rpm") {
+    arr.sort((a, b) => (b.rpm ?? -1) - (a.rpm ?? -1) || a.id.localeCompare(b.id));
+  }
+  // 'default' keeps the order from listGeminiModels (newest gen first,
+  // cheapest tier within a gen).
+  return arr;
+}
+
 // Build the <option> list for the Gemini dropdown. Falls back to a small
 // hardcoded set when no cache exists yet (first-run, before the user
 // has clicked Refresh) so the dropdown isn't empty. Once they click
 // Refresh, real model IDs from their key replace this stub.
 function renderGeminiModelOptions(currentId: string): string {
   const cached = loadCachedGeminiModels();
-  const fallback: Array<{ id: string; label: string }> = [
-    { id: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite (default — click Refresh for current options)" },
-    { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
-    { id: "gemini-2.5-pro", label: "gemini-2.5-pro" },
-  ];
-  const list = cached && cached.length > 0
-    ? cached.map((m) => ({ id: m.id, label: `${m.id}${m.displayName && m.displayName !== m.id ? `  —  ${m.displayName}` : ""}` }))
-    : fallback;
-  // Make sure the user's currently-saved choice is in the list even if
-  // the API doesn't return it (e.g. they typed a custom ID once and it
-  // worked, but isn't in the standard listing).
-  if (currentId && !list.some((m) => m.id === currentId)) {
-    list.unshift({ id: currentId, label: `${currentId} (current)` });
+  const sortMode = geminiSortMode();
+  if (cached && cached.length > 0) {
+    const sorted = sortGeminiModels(cached, sortMode);
+    const list = sorted.map((m) => ({
+      id: m.id,
+      label: `${m.id}${formatGeminiLimits(m)}`,
+    }));
+    if (currentId && !list.some((m) => m.id === currentId)) {
+      list.unshift({ id: currentId, label: `${currentId} (current)` });
+    }
+    return list
+      .map((m) => `<option value="${m.id}" ${currentId === m.id ? "selected" : ""}>${m.label}</option>`)
+      .join("");
   }
-  return list
+  // No cache — minimal stub so the dropdown isn't empty.
+  const fallback: Array<{ id: string; label: string }> = [
+    { id: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite (15 RPM · 250K TPM · 500/day free) — click Refresh for current options" },
+    { id: "gemini-2.5-flash", label: "gemini-2.5-flash (10 RPM · 250K TPM · 250/day free)" },
+    { id: "gemini-2.5-pro", label: "gemini-2.5-pro (5 RPM · 250K TPM · 100/day free)" },
+  ];
+  if (currentId && !fallback.some((m) => m.id === currentId)) {
+    fallback.unshift({ id: currentId, label: `${currentId} (current)` });
+  }
+  return fallback
     .map((m) => `<option value="${m.id}" ${currentId === m.id ? "selected" : ""}>${m.label}</option>`)
     .join("");
 }
@@ -178,6 +218,15 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             Gemini API key
             <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="AIza…" />
           </label>
+          <div class="gemini-sort-row">
+            <label class="gemini-sort-label">Sort by:
+              <select data-field="geminiSort">
+                <option value="default" ${geminiSortMode() === "default" ? "selected" : ""}>Newest generation first</option>
+                <option value="rpd" ${geminiSortMode() === "rpd" ? "selected" : ""}>Free requests/day (most first)</option>
+                <option value="rpm" ${geminiSortMode() === "rpm" ? "selected" : ""}>Free requests/min (most first)</option>
+              </select>
+            </label>
+          </div>
           <label>
             Gemini model
             <select data-field="geminiModel">${renderGeminiModelOptions(current.geminiModel)}</select>
@@ -186,7 +235,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             <button class="btn-secondary btn-tiny" data-action="refresh-gemini-models" type="button">↻ Refresh available models</button>
             <span class="gemini-model-status" data-gemini-model-status></span>
           </div>
-          <p class="hint">List is fetched from your key's available models (cached 7 days). If a model 404s, the ID isn't enabled on your key — refresh to see what is. Free-tier quotas live on the <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio dashboard</a>.</p>
+          <p class="hint">Model list is fetched from your key (cached 7 days). Rate limits are NOT returned by Google's API — they're hand-curated here from the <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">AI Studio dashboard</a> as of 2026-05, and tighten without notice. Models without listed limits don't have a known free-tier entry yet (likely still works, just unknown quota).</p>
           <p class="hint">Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com</a>. Key is stored in your browser's localStorage only.</p>
           <button class="btn-secondary" data-action="test-gemini">Test key</button>
           <span class="test-result" data-test-result></span>
@@ -245,6 +294,18 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   const geminiModelEl = overlay.querySelector<HTMLSelectElement>(
     `[data-field="geminiModel"]`,
   )!;
+  const geminiSortEl = overlay.querySelector<HTMLSelectElement>(
+    `[data-field="geminiSort"]`,
+  );
+  if (geminiSortEl) {
+    geminiSortEl.addEventListener("change", () => {
+      const mode = geminiSortEl.value as "default" | "rpd" | "rpm";
+      localStorage.setItem("tourguide.geminiSort", mode);
+      const previous = geminiModelEl.value;
+      geminiModelEl.innerHTML = renderGeminiModelOptions(previous);
+      if (previous) geminiModelEl.value = previous;
+    });
+  }
   refreshGeminiBtn.addEventListener("click", async () => {
     const key = get("geminiApiKey").trim();
     if (!key) {
