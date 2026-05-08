@@ -93,11 +93,11 @@ const SIDEBAR_AGENT_MIN = 280;    // px — enough for input + a turn card
 const loadSidebarSplit = (): number => {
   try {
     const raw = localStorage.getItem(SIDEBAR_SPLIT_KEY);
-    if (!raw) return 0.65;
+    if (!raw) return 0.75;
     const f = parseFloat(raw);
-    return Number.isFinite(f) && f > 0.05 && f < 0.95 ? f : 0.65;
+    return Number.isFinite(f) && f > 0.05 && f < 0.95 ? f : 0.75;
   } catch {
-    return 0.65;
+    return 0.75;
   }
 };
 const applySidebarSplit = (agentFraction: number): void => {

@@ -105,6 +105,22 @@ interface ToolCall {
 // a follow-up.
 const MAX_ITERATIONS = 5;
 
+// User-facing labels for each tool, shown in the status line as soon
+// as the streaming model commits to a tool name (regex'd from the
+// in-flight JSON). Replaces the raw tool name + token-rate noise
+// that previously lived in the visible status.
+const TOOL_LABELS: Record<string, string> = {
+  describe_dataset: "checking dataset",
+  run_sql: "querying tables",
+  run_python: "computing",
+  python_on_layers: "running on layers",
+  make_plot: "rendering plot",
+  fly_to: "flying to position",
+  highlight_segments: "highlighting segments",
+  ask_user: "asking you",
+  answer: "writing answer",
+};
+
 // Tool docs that need organelle CSVs in the SQL DB to function (run_sql
 // reads from the DB; run_python / make_plot bind df_<class> globals
 // from it). Suppressed entirely from the prompt when the DB is empty
@@ -382,14 +398,17 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
       "measure properties of mito" -> python_on_layers
         layers=["mito"]
         python="""
+# mito is type=segmentation in describe_dataset → ALREADY instance-
+# labeled. Do NOT call cc3d.connected_components — that re-IDs from 1
+# and breaks the link to existing meshes/skeletons + click-to-fly.
+# Pass the array directly to regionprops_table; the resulting 'label'
+# column IS the existing segment id.
 import numpy as np, pandas as pd
-import cc3d
 from skimage import measure as _sk
-labels = cc3d.connected_components(mito, connectivity=26)
 spacing = layers["mito"]["spacing"]   # array-axis order (z,y,x typically)
 offsets = layers["mito"]["offsets"]   # SAME axis order as spacing
 props = _sk.regionprops_table(
-    labels,
+    mito,                              # the already-labeled volume
     spacing=spacing,
     properties=("label", "area", "centroid", "bbox", "equivalent_diameter"),
 )
@@ -403,7 +422,7 @@ def col(name):
 df["com_x_nm"] = df[col("x")] + offsets[ax.index("x")]
 df["com_y_nm"] = df[col("y")] + offsets[ax.index("y")]
 df["com_z_nm"] = df[col("z")] + offsets[ax.index("z")]
-df["object_id"] = df["label"].astype(int)
+df["object_id"] = df["label"].astype(int)   # original segment ids preserved
 _TG_TABLE = df[["object_id","volume_nm_3","com_x_nm","com_y_nm","com_z_nm","equivalent_diameter"]]
 _TG_TABLE_NAME = "mito"
 _TG_NARRATION = f"Measured {len(df)} mito components."
@@ -572,6 +591,24 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     Neuroglancer layer to highlight on click; mismatched names break
     the highlight. Set with: _TG_TABLE_NAME = "mito" (not
     "mito_volumes").
+  - ALREADY-LABELED LAYERS — CRITICAL: Layers with type="segmentation"
+    in describe_dataset are ALREADY instance-labeled (each unique
+    non-zero value is a segment id, matching the precomputed mesh /
+    skeleton sources for that layer). Do NOT run cc3d.connected_components
+    on them — that reassigns ids 1..N, which:
+      • breaks the link to existing meshes / skeletons (NG renders
+        mesh for the OLD id, not the new one),
+      • silently breaks click-to-fly (the row's object_id no longer
+        matches the rendered segment).
+    Pass the array directly to regionprops_table as the labels arg:
+        props = regionprops_table(mito, spacing=spacing,
+                                  properties=("label", "area", "centroid", ...))
+    The "label" column IS the original segment id; copy it into
+    object_id verbatim. Use np.unique(arr[arr > 0]) if you only need
+    the id list without metrics.
+    For ambiguous cases (image-typed binary mask, etc.), call
+    ask_user with a yesno is_already_labeled (default true for
+    type=segmentation, false otherwise).
 
 BUDGET: You have AT MOST 5 tool calls per question. Plan accordingly — most flows above finish in 2-4. If you can't reach an answer in 5, end with answer() explaining what's missing rather than running out silently.
 
@@ -1644,7 +1681,8 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     const stepStart = performance.now();
     let tokenCount = 0;
     let lastUpdate = 0;
-    ctx.callbacks.onProgress?.(`Agent step ${i + 1}: thinking…`);
+    let detectedTool: string | null = null;
+    ctx.callbacks.onProgress?.(`Step ${i + 1}: thinking…`);
     if (ctx.signal?.aborted) {
       throw new DOMException("Agent stopped by user", "AbortError");
     }
@@ -1655,14 +1693,27 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       signal: ctx.signal,
       onToken: (_t, accumulated) => {
         tokenCount += 1;
+        // Pull the tool name out of the streamed JSON as soon as it's
+        // there. Once we have it, the user-facing status flips from
+        // opaque "thinking…" to a friendly "Step N: querying tables".
+        // Token-rate / preview info goes to console.debug so curious
+        // devs can still see it without polluting the visible status.
+        if (!detectedTool) {
+          const m = /"tool"\s*:\s*"([a-z_]+)"/.exec(accumulated);
+          if (m) {
+            detectedTool = m[1];
+            const label = TOOL_LABELS[detectedTool] ?? detectedTool;
+            ctx.callbacks.onProgress?.(`Step ${i + 1}: ${label}`);
+          }
+        }
         const now = performance.now();
         if (now - lastUpdate > 120) {
           lastUpdate = now;
           const elapsed = ((now - stepStart) / 1000).toFixed(1);
           const tps = tokenCount / Math.max(0.001, (now - stepStart) / 1000);
           const preview = accumulated.replace(/\s+/g, " ").slice(-90);
-          ctx.callbacks.onProgress?.(
-            `Agent step ${i + 1}: ${tokenCount} tokens · ${tps.toFixed(0)} tok/s · ${elapsed}s — ${preview}`,
+          console.debug(
+            `[agent] step ${i + 1}: ${tokenCount} tokens · ${tps.toFixed(0)} tok/s · ${elapsed}s — ${preview}`,
           );
         }
       },
@@ -1670,7 +1721,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     const stepElapsed = ((performance.now() - stepStart) / 1000).toFixed(1);
     const apiCalls = GeminiBackend.requestCount - startReqCount;
     const apiNote = apiCalls > 0 ? ` · ${apiCalls} API call${apiCalls === 1 ? "" : "s"} this turn` : "";
-    ctx.callbacks.onProgress?.(`Agent step ${i + 1}: done in ${stepElapsed}s (${tokenCount} tokens)${apiNote}`);
+    console.debug(`[agent] step ${i + 1}: done in ${stepElapsed}s (${tokenCount} tokens)${apiNote}`);
 
     let call: ToolCall;
     try {
@@ -1682,6 +1733,17 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         content: `Parser error: ${(err as Error).message}. Respond with a single JSON object like {"tool": "...", "args": {...}}. No prose, no markdown.`,
       });
       continue;
+    }
+    // Explicit "thinking done — now running X" transition. Without
+    // this beat between LLM stream end and the executor's onProgress,
+    // the user sees "thinking…" followed by executor messages with
+    // no signal that the LLM phase finished. Note: each tool's own
+    // executor will overwrite this within milliseconds with its own
+    // progress messages — that's fine; this just bridges the gap
+    // when there's a brief pause (Pyodide spin-up, fetch latency).
+    if (call.tool !== "done") {
+      const label = TOOL_LABELS[call.tool] ?? call.tool;
+      ctx.callbacks.onProgress?.(`Step ${i + 1}: ${label} …`);
     }
 
     if (call.tool === "done") {

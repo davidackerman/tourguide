@@ -43,14 +43,15 @@ interface TurnCard {
 
 const TRACE_OPEN_KEY = "tourguide.agentTraceOpen";
 const loadTraceOpenPref = (): boolean => {
-  // Default to open: lets the user "see what it's thinking" without
-  // toggling a disclosure each turn. Persisted across reloads.
+  // Default to closed — the agent's status line + meta strip are
+  // enough to follow what's happening; the full trace is for when
+  // something looks off. Toggleable via the session toolbar.
   try {
     const v = localStorage.getItem(TRACE_OPEN_KEY);
-    if (v === null) return true;
+    if (v === null) return false;
     return v === "1";
   } catch {
-    return true;
+    return false;
   }
 };
 const saveTraceOpenPref = (v: boolean): void => {
@@ -843,9 +844,10 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     button.hidden = true;
     stopBtn.hidden = false;
     setStatus(card, "Thinking…", "pending");
-    // Open the trace details by default — easier to spot when something
-    // goes off-rails. User can collapse if they don't care.
-    card.detailsEl.open = false;
+    // Trace open/closed state is set by createTurnCard from the
+    // session toolbar's "show trace" checkbox — don't re-stomp it
+    // here. (Used to hard-code `false` and silently break the
+    // toggle.)
 
     let answeredOrFlew = false;
     let turnSummary = "";
