@@ -100,52 +100,62 @@ main {
 }
 
 #sidebar {
+  /* Two-pane layout: structured browser on top, agent on the bottom,
+     with a draggable divider between them. The pane heights are set
+     in JS (main.ts splitter logic) using inline pixel values; clamp
+     here is for the user-resize-the-sidebar-width case. */
   width: 520px;
   flex-shrink: 0;
   background: var(--bg-elev);
   border-left: 1px solid var(--border);
-  overflow: auto;
-  padding: 1rem;
-  /* User-resizable: drag the left edge to make the agent panel wider
-     when a plot or trace needs more room. Vite's CSS handles webkit
-     prefix automatically; horizontal-only so vertical layout is stable. */
+  /* The sidebar itself doesn't scroll — each pane handles its own
+     overflow. This is what lets the chat input stay pinned to the
+     bottom of the agent pane without overlaying the browser above. */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* User-resizable horizontally: drag the left edge to make the
+     panel wider when a plot or trace needs more room. */
   resize: horizontal;
   min-width: 360px;
   max-width: 80vw;
 }
 
+#browser-host {
+  overflow: auto;
+  padding: 0.6rem 1rem;
+  flex-shrink: 0;
+}
+#browser-host:empty {
+  /* Collapse to a thin strip when no DB is loaded yet — avoids dead
+     vertical space. */
+  display: none;
+}
+
+#sidebar-divider {
+  flex-shrink: 0;
+  height: 4px;
+  background: var(--border);
+  cursor: row-resize;
+  transition: background 0.15s;
+}
+#sidebar-divider:hover,
+#sidebar-divider:active {
+  background: var(--accent, #4a7);
+}
+
+#query-host {
+  overflow: auto;
+  padding: 0.6rem 1rem;
+  flex-shrink: 0;
+  /* Make this the nearest scrolling ancestor for the sticky form
+     inside .query-box — sticky bottom now pins to this pane's
+     viewport, not the whole sidebar's. */
+}
+
 .placeholder {
   color: var(--fg-dim);
   font-style: italic;
-}
-
-.dataset-meta h2 {
-  font-size: 1rem;
-  margin: 0 0 0.25rem 0;
-}
-
-.dataset-meta p {
-  color: var(--fg-dim);
-  font-size: 0.85rem;
-  margin: 0 0 1rem 0;
-}
-
-.dataset-meta dl {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 0.25rem 0.75rem;
-  font-size: 0.8rem;
-  margin: 0;
-}
-
-.dataset-meta dt {
-  color: var(--fg-dim);
-}
-
-.dataset-meta dd {
-  margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.78rem;
 }
 
 button {
@@ -397,17 +407,10 @@ button {
   min-height: 1.1rem;
 }
 
-#sidebar {
-  display: flex;
-  flex-direction: column;
-}
-
+/* (Old #sidebar / #browser-host stacking rules — superseded by the
+   two-pane layout earlier in this file. The browser pane is sized in
+   pixels by the splitter JS; the inner .browser flex still applies.) */
 #browser-host {
-  margin-top: 1rem;
-  border-top: 1px solid var(--border);
-  padding-top: 0.75rem;
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
 }

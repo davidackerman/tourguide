@@ -51,10 +51,11 @@ const backendIndicator = $<HTMLButtonElement>("backend-indicator");
 // Make the indicator a quick way into Settings when AI isn't configured —
 // matches the title attribute on the button.
 backendIndicator.addEventListener("click", () => settingsBtn.click());
-const meta = $<HTMLDivElement>("dataset-meta");
 const browserHost = $<HTMLDivElement>("browser-host");
 const queryHost = $<HTMLDivElement>("query-host");
 const ngHost = $<HTMLDivElement>("ng-host");
+const sidebarDivider = document.getElementById("sidebar-divider");
+const sidebar = document.getElementById("sidebar");
 const viewer = new BundledViewer(ngHost);
 // Expose for ad-hoc devtools debugging:
 //   __tg.viewer.getNgState() / .getNgViewer().navigationState.coordinateSpace.value
@@ -81,6 +82,79 @@ const viewer = new BundledViewer(ngHost);
 let entries: CatalogEntry[] = [];
 let currentDB: DatasetDB | null = null;
 let currentDescriptor: DatasetDescriptor | null = null;
+
+// Sidebar splitter — drag the divider to rebalance the structured
+// browser (top) vs the agent (bottom). Persisted in localStorage as
+// a fraction so the user's preference survives reloads.
+const SIDEBAR_SPLIT_KEY = "tourguide.sidebarSplit";
+const SIDEBAR_BROWSER_MIN = 80;   // px — enough for header + one row
+const SIDEBAR_AGENT_MIN = 280;    // px — enough for input + a turn card
+const loadSidebarSplit = (): number => {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_SPLIT_KEY);
+    if (!raw) return 0.35;
+    const f = parseFloat(raw);
+    return Number.isFinite(f) && f > 0.05 && f < 0.95 ? f : 0.35;
+  } catch {
+    return 0.35;
+  }
+};
+const applySidebarSplit = (fraction: number): void => {
+  if (!sidebar || !browserHost || !queryHost) return;
+  const total = sidebar.clientHeight - (sidebarDivider?.offsetHeight ?? 0);
+  if (total <= 0) return;
+  // Clamp so neither panel collapses below its min height.
+  const browserH = Math.max(
+    SIDEBAR_BROWSER_MIN,
+    Math.min(total - SIDEBAR_AGENT_MIN, total * fraction),
+  );
+  browserHost.style.height = `${browserH}px`;
+  queryHost.style.height = `${total - browserH}px`;
+};
+if (sidebar && browserHost && queryHost && sidebarDivider) {
+  applySidebarSplit(loadSidebarSplit());
+  // Reapply on window resize so panels stay sane after the viewport
+  // changes — without this, an old absolute pixel height sticks.
+  window.addEventListener("resize", () => applySidebarSplit(loadSidebarSplit()));
+  let dragging = false;
+  let startY = 0;
+  let startBrowserH = 0;
+  sidebarDivider.addEventListener("mousedown", (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startBrowserH = browserHost.clientHeight;
+    document.body.style.cursor = "row-resize";
+    // Disable selection during drag so the divider doesn't accidentally
+    // highlight text in either panel.
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const total = sidebar.clientHeight - sidebarDivider.offsetHeight;
+    const newBrowserH = Math.max(
+      SIDEBAR_BROWSER_MIN,
+      Math.min(total - SIDEBAR_AGENT_MIN, startBrowserH + (e.clientY - startY)),
+    );
+    browserHost.style.height = `${newBrowserH}px`;
+    queryHost.style.height = `${total - newBrowserH}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    const total = sidebar.clientHeight - sidebarDivider.offsetHeight;
+    if (total > 0) {
+      const fraction = browserHost.clientHeight / total;
+      try {
+        localStorage.setItem(SIDEBAR_SPLIT_KEY, String(fraction));
+      } catch {
+        /* private mode / quota — silently drop */
+      }
+    }
+  });
+}
 let currentCatalogIndex: number | null = null;
 let currentIsCustom = false;
 
@@ -188,14 +262,12 @@ renderQueryBox(queryHost, {
 });
 
 async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
-  meta.textContent = `Loading ${entry.name}…`;
-  meta.classList.add("placeholder");
   let descriptor: DatasetDescriptor;
   const baseUrl = new URL(CATALOG_URL, window.location.href).toString();
   try {
     descriptor = await fetchDescriptor(entry, baseUrl);
   } catch (err) {
-    meta.textContent = `Failed to load: ${(err as Error).message}`;
+    console.error(`Failed to load ${entry.name}:`, err);
     return;
   }
   currentIsCustom = false;
@@ -228,7 +300,6 @@ async function applyDescriptor(
   initialApplyDone = true;
   currentDescriptor = d;
   viewer.loadDescriptor(d, ngStateOverride);
-  renderMeta(d);
   await ingestAndRender(d, baseUrl);
   // Intentionally no auto-frame: Neuroglancer fits its camera to the
   // first layer's bounds the moment the data source resolves, which is
@@ -265,32 +336,6 @@ async function ingestAndRender(d: DatasetDescriptor, baseUrl: string | null): Pr
   }
 }
 
-function renderMeta(d: DatasetDescriptor): void {
-  meta.classList.remove("placeholder");
-  meta.classList.add("dataset-meta");
-  const layerLines = d.layers
-    .map((l) => `<dt>${l.name}</dt><dd>${l.type}</dd>`)
-    .join("");
-  meta.innerHTML = `
-    <h2>${escapeHtml(d.display_name)}</h2>
-    <p>${escapeHtml(d.description ?? "")}</p>
-    <dl>
-      <dt>name</dt><dd>${escapeHtml(d.name)}</dd>
-      <dt>voxel (nm)</dt><dd>${d.voxel_size_nm.join(" × ")}</dd>
-      ${d.initial_position ? `<dt>position</dt><dd>${d.initial_position.join(", ")}</dd>` : ""}
-      <dt>layers</dt><dd>${d.layers.length}</dd>
-      ${layerLines}
-    </dl>
-  `;
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
 
 async function maybeExpandShareId(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
@@ -320,7 +365,8 @@ async function init(): Promise<void> {
     const catalog = await fetchCatalog(CATALOG_URL);
     entries = catalog.datasets;
   } catch (err) {
-    meta.textContent = `Failed to load catalog: ${(err as Error).message}`;
+    console.error("Failed to load catalog:", err);
+    select.innerHTML = `<option>Failed to load catalog</option>`;
     return;
   }
   select.innerHTML = "";
