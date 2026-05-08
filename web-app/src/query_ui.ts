@@ -2,7 +2,7 @@ import type { LLMBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
-import { runAgent, type AgentTraceItem, type AgentTurnSummary } from "./agent.js";
+import { runAgent, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 import { setPendingSession } from "./python_session.js";
 
@@ -273,6 +273,203 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     line.className = "turn-meta-line";
     line.textContent = info;
     card.metaEl.appendChild(line);
+  };
+
+  // Render a structured ask_user form inside the current turn card.
+  // Returns a Promise that resolves on Submit (with {field_id: value})
+  // or rejects on Cancel / Stop. The form stays in the DOM after
+  // submit (disabled) so the user can scroll back and see what they
+  // chose alongside the agent's continuation.
+  const renderAskUser = (
+    card: TurnCard,
+    prompt: string,
+    fields: AskField[],
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> => {
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      const wrap = document.createElement("div");
+      wrap.className = "ask-form";
+      const promptEl = document.createElement("div");
+      promptEl.className = "ask-form-prompt";
+      promptEl.textContent = prompt;
+      wrap.appendChild(promptEl);
+
+      // Build each field's DOM and a getter that pulls its current value.
+      // Using closures + a getValue function per field keeps this small;
+      // a more elaborate version could use form FormData but the
+      // checkbox-array case (multi) needs hand work either way.
+      const getters: { id: string; get: () => unknown }[] = [];
+      for (const field of fields) {
+        const wrapField = document.createElement("div");
+        wrapField.className = "ask-form-field";
+        const labelEl = document.createElement("label");
+        labelEl.className = "ask-form-label";
+        labelEl.textContent = field.label;
+        wrapField.appendChild(labelEl);
+
+        if (field.type === "select") {
+          // Up to 4 options → radio buttons (one click + visible
+          // alternatives); more → <select> (compact).
+          if (field.options.length <= 4) {
+            const group = document.createElement("div");
+            group.className = "ask-form-radio-group";
+            for (const opt of field.options) {
+              const id = `tg-ask-${field.id}-${opt.value}`;
+              const rwrap = document.createElement("label");
+              rwrap.className = "ask-form-radio";
+              const input = document.createElement("input");
+              input.type = "radio";
+              input.name = `tg-ask-${field.id}`;
+              input.value = opt.value;
+              input.id = id;
+              if (field.default === opt.value) input.checked = true;
+              rwrap.appendChild(input);
+              const span = document.createElement("span");
+              span.textContent = opt.label;
+              rwrap.appendChild(span);
+              group.appendChild(rwrap);
+            }
+            // If no default matched, pre-check the first.
+            if (!field.default && group.querySelector("input[type=radio]")) {
+              (group.querySelector("input[type=radio]") as HTMLInputElement).checked = true;
+            }
+            wrapField.appendChild(group);
+            getters.push({
+              id: field.id,
+              get: () => (group.querySelector("input[type=radio]:checked") as HTMLInputElement | null)?.value ?? "",
+            });
+          } else {
+            const sel = document.createElement("select");
+            for (const opt of field.options) {
+              const o = document.createElement("option");
+              o.value = opt.value;
+              o.textContent = opt.label;
+              if (field.default === opt.value) o.selected = true;
+              sel.appendChild(o);
+            }
+            wrapField.appendChild(sel);
+            getters.push({ id: field.id, get: () => sel.value });
+          }
+        } else if (field.type === "multi") {
+          const group = document.createElement("div");
+          group.className = "ask-form-checkbox-group";
+          const defaults = new Set(field.default ?? []);
+          for (const opt of field.options) {
+            const wrap2 = document.createElement("label");
+            wrap2.className = "ask-form-checkbox";
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.value = opt.value;
+            if (defaults.has(opt.value)) input.checked = true;
+            wrap2.appendChild(input);
+            const span = document.createElement("span");
+            span.textContent = opt.label;
+            wrap2.appendChild(span);
+            group.appendChild(wrap2);
+          }
+          wrapField.appendChild(group);
+          getters.push({
+            id: field.id,
+            get: () => Array.from(group.querySelectorAll<HTMLInputElement>("input[type=checkbox]:checked")).map((i) => i.value),
+          });
+        } else if (field.type === "yesno") {
+          const group = document.createElement("div");
+          group.className = "ask-form-radio-group";
+          const yesId = `tg-ask-${field.id}-yes`;
+          const noId = `tg-ask-${field.id}-no`;
+          for (const opt of [
+            { id: yesId, label: "Yes", val: "yes" },
+            { id: noId, label: "No", val: "no" },
+          ]) {
+            const rwrap = document.createElement("label");
+            rwrap.className = "ask-form-radio";
+            const input = document.createElement("input");
+            input.type = "radio";
+            input.name = `tg-ask-${field.id}`;
+            input.value = opt.val;
+            input.id = opt.id;
+            if (field.default === true && opt.val === "yes") input.checked = true;
+            else if (field.default === false && opt.val === "no") input.checked = true;
+            rwrap.appendChild(input);
+            const span = document.createElement("span");
+            span.textContent = opt.label;
+            rwrap.appendChild(span);
+            group.appendChild(rwrap);
+          }
+          if (!group.querySelector("input[type=radio]:checked")) {
+            (group.querySelector("input[type=radio]") as HTMLInputElement).checked = true;
+          }
+          wrapField.appendChild(group);
+          getters.push({
+            id: field.id,
+            get: () => (group.querySelector("input[type=radio]:checked") as HTMLInputElement | null)?.value === "yes",
+          });
+        } else if (field.type === "text") {
+          const input = document.createElement("input");
+          input.type = "text";
+          input.className = "ask-form-text";
+          if (field.default !== undefined) input.value = field.default;
+          if (field.placeholder) input.placeholder = field.placeholder;
+          wrapField.appendChild(input);
+          getters.push({ id: field.id, get: () => input.value });
+        }
+        wrap.appendChild(wrapField);
+      }
+
+      const buttonRow = document.createElement("div");
+      buttonRow.className = "ask-form-buttons";
+      const submitBtn = document.createElement("button");
+      submitBtn.type = "button";
+      submitBtn.className = "btn-primary btn-tiny";
+      submitBtn.textContent = "Submit";
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "btn-secondary btn-tiny";
+      cancelBtn.textContent = "Cancel";
+      buttonRow.appendChild(submitBtn);
+      buttonRow.appendChild(cancelBtn);
+      wrap.appendChild(buttonRow);
+      // Slot the form between meta and answer so it sits visually with
+      // the agent's "I need to know X" prompt and stays out of the
+      // way once submitted.
+      card.metaEl.after(wrap);
+
+      let settled = false;
+      const settle = (ok: boolean, value?: Record<string, unknown>): void => {
+        if (settled) return;
+        settled = true;
+        // Disable inputs so the user can scroll back and see what they
+        // picked, but can't submit twice or change the answer after
+        // the agent's already moved on.
+        wrap.classList.add("ask-form-submitted");
+        wrap.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(
+          "input, select, button",
+        ).forEach((el) => {
+          el.disabled = true;
+        });
+        if (ok && value) resolve(value);
+        else reject(new DOMException("ask_user cancelled", "AbortError"));
+      };
+      submitBtn.addEventListener("click", () => {
+        const out: Record<string, unknown> = {};
+        for (const g of getters) out[g.id] = g.get();
+        settle(true, out);
+      });
+      cancelBtn.addEventListener("click", () => settle(false));
+      // Stop button propagation: aborting the agent rejects any
+      // pending form so the loop can unwind without a stray Promise
+      // hanging on.
+      if (signal) {
+        if (signal.aborted) settle(false);
+        else signal.addEventListener("abort", () => settle(false), { once: true });
+      }
+      // Focus the first focusable input so keyboard users can answer
+      // immediately without reaching for the mouse.
+      requestAnimationFrame(() => {
+        const first = wrap.querySelector<HTMLElement>("input, select, button.btn-primary");
+        first?.focus();
+      });
+    });
   };
 
   const setStatus = (
@@ -690,6 +887,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
             if (!turnSummary) turnSummary = `Saved table ${tbl.name} (${tbl.rows.length} rows)`;
           },
           onMeta: (info) => appendMeta(card, info),
+          onAskUser: (prompt, fields) => renderAskUser(card, prompt, fields, abortController.signal),
         },
       });
       if (!answeredOrFlew) {

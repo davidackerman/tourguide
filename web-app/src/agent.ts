@@ -40,7 +40,26 @@ export interface AgentCallbacks {
   // ("Ran on backend; scales: mito@s2 (3.1 GB)") so the user sees it
   // without expanding the agent trace.
   onMeta?: (info: string) => void;
+  // Render a structured ask_user form inline in the current turn card
+  // and resolve once the user submits. Reject with AbortError if the
+  // user cancels or hits Stop. The agent loop awaits this naturally —
+  // a no-op if the UI doesn't implement it (auto-resolves with
+  // defaults so the agent doesn't hang).
+  onAskUser?: (
+    prompt: string,
+    fields: AskField[],
+  ) => Promise<Record<string, unknown>>;
 }
+
+// Structured input the agent can request from the user via ask_user.
+// Each field has a recommended default; the user can submit unchanged
+// to take the default — preserving the auto-pick experience while
+// giving them an override at the same friction cost.
+export type AskField =
+  | { id: string; label: string; type: "select"; options: { label: string; value: string }[]; default?: string }
+  | { id: string; label: string; type: "multi"; options: { label: string; value: string }[]; default?: string[] }
+  | { id: string; label: string; type: "yesno"; default?: boolean }
+  | { id: string; label: string; type: "text"; default?: string; placeholder?: string };
 
 export interface AgentTurnSummary {
   // The user's question.
@@ -229,6 +248,53 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
     else fades to background. Use this for "show me only the …" or
     "select these segments" requests. ids can be the object_id values
     from a run_sql result, or specific numeric ids the user named.
+
+  ask_user(prompt: string, fields: AskField[])
+    Pause for a structured user answer. Renders an inline form with
+    your recommended defaults pre-selected; the user can submit
+    unchanged to take them, or override. Returns {field_id: value, ...}.
+    Use ONLY when the answer materially changes the result and your
+    default would be a coin flip. Each field gets a clear default —
+    set one even if it's just your best guess.
+
+    Field types:
+      {"id": "...", "label": "...", "type": "select", "options": [{"label":"...", "value":"..."}, ...], "default": "..."}
+      {"id": "...", "label": "...", "type": "multi",  "options": [...], "default": ["..."]}
+      {"id": "...", "label": "...", "type": "yesno",  "default": true}
+      {"id": "...", "label": "...", "type": "text",   "default": "...", "placeholder": "..."}
+
+    GOOD asks:
+      - "erode mito" with no size → ask radius_nm with options
+        [1 voxel, 25 nm, 50 nm (default), 100 nm].
+      - "skeletonize ER" / instance vs binary mask matters → ask
+        is_already_labeled (yesno, default false).
+      - "measure mito at full res" with HF backend off → ask whether
+        to enable backend or downsample to local-safe scale.
+    BAD asks:
+      - histogram bin count, plot title, color
+      - things the user already spelled out ("erode by 50 nm" — don't
+        ask the radius)
+      - things describe_dataset already answered (resolution,
+        layer types, scale paths)
+      - questions where one answer is obviously correct given the
+        prompt (axis-order conventions, dtype clamping for NG)
+
+    After ask_user resolves, do NOT ask the same question again — its
+    answer is now in the conversation. Proceed to the operation you
+    were going to perform.
+
+    Example flow for an ambiguous "erode mito":
+      1) ask_user(
+           prompt="What erosion radius?",
+           fields=[{"id":"radius_nm","label":"Radius (nm)","type":"select",
+                    "options":[
+                      {"label":"1 voxel","value":"1vox"},
+                      {"label":"25 nm","value":"25"},
+                      {"label":"50 nm","value":"50"},
+                      {"label":"100 nm","value":"100"}],
+                    "default":"50"}])
+      2) python_on_layers (using the resolved radius)
+      3) done
 
   python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
     HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
@@ -1172,6 +1238,90 @@ async function execAnswer(
   return { delivered: true };
 }
 
+// ask_user — pause for a structured user answer. Renders a form in
+// the current turn card; the Promise resolves when the user submits.
+// Defaults are applied if the UI isn't wired (so headless tests don't
+// hang) — but the typical path is the UI returns the user's choices.
+async function execAskUser(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<Record<string, unknown>> {
+  const prompt = String(args.prompt ?? args.question ?? "").trim();
+  const rawFields = args.fields;
+  if (!prompt) throw new Error("ask_user requires 'prompt'");
+  if (!Array.isArray(rawFields) || rawFields.length === 0) {
+    throw new Error("ask_user requires 'fields' (array of {id, label, type, ...})");
+  }
+  // Validate + coerce. Bad fields raise — the agent learns not to
+  // emit them via the error path.
+  const fields: AskField[] = [];
+  for (const f of rawFields as unknown[]) {
+    if (!f || typeof f !== "object") throw new Error("ask_user field must be an object");
+    const r = f as Record<string, unknown>;
+    const id = String(r.id ?? "").trim();
+    const label = String(r.label ?? id).trim();
+    const type = String(r.type ?? "").trim();
+    if (!id) throw new Error("ask_user field requires 'id'");
+    if (type === "select" || type === "multi") {
+      if (!Array.isArray(r.options) || r.options.length === 0) {
+        throw new Error(`ask_user field '${id}' (${type}) requires 'options'`);
+      }
+      const options = (r.options as unknown[]).map((o) => {
+        if (typeof o === "string") return { label: o, value: o };
+        if (o && typeof o === "object") {
+          const oo = o as Record<string, unknown>;
+          const value = String(oo.value ?? oo.label ?? "");
+          return { label: String(oo.label ?? value), value };
+        }
+        return { label: String(o), value: String(o) };
+      });
+      if (type === "select") {
+        fields.push({
+          id, label, type: "select", options,
+          default: r.default !== undefined ? String(r.default) : undefined,
+        });
+      } else {
+        fields.push({
+          id, label, type: "multi", options,
+          default: Array.isArray(r.default) ? (r.default as unknown[]).map(String) : undefined,
+        });
+      }
+    } else if (type === "yesno") {
+      fields.push({
+        id, label, type: "yesno",
+        default: r.default !== undefined ? Boolean(r.default) : undefined,
+      });
+    } else if (type === "text") {
+      fields.push({
+        id, label, type: "text",
+        default: r.default !== undefined ? String(r.default) : undefined,
+        placeholder: r.placeholder !== undefined ? String(r.placeholder) : undefined,
+      });
+    } else {
+      throw new Error(`ask_user field '${id}' has unknown type '${type}' (use select / multi / yesno / text)`);
+    }
+  }
+
+  // Headless fallback: if the UI didn't implement onAskUser, resolve
+  // immediately with each field's default. Keeps the agent loop
+  // unblocked (e.g. for unit tests or future SSR scenarios).
+  if (!ctx.callbacks.onAskUser) {
+    const out: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f.type === "yesno") out[f.id] = f.default ?? true;
+      else if (f.type === "multi") out[f.id] = f.default ?? [];
+      else out[f.id] = f.default ?? "";
+    }
+    return out;
+  }
+
+  // Stop button propagation: if the abort signal fires while the form
+  // is open, reject with AbortError so the agent loop unwinds the
+  // same way as a network abort. The UI's form renderer also listens
+  // to the signal to disable inputs visually.
+  return await ctx.callbacks.onAskUser(prompt, fields);
+}
+
 async function execRunPython(
   args: Record<string, unknown>,
   ctx: AgentContext,
@@ -1307,6 +1457,7 @@ const TOOL_EXECUTORS: Record<
   fly_to: execFlyTo,
   highlight_segments: execHighlight,
   make_plot: execMakePlot,
+  ask_user: execAskUser,
   answer: execAnswer,
 };
 
@@ -1549,7 +1700,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       messages.push({ role: "assistant", content: JSON.stringify(call) });
       messages.push({
         role: "user",
-        content: `Error: tool "${call.tool}" does not exist. Pick from: describe_dataset, run_sql, run_python, python_on_layers, fly_to, highlight_segments, make_plot, answer, done.`,
+        content: `Error: tool "${call.tool}" does not exist. Pick from: describe_dataset, run_sql, run_python, python_on_layers, fly_to, highlight_segments, make_plot, ask_user, answer, done.`,
       });
       continue;
     }
@@ -1572,6 +1723,11 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         // answer / make_plot are inherently terminal — no need for a separate done call.
         return;
       }
+      // ask_user is a user-mediated pause, not "thinking" work — don't
+      // count it against the iteration budget. Without this, an agent
+      // that asks one question (very common for ambiguous prompts)
+      // would have only 4 of its 5 calls left to actually execute.
+      if (call.tool === "ask_user") i--;
       // After fly_to / highlight_segments, the user already sees the
       // result on screen — push back a directive next-step message
       // instead of the generic 'call next or done'. Without this,
@@ -1580,9 +1736,12 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       // ask for.
       const isVisualDelivery =
         call.tool === "fly_to" || call.tool === "highlight_segments";
+      const isAskUser = call.tool === "ask_user";
       const nextPrompt = isVisualDelivery
         ? `tool_result: ${summarizeResult(result)}\n\nThe user has now seen the result on the viewer. End the turn now: emit {"tool":"done"} unless the user's question explicitly asked for additional info beyond what's visible.`
-        : `tool_result: ${summarizeResult(result)}\n\nCall the next tool, or {"tool":"done"} when finished.`;
+        : isAskUser
+          ? `user_answer: ${summarizeResult(result)}\n\nProceed with these values. The user has answered — do NOT ask the same question again. Move to the next tool call (typically the operation you were going to perform once you knew the answer).`
+          : `tool_result: ${summarizeResult(result)}\n\nCall the next tool, or {"tool":"done"} when finished.`;
       messages.push({ role: "user", content: nextPrompt });
     } catch (err) {
       const errMsg = (err as Error).message;
