@@ -1479,6 +1479,20 @@ button {
   padding: 0 0.25rem;
   border-radius: 3px;
 }
+.hint-inline {
+  font-weight: normal;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+}
+.skel-ids-wrap {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.skel-ids-wrap input {
+  flex: 1;
+  min-width: 0;
+}
 
 .settings-advanced {
   margin-top: 1.25rem;

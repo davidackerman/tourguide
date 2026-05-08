@@ -70,6 +70,10 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         <div data-layers-host></div>
         <button class="btn-secondary" data-action="add-layer" type="button">+ Add layer</button>
 
+        <h3>Skeletons <span class="hint-inline">(optional — load precomputed skeletons as a Python dict)</span></h3>
+        <div data-skeletons-host></div>
+        <button class="btn-secondary" data-action="add-skeleton" type="button">+ Add skeleton</button>
+
         <h3>Code</h3>
         <p class="hint">Set any of <code>_TG_TABLE</code> (a DataFrame), <code>_TG_FLY</code> (<code>{"pos": [x,y,z], "segment_id": "...", "layer": "..."}</code>), <code>_TG_NARRATION</code> (string). Any matplotlib figure is also auto-captured.</p>
         <textarea class="custom-code" data-code rows="14" placeholder="# Example: contact sites between two label volumes&#10;from scipy.ndimage import binary_dilation&#10;dilated = binary_dilation(mito > 0)&#10;contacts = dilated & (er > 0)&#10;print(f'{int(contacts.sum())} contact voxels')&#10;&#10;_TG_NARRATION = f'Mito-ER contact voxels: {int(contacts.sum())}'"></textarea>
@@ -309,6 +313,121 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   // Start with one layer selected.
   void addLayer();
 
+  // --- Skeleton slots ------------------------------------------------------
+
+  // Layers that have a precomputed-skeleton source attached. Filtered
+  // up front so the dropdown can't offer a layer where skeletons would
+  // 404 on every request. Detection mirrors the agent's LAYER_GUIDE
+  // regex (see agent.ts:sourceKind) for consistency.
+  const skeletonLayers = d.layers.filter((l) => {
+    const sources = Array.isArray(l.source) ? l.source : [l.source];
+    return sources.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+  });
+  const skeletonsHost = $<HTMLDivElement>("[data-skeletons-host]");
+  const addSkeletonBtn = $<HTMLButtonElement>("[data-action='add-skeleton']");
+  if (skeletonLayers.length === 0) {
+    addSkeletonBtn.disabled = true;
+    addSkeletonBtn.title = "No layers in this dataset have a precomputed-skeleton source.";
+  }
+
+  interface SkeletonSlot {
+    layer: DatasetLayer;
+    varName: string; // bound as <varName>_skel on the Python side
+    segmentIds: string[];
+    row: HTMLDivElement;
+  }
+  const skeletonSlots: SkeletonSlot[] = [];
+
+  const findSkeletonSource = (l: DatasetLayer): string | null => {
+    const sources = Array.isArray(l.source) ? l.source : [l.source];
+    return sources.find((s) => /\/skeleton\b|\/skeletons?\//i.test(s)) ?? null;
+  };
+
+  const parseSegmentIds = (raw: string): string[] => {
+    // Accept commas, whitespace, and newlines as separators; strip
+    // anything non-numeric/word so the user can paste e.g. NG's segment
+    // chip lists without sanitizing.
+    return raw
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && /^[\w-]+$/.test(s));
+  };
+
+  const renderSkeletonSlot = (slot: SkeletonSlot): void => {
+    slot.row.innerHTML = `
+      <select data-skel-layer>
+        ${skeletonLayers
+          .map(
+            (l, i) =>
+              `<option value="${i}" ${l.name === slot.layer.name ? "selected" : ""}>${escapeHtml(l.name)}</option>`,
+          )
+          .join("")}
+      </select>
+      <span class="slot-var-label">as <code>${escapeHtml(slot.varName)}_skel</code></span>
+      <div class="skel-ids-wrap">
+        <input data-skel-ids type="text" placeholder="segment ids: 1, 2, 3 …" value="${escapeHtml(slot.segmentIds.join(", "))}" />
+        <button class="btn-tiny btn-secondary" data-action="skel-from-layer" type="button" title="Use IDs currently visible in the NG layer">↻ from NG</button>
+      </div>
+      <button class="btn-remove" data-action="remove" type="button">×</button>
+    `;
+    const layerSel = slot.row.querySelector<HTMLSelectElement>("[data-skel-layer]")!;
+    const idsInput = slot.row.querySelector<HTMLInputElement>("[data-skel-ids]")!;
+    const fromBtn = slot.row.querySelector<HTMLButtonElement>("[data-action='skel-from-layer']")!;
+    const varLabel = slot.row.querySelector<HTMLElement>(".slot-var-label")!;
+    layerSel.addEventListener("change", () => {
+      slot.layer = skeletonLayers[Number(layerSel.value)];
+      const others = skeletonSlots.filter((s) => s !== slot);
+      const base = (slot.layer.organelle_class ?? slot.layer.name).replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+      let n = base;
+      let i = 1;
+      while (others.some((s) => s.varName === n)) {
+        i += 1;
+        n = `${base}_${i}`;
+      }
+      slot.varName = n;
+      varLabel.innerHTML = `as <code>${escapeHtml(slot.varName)}_skel</code>`;
+    });
+    idsInput.addEventListener("change", () => {
+      slot.segmentIds = parseSegmentIds(idsInput.value);
+    });
+    fromBtn.addEventListener("click", () => {
+      const ids = cb.viewer.getVisibleSegments(slot.layer.name);
+      if (ids.length === 0) {
+        idsInput.placeholder = "(no segments visible in NG)";
+        return;
+      }
+      slot.segmentIds = ids;
+      idsInput.value = ids.join(", ");
+    });
+    slot.row
+      .querySelector<HTMLButtonElement>("[data-action='remove']")!
+      .addEventListener("click", () => {
+        const idx = skeletonSlots.indexOf(slot);
+        if (idx >= 0) skeletonSlots.splice(idx, 1);
+        slot.row.remove();
+      });
+  };
+
+  const addSkeleton = (): void => {
+    if (skeletonLayers.length === 0) return;
+    const l = skeletonLayers[0];
+    const row = document.createElement("div");
+    row.className = "custom-layer-row";
+    skeletonsHost.appendChild(row);
+    const base = (l.organelle_class ?? l.name).replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+    let n = base;
+    let i = 1;
+    while (skeletonSlots.some((s) => s.varName === n)) {
+      i += 1;
+      n = `${base}_${i}`;
+    }
+    const slot: SkeletonSlot = { layer: l, varName: n, segmentIds: [], row };
+    skeletonSlots.push(slot);
+    renderSkeletonSlot(slot);
+  };
+
+  addSkeletonBtn.addEventListener("click", () => addSkeleton());
+
   // --- Run -----------------------------------------------------------------
 
   const showError = (msg: string): void => {
@@ -332,7 +451,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       fixBtn.textContent = "Thinking…";
       try {
         const aiUseRemote = !!(analysisBackendUrl && remoteToggle.checked);
-        const systemPrompt = buildSystemPrompt(slots, collectTables(), aiUseRemote);
+        const systemPrompt = buildSystemPrompt(slots, skeletonSlots, collectTables(), aiUseRemote);
         const raw = await backend.complete(
           [
             { role: "system", content: systemPrompt },
@@ -578,6 +697,33 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         offsetNm: scale.offsetNm,
       };
     });
+    // Skeleton slots → request entries. Reject empty IDs lists at run
+    // time rather than disabling the Run button — the user might add a
+    // slot, then realise they need to type IDs, then come back. Saving
+    // them a reload by erroring inline is friendlier.
+    const skeletonsForRequest: { varName: string; source: string; segmentIds: string[] }[] = [];
+    for (const s of skeletonSlots) {
+      if (s.segmentIds.length === 0) {
+        showError(`Skeleton slot for '${s.layer.name}' has no segment IDs — type them or click "↻ from NG".`);
+        return;
+      }
+      const src = findSkeletonSource(s.layer);
+      if (!src) {
+        showError(`Layer '${s.layer.name}' has no precomputed-skeleton source.`);
+        return;
+      }
+      skeletonsForRequest.push({ varName: s.varName, source: src, segmentIds: s.segmentIds });
+    }
+
+    if (useRemote && skeletonsForRequest.length > 0) {
+      // The HF backend doesn't yet accept skeleton inputs; it would
+      // silently drop them and the user's Python would NameError on
+      // <var>_skel. Block at submit time with a concrete fix.
+      showError(
+        "Skeleton inputs aren't supported on the HF backend yet. Uncheck 'Run on backend' to use them locally, or remove the skeleton slots.",
+      );
+      return;
+    }
 
     runBtn.disabled = true;
     showProgress("Starting …");
@@ -617,6 +763,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
           {
             kind: "custom",
             layers: layersForRequest,
+            skeletonLayers: skeletonsForRequest.length > 0 ? skeletonsForRequest : undefined,
             tables: collectTables(),
             code: codeEl.value,
             timeoutMs: 60000,
@@ -657,7 +804,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       // Tell the LLM which runtime the code will run in so it picks the
       // right library set (Seung-lab extras are backend-only).
       const aiUseRemote = !!(analysisBackendUrl && remoteToggle.checked);
-      const systemPrompt = buildSystemPrompt(slots, collectTables(), aiUseRemote);
+      const systemPrompt = buildSystemPrompt(slots, skeletonSlots, collectTables(), aiUseRemote);
       const raw = await backend.complete(
         [
           { role: "system", content: systemPrompt },
@@ -686,6 +833,7 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
 
 function buildSystemPrompt(
   slots: { varName: string; layer: DatasetLayer; inspection?: LayerInspection; scaleIdx?: number }[],
+  skeletonSlots: { varName: string; layer: DatasetLayer; segmentIds: string[] }[],
   tables: { name: string; columns: string[]; rows: unknown[][] }[],
   useRemote: boolean,
 ): string {
@@ -695,6 +843,10 @@ function buildSystemPrompt(
       scale?.voxelNm.map((v) => v.toFixed(2)).join(",") ?? "?"
     } (xyz), world offset_nm=${scale?.offsetNm.map((v) => v.toFixed(0)).join(",") ?? "?"} (xyz). Each value is a voxel intensity/label.`;
   });
+  const skeletonDescs = skeletonSlots.map(
+    (s) =>
+      `- ${s.varName}_skel: dict[int, {"vertices": (N,3) float32 nm, "edges": (M,2) uint32}] for segment ids ${s.segmentIds.slice(0, 5).join(", ")}${s.segmentIds.length > 5 ? `…(+${s.segmentIds.length - 5})` : ""}. Iterate with .items(). Skeleton edge length: np.linalg.norm(v[e[:,0]] - v[e[:,1]], axis=1).sum(). Missing IDs (404 on fetch) are listed in ${s.varName}_skel_missing_ids.`,
+  );
   const tableDescs = tables.map(
     (t) => `- df_${t.name}: pandas DataFrame, columns=[${t.columns.join(", ")}], rows=${t.rows.length}`,
   );
@@ -761,9 +913,12 @@ Note: cc3d / fastmorph / kimimaro / zmesh / fastremap / edt are NOT available in
 
 AVAILABLE VARIABLES:
 Layers (numpy ndarrays, already loaded):
-${layerDescs.join("\n")}
+${layerDescs.join("\n") || "(none)"}
 
 Per-layer metadata is a Python dict at \`layers["<varName>"]\`. Access via subscript syntax — \`layers["mito"]["spacing"]\`, NOT \`layers["mito"].spacing\` (attribute access raises AttributeError, dicts don't have attributes). Keys: \`array\` (numpy ndarray), \`spacing\` (nm per voxel, array-axis order), \`offsets\` (world origin nm, array-axis order), \`axes\` (array-axis-order list of "x"/"y"/"z").
+
+Skeletons (precomputed, already loaded):
+${skeletonDescs.join("\n") || "(none)"}
 
 DataFrames:
 ${tableDescs.join("\n") || "(none)"}

@@ -435,6 +435,46 @@ export class BundledViewer {
   }
 
   // Change which segment IDs are visible in a segmentation layer.
+  // Read the currently-visible segment IDs for a segmentation layer as a
+  // sorted string list. Used by Custom Analysis's "↻ from layer" helper
+  // to pre-fill skeleton segment-ID inputs from whatever the user has
+  // selected in NG. Returns [] if the layer has no visible-segments state
+  // (image layers, layers that haven't loaded yet, etc.).
+  getVisibleSegments(layerName: string): string[] {
+    const viewer = this.viewer;
+    if (!viewer) return [];
+    const layer = viewer.layerManager.getLayerByName(layerName);
+    if (!layer) return [];
+    const ul = layer.layer as unknown as {
+      displayState?: {
+        segmentationGroupState?: {
+          value?: {
+            visibleSegments?: Iterable<bigint> | { [Symbol.iterator]?: () => Iterator<bigint> };
+          };
+        };
+      };
+    };
+    const visible = ul.displayState?.segmentationGroupState?.value?.visibleSegments;
+    if (!visible) return [];
+    const ids: string[] = [];
+    try {
+      for (const v of visible as Iterable<bigint>) {
+        ids.push(typeof v === "bigint" ? v.toString() : String(v));
+      }
+    } catch {
+      return [];
+    }
+    // Numeric sort when possible; segment IDs are conventionally numeric
+    // bigints. Falls back to string compare for non-numeric ids.
+    ids.sort((a, b) => {
+      const an = Number(a);
+      const bn = Number(b);
+      if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+      return a.localeCompare(b);
+    });
+    return ids;
+  }
+
   highlightSegments(layerName: string, ids: string[]): void {
     const viewer = this.ensureViewer();
     const layer = viewer.layerManager.getLayerByName(layerName);
