@@ -83,33 +83,34 @@ let entries: CatalogEntry[] = [];
 let currentDB: DatasetDB | null = null;
 let currentDescriptor: DatasetDescriptor | null = null;
 
-// Sidebar splitter — drag the divider to rebalance the structured
-// browser (top) vs the agent (bottom). Persisted in localStorage as
-// a fraction so the user's preference survives reloads.
+// Sidebar splitter — drag the divider to rebalance the agent (top)
+// vs the structured browser (bottom). The persisted fraction tracks
+// the AGENT's share of total height (agent on top → bigger fraction
+// = bigger agent), so dragging the divider down grows the agent.
 const SIDEBAR_SPLIT_KEY = "tourguide.sidebarSplit";
 const SIDEBAR_BROWSER_MIN = 80;   // px — enough for header + one row
 const SIDEBAR_AGENT_MIN = 280;    // px — enough for input + a turn card
 const loadSidebarSplit = (): number => {
   try {
     const raw = localStorage.getItem(SIDEBAR_SPLIT_KEY);
-    if (!raw) return 0.35;
+    if (!raw) return 0.65;
     const f = parseFloat(raw);
-    return Number.isFinite(f) && f > 0.05 && f < 0.95 ? f : 0.35;
+    return Number.isFinite(f) && f > 0.05 && f < 0.95 ? f : 0.65;
   } catch {
-    return 0.35;
+    return 0.65;
   }
 };
-const applySidebarSplit = (fraction: number): void => {
+const applySidebarSplit = (agentFraction: number): void => {
   if (!sidebar || !browserHost || !queryHost) return;
   const total = sidebar.clientHeight - (sidebarDivider?.offsetHeight ?? 0);
   if (total <= 0) return;
   // Clamp so neither panel collapses below its min height.
-  const browserH = Math.max(
-    SIDEBAR_BROWSER_MIN,
-    Math.min(total - SIDEBAR_AGENT_MIN, total * fraction),
+  const agentH = Math.max(
+    SIDEBAR_AGENT_MIN,
+    Math.min(total - SIDEBAR_BROWSER_MIN, total * agentFraction),
   );
-  browserHost.style.height = `${browserH}px`;
-  queryHost.style.height = `${total - browserH}px`;
+  queryHost.style.height = `${agentH}px`;
+  browserHost.style.height = `${total - agentH}px`;
 };
 if (sidebar && browserHost && queryHost && sidebarDivider) {
   applySidebarSplit(loadSidebarSplit());
@@ -118,11 +119,11 @@ if (sidebar && browserHost && queryHost && sidebarDivider) {
   window.addEventListener("resize", () => applySidebarSplit(loadSidebarSplit()));
   let dragging = false;
   let startY = 0;
-  let startBrowserH = 0;
+  let startAgentH = 0;
   sidebarDivider.addEventListener("mousedown", (e) => {
     dragging = true;
     startY = e.clientY;
-    startBrowserH = browserHost.clientHeight;
+    startAgentH = queryHost.clientHeight;
     document.body.style.cursor = "row-resize";
     // Disable selection during drag so the divider doesn't accidentally
     // highlight text in either panel.
@@ -132,12 +133,14 @@ if (sidebar && browserHost && queryHost && sidebarDivider) {
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return;
     const total = sidebar.clientHeight - sidebarDivider.offsetHeight;
-    const newBrowserH = Math.max(
-      SIDEBAR_BROWSER_MIN,
-      Math.min(total - SIDEBAR_AGENT_MIN, startBrowserH + (e.clientY - startY)),
+    // Agent is on top of the divider — dragging the divider DOWN
+    // (positive deltaY) grows the agent.
+    const newAgentH = Math.max(
+      SIDEBAR_AGENT_MIN,
+      Math.min(total - SIDEBAR_BROWSER_MIN, startAgentH + (e.clientY - startY)),
     );
-    browserHost.style.height = `${newBrowserH}px`;
-    queryHost.style.height = `${total - newBrowserH}px`;
+    queryHost.style.height = `${newAgentH}px`;
+    browserHost.style.height = `${total - newAgentH}px`;
   });
   window.addEventListener("mouseup", () => {
     if (!dragging) return;
@@ -146,7 +149,7 @@ if (sidebar && browserHost && queryHost && sidebarDivider) {
     document.body.style.userSelect = "";
     const total = sidebar.clientHeight - sidebarDivider.offsetHeight;
     if (total > 0) {
-      const fraction = browserHost.clientHeight / total;
+      const fraction = queryHost.clientHeight / total;
       try {
         localStorage.setItem(SIDEBAR_SPLIT_KEY, String(fraction));
       } catch {

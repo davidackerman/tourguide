@@ -89,6 +89,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       <button class="btn-link" data-action="new-session" type="button">New session</button>
       <span class="agent-trace-copy-status" data-copy-status></span>
     </div>
+    <div class="session-thread" data-thread></div>
     <form class="query-form">
       <input
         type="text"
@@ -99,7 +100,6 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       <button class="btn-primary" type="submit" data-action="ask">Ask</button>
       <button class="btn-secondary" type="button" data-action="stop" hidden>Stop</button>
     </form>
-    <div class="session-thread" data-thread></div>
   `;
   container.appendChild(box);
 
@@ -231,11 +231,11 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       </details>
     `;
     root.querySelector<HTMLSpanElement>(".turn-q")!.textContent = question;
-    // Newest card prepends so it sits right under the input — user sees
-    // the in-flight turn without scrolling. Older turns stack
-    // downward; scrolling the agent pane reveals the rest of the
-    // session. Form is at the top of the pane (above the thread).
-    threadEl.prepend(root);
+    // Append so the thread reads chronologically top-to-bottom — same
+    // muscle memory as Claude / ChatGPT / iMessage. The form pins to
+    // the bottom of the agent pane; the newest card sits right above
+    // it. Older turns scroll up off-screen.
+    threadEl.appendChild(root);
     const detailsEl = root.querySelector<HTMLDetailsElement>("[data-details]")!;
     detailsEl.open = traceDefaultCheckbox.checked;
     const card: TurnCard = {
@@ -256,12 +256,12 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     };
     allCards.push(card);
     sessionToolbar.hidden = false;
-    // Scroll the agent pane to the top so the new card is visible
-    // directly below the form. requestAnimationFrame waits for the
-    // prepended card to be laid out before we measure scroll heights.
+    // Scroll the agent pane to the bottom so the new card is visible
+    // directly above the form. requestAnimationFrame waits for the
+    // appended card to be laid out before we measure scroll heights.
     requestAnimationFrame(() => {
       const pane = document.getElementById("query-host");
-      if (pane) pane.scrollTop = 0;
+      if (pane) pane.scrollTop = pane.scrollHeight;
     });
     return card;
   };

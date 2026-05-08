@@ -844,13 +844,13 @@ button {
 .query-form {
   display: flex;
   gap: 0.4rem;
-  /* Pin to the TOP of the agent pane so it stays visible as older
-     turns scroll away. Cards prepend (newest first) directly below,
-     so the in-flight turn is always one glance from the input.
-     Backed with a solid color so cards don't bleed through. */
+  /* Pin to the BOTTOM of the agent pane — chat-app convention. New
+     cards append above it (newest right above the input); older
+     turns scroll off the top of the pane. Backed with a solid color
+     so cards don't bleed through. */
   position: sticky;
-  top: 0;
-  margin-bottom: 0.5rem;
+  bottom: 0;
+  margin-top: 0.5rem;
   padding: 0.5rem 0;
   background: var(--bg-elev);
   z-index: 10;
