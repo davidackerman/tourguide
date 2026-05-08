@@ -844,13 +844,13 @@ button {
 .query-form {
   display: flex;
   gap: 0.4rem;
-  /* Pin the input to the bottom of the sidebar viewport so it stays
-     reachable as the thread grows — chat-app convention. The sidebar
-     itself scrolls; the form rides along the bottom of its scroll
-     viewport. Backed with a solid color so cards don't bleed through. */
+  /* Pin to the TOP of the agent pane so it stays visible as older
+     turns scroll away. Cards prepend (newest first) directly below,
+     so the in-flight turn is always one glance from the input.
+     Backed with a solid color so cards don't bleed through. */
   position: sticky;
-  bottom: 0;
-  margin-top: 0.5rem;
+  top: 0;
+  margin-bottom: 0.5rem;
   padding: 0.5rem 0;
   background: var(--bg-elev);
   z-index: 10;

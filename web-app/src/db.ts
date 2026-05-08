@@ -289,9 +289,17 @@ export function runQuery(db: Database, sql: string): QueryResult {
 // Custom Analysis dialog and the agent's python_on_layers tool when a
 // run sets _TG_TABLE — having both paths go through the same helper
 // keeps schema / type-inference behavior identical.
+//
+// Optional `knownLayerNames` lets the caller pass the dataset's NG
+// layer names; if the table's name doesn't match any of them but a
+// stripped variant does (e.g. "mito_volumes" → "mito"), we record the
+// match as the entry's `layer_name`. That's what the structured
+// browser uses for click-to-fly highlight + "highlight in NG layer X"
+// lookups, so a mismatched name silently breaks the affordance.
 export async function ingestTableIntoDB(
   deps: { getDB: () => DatasetDB | null; setDB: (db: DatasetDB) => void },
   tbl: { name: string; columns: string[]; rows: (number | string | null)[][] },
+  knownLayerNames?: string[],
 ): Promise<void> {
   // Build the DB instance + table metadata first, THEN call setDB once
   // at the end. The previous flow called setDB with an empty
@@ -324,10 +332,29 @@ export async function ingestTableIntoDB(
   } finally {
     stmt.free();
   }
+  // Resolve the layer_name used for click-to-fly + segment highlight.
+  // Prefer an exact match against the dataset's layers; otherwise try
+  // stripping common suffixes the agent tends to invent
+  // ("mito_volumes" → "mito"); fall back to the table name.
+  let resolvedLayerName = tableName;
+  if (knownLayerNames && knownLayerNames.length > 0) {
+    const exact = knownLayerNames.find((n) => n === tableName);
+    if (exact) {
+      resolvedLayerName = exact;
+    } else {
+      const SUFFIXES = ["_volumes", "_metrics", "_props", "_data", "_table", "_stats"];
+      const stripped = SUFFIXES.reduce(
+        (s, suf) => (s.endsWith(suf) ? s.slice(0, -suf.length) : s),
+        tableName,
+      );
+      const match = knownLayerNames.find((n) => n === stripped);
+      if (match) resolvedLayerName = match;
+    }
+  }
   const entry: IngestedTable = {
     table_name: tableName,
     organelle_class: tableName,
-    layer_name: tableName,
+    layer_name: resolvedLayerName,
     row_count: tbl.rows.length,
     columns: tbl.columns,
   };

@@ -1019,7 +1019,11 @@ async function ingestCustomTable(
   cb: CustomAnalysisUICallbacks,
   tbl: { name: string; columns: string[]; rows: (number | string | null)[][] },
 ): Promise<void> {
-  await ingestTableIntoDB({ getDB: cb.getDB, setDB: cb.setDB }, tbl);
+  await ingestTableIntoDB(
+    { getDB: cb.getDB, setDB: cb.setDB },
+    tbl,
+    cb.getDescriptor()?.layers.map((l) => l.name),
+  );
 }
 
 function humanBytes(n: number): string {

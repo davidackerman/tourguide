@@ -560,6 +560,18 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     If the user asked to "plot X", the natural flow is: compute the
     table once (set _TG_TABLE) AND set _TG_PLOT in the same call —
     don't compute and discard.
+  - REQUIRED COLUMNS for any _TG_TABLE you save: at minimum
+        object_id, com_x_nm, com_y_nm, com_z_nm
+    on top of whatever metric you computed (volume_nm_3,
+    surface_area_nm_2, etc.). The structured browser uses these to
+    let the user click a row and fly the viewer to that segment;
+    skipping them breaks click-to-fly silently.
+  - REQUIRED _TG_TABLE_NAME: when the table is per-object metrics
+    for a layer X, name the table EXACTLY "X" (not "X_volumes" /
+    "X_metrics" / "X_data"). The browser uses the table name as the
+    Neuroglancer layer to highlight on click; mismatched names break
+    the highlight. Set with: _TG_TABLE_NAME = "mito" (not
+    "mito_volumes").
 
 BUDGET: You have AT MOST 5 tool calls per question. Plan accordingly — most flows above finish in 2-4. If you can't reach an answer in 5, end with answer() explaining what's missing rather than running out silently.
 
@@ -1133,6 +1145,7 @@ async function applyCustomResult(
         await ingestTableIntoDB(
           { getDB: () => ctx.db, setDB: ctx.setDB },
           result.table,
+          ctx.descriptor?.layers.map((l) => l.name),
         );
         produced.push(`table(${result.table.name}, ${result.table.rows.length} rows; ingested)`);
       } catch (err) {
