@@ -134,6 +134,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               </div>
             </label>
           </div>
+          <p class="hint welcome-other-providers">
+            Have an Anthropic / OpenAI / OpenRouter / xAI key, or a local Ollama / vLLM endpoint?
+            <button class="btn-link" type="button" data-welcome-open-settings>Configure in Settings →</button>
+          </p>
         </section>
 
         <section class="welcome-step">
@@ -265,6 +269,16 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     opts.onSettingsChanged();
     return true;
   };
+
+  // "Configure in Settings" — close the welcome dialog and open the
+  // full Settings modal so the user can pick from all providers
+  // (Anthropic / OpenAI / OpenRouter / xAI / Local / custom). The
+  // welcome dialog stays a simple "Gemini-or-WebLLM-or-skip" picker;
+  // anything more nuanced lives in Settings.
+  overlay.querySelector("[data-welcome-open-settings]")?.addEventListener("click", () => {
+    close(false);
+    document.getElementById("settings-btn")?.click();
+  });
 
   overlay.querySelector("[data-welcome-load-demo]")!.addEventListener("click", async () => {
     if (!(await persistSettings())) return;

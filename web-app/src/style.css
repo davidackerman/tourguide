@@ -1060,6 +1060,15 @@ button {
   font-size: 0.78rem;
 }
 
+.welcome-other-providers {
+  margin-top: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.welcome-other-providers .btn-link {
+  font-size: inherit;
+}
+
 .test-result {
   font-size: 0.8rem;
   margin-left: 0.5rem;
