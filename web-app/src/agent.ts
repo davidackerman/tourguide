@@ -29,6 +29,11 @@ export interface AgentCallbacks {
   onPlot?: (pngDataUrl: string, code: string, title?: string, explanation?: string) => void;
   onFly?: (position: [number, number, number], layer: string, objectId?: string) => void;
   onHighlight?: (layer: string, ids: string[]) => void;
+  // Fired when python_on_layers emits _TG_TABLE — UI can render a CSV
+  // download / "table saved" hint inline. The data is already being
+  // ingested into the SQL DB by applyCustomResult; this callback is
+  // purely for surface-level affordance.
+  onTable?: (table: { name: string; columns: string[]; rows: (number | string | null)[][] }) => void;
 }
 
 export interface AgentTurnSummary {
@@ -1060,6 +1065,7 @@ async function applyCustomResult(
     } else {
       produced.push(`table(${result.table.name}, ${result.table.rows.length} rows; not ingested — no setDB)`);
     }
+    ctx.callbacks.onTable?.(result.table);
   }
 
   const summary = produced.length > 0 ? `Produced: ${produced.join(", ")}` : "No output channels set.";

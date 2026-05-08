@@ -17,6 +17,28 @@ export interface QueryUIContext {
   viewer: BundledViewer;
 }
 
+// Per-turn UI state. Each submit creates a new card; subsequent
+// callbacks (onTrace / onPlot / onAnswer / onTable / etc.) render INTO
+// this card's DOM. Old cards persist in the thread, so a user can
+// scroll back through previous Q's with their plots, code, and
+// downloads still functional. Page reload still wipes the thread —
+// chat-style persistence across reloads would mean serializing plot
+// data URLs into localStorage and is out of scope here.
+interface TurnCard {
+  index: number;
+  question: string;
+  root: HTMLElement;
+  statusEl: HTMLElement;
+  answerEl: HTMLElement;
+  plotsEl: HTMLElement;
+  tablesEl: HTMLElement;
+  traceEl: HTMLElement;
+  detailsEl: HTMLDetailsElement;
+  traceItems: AgentTraceItem[];
+  plots: { png: string; code: string; title?: string }[];
+  tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
+}
+
 export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): void {
   container.innerHTML = "";
   const box = document.createElement("div");
@@ -25,13 +47,6 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     <div class="query-ai-hint" data-ai-hint hidden>
       ⚠ AI not configured — the agent needs an AI backend.
       <button class="btn-link" data-action="open-settings">Set up in Settings</button>
-    </div>
-    <div class="session-turns" data-session hidden>
-      <div class="session-turns-header">
-        <span class="session-turns-label">This session</span>
-        <button class="btn-link session-clear" type="button" data-action="new-session">New session</button>
-      </div>
-      <ol class="session-turns-list" data-session-list></ol>
     </div>
     <form class="query-form">
       <input
@@ -43,28 +58,23 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       <button class="btn-primary" type="submit" data-action="ask">Ask</button>
       <button class="btn-secondary" type="button" data-action="stop" hidden>Stop</button>
     </form>
-    <div class="query-status" data-status></div>
-    <div class="query-answer" data-answer></div>
-    <div class="plot-output" data-plot hidden></div>
-    <details class="query-details" data-details hidden>
-      <summary>Show agent trace</summary>
-      <div class="agent-trace-toolbar">
-        <button class="btn-secondary btn-tiny" data-action="copy-trace" type="button">📋 Copy trace</button>
-        <div class="download-menu">
-          <button class="btn-secondary btn-tiny" data-action="download-toggle" type="button">⬇ Download…</button>
-          <div class="download-popover" data-download-popover hidden>
-            <label><input type="checkbox" data-dl-trace checked> Trace</label>
-            <label><input type="checkbox" data-dl-plots checked> Plots</label>
-            <label><input type="checkbox" data-dl-scripts checked> Python scripts</label>
-            <label><input type="checkbox" data-dl-session checked> Session history</label>
-            <button class="btn-primary btn-tiny" data-action="download-go" type="button">Download .md</button>
-          </div>
+    <div class="session-toolbar" data-session-toolbar hidden>
+      <button class="btn-secondary btn-tiny" data-action="copy-session" type="button">📋 Copy session</button>
+      <div class="download-menu">
+        <button class="btn-secondary btn-tiny" data-action="download-toggle" type="button">⬇ Download…</button>
+        <div class="download-popover" data-download-popover hidden>
+          <label><input type="checkbox" data-dl-trace checked> Trace</label>
+          <label><input type="checkbox" data-dl-plots checked> Plots</label>
+          <label><input type="checkbox" data-dl-scripts checked> Python scripts</label>
+          <label><input type="checkbox" data-dl-tables checked> Tables (CSV)</label>
+          <label><input type="checkbox" data-dl-session checked> Session history</label>
+          <button class="btn-primary btn-tiny" data-action="download-go" type="button">Download</button>
         </div>
-        <span class="agent-trace-copy-status" data-copy-status></span>
       </div>
-      <div class="agent-trace-question" data-trace-question hidden></div>
-      <div class="agent-trace" data-trace></div>
-    </details>
+      <button class="btn-link" data-action="new-session" type="button">New session</button>
+      <span class="agent-trace-copy-status" data-copy-status></span>
+    </div>
+    <div class="session-thread" data-thread></div>
   `;
   container.appendChild(box);
 
@@ -74,6 +84,20 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const stopBtn = box.querySelector<HTMLButtonElement>("[data-action='stop']")!;
   const aiHint = box.querySelector<HTMLDivElement>("[data-ai-hint]")!;
   const aiHintBtn = box.querySelector<HTMLButtonElement>("[data-action='open-settings']")!;
+  const threadEl = box.querySelector<HTMLDivElement>("[data-thread]")!;
+  const sessionToolbar = box.querySelector<HTMLDivElement>("[data-session-toolbar]")!;
+  const copyBtn = box.querySelector<HTMLButtonElement>("[data-action='copy-session']")!;
+  const copyStatus = box.querySelector<HTMLSpanElement>("[data-copy-status]")!;
+  const newSessionBtn = box.querySelector<HTMLButtonElement>("[data-action='new-session']")!;
+  const dlToggle = box.querySelector<HTMLButtonElement>("[data-action='download-toggle']")!;
+  const dlPopover = box.querySelector<HTMLDivElement>("[data-download-popover]")!;
+  const dlGoBtn = box.querySelector<HTMLButtonElement>("[data-action='download-go']")!;
+  const dlTrace = box.querySelector<HTMLInputElement>("[data-dl-trace]")!;
+  const dlPlots = box.querySelector<HTMLInputElement>("[data-dl-plots]")!;
+  const dlScripts = box.querySelector<HTMLInputElement>("[data-dl-scripts]")!;
+  const dlTables = box.querySelector<HTMLInputElement>("[data-dl-tables]")!;
+  const dlSession = box.querySelector<HTMLInputElement>("[data-dl-session]")!;
+
   // Reflect backend readiness in the persistent hint above the Ask
   // input. Show the hint and dim the Ask button when no backend is
   // ready; clear both once the user configures one. Polled because
@@ -85,7 +109,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     button.disabled = !ready;
     button.title = ready ? "" : "Set up an AI backend in Settings to use Ask.";
     input.placeholder = ready
-      ? "Ask: 'largest mito' or 'plot mito volumes'"
+      ? "Ask: 'measure properties of mito' or 'plot mito volumes'"
       : "(set up AI in Settings to ask questions)";
   };
   refreshAiHint();
@@ -93,15 +117,12 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   aiHintBtn.addEventListener("click", () => {
     document.getElementById("settings-btn")?.click();
   });
+
   // Active AbortController for the in-flight query, or null when idle.
-  // Exposed at module scope (closure-captured) so the Stop click handler
-  // and the form-submit handler can share it without prop-drilling.
   let currentAbortController: AbortController | null = null;
   stopBtn.addEventListener("click", () => {
     if (currentAbortController) {
       currentAbortController.abort();
-      // Visual nudge — the actual UI state flip happens in the catch /
-      // finally of the in-flight runAgent call.
       stopBtn.disabled = true;
       stopBtn.textContent = "Stopping…";
       setTimeout(() => {
@@ -110,47 +131,34 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       }, 1500);
     }
   });
+
   // Session memory — last ~3 turns are passed back to the agent on each
   // follow-up so "now do the same for ER" / "redo with a smaller radius"
   // resolves. Cleared by the "New session" button.
   const SESSION_CONTEXT_TURNS = 3;
   const sessionTurns: AgentTurnSummary[] = [];
-  const sessionEl = box.querySelector<HTMLDivElement>("[data-session]")!;
-  const sessionListEl = box.querySelector<HTMLOListElement>("[data-session-list]")!;
-  const newSessionBtn = box.querySelector<HTMLButtonElement>("[data-action='new-session']")!;
-  const renderSessionTurns = (): void => {
-    sessionEl.hidden = sessionTurns.length === 0;
-    sessionListEl.innerHTML = sessionTurns
-      .map(
-        (t) =>
-          `<li><div class="session-turn-q">${escapeHtml(t.question)}</div><div class="session-turn-a">${escapeHtml(t.summary)}</div></li>`,
-      )
-      .join("");
-  };
+  // All rendered turn cards, oldest-first. Used by the session-wide
+  // Copy / Download buttons to aggregate every turn's outputs.
+  const allCards: TurnCard[] = [];
+
   newSessionBtn.addEventListener("click", () => {
     sessionTurns.length = 0;
-    renderSessionTurns();
+    allCards.length = 0;
+    threadEl.innerHTML = "";
+    sessionToolbar.hidden = true;
   });
 
   // ArrowUp/Down recall through the agent's persisted prompt history.
   // Triggers ONLY when the input is empty OR the user is already in
   // recall mode (showing a previous prompt unmodified) — Claude-style.
-  // Typing anything releases the keys back to the browser's default
-  // caret-movement behavior. Index -1 == "empty / showing draft",
-  // 0..N-1 walks history most-recent-first. We refuse to recall while
-  // a query is in flight (button.hidden) so we don't visually clobber
-  // the in-progress prompt.
   let historyIndex = -1;
-  // The string the input held when recall last set its value — used to
-  // detect "user hasn't edited the recalled prompt", so ArrowUp again
-  // continues stepping back instead of bailing on the empty-check.
   let lastRecallValue = "";
   input.addEventListener("keydown", (e) => {
     if (button.hidden) return; // running; don't intercept
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     const empty = input.value.length === 0;
     const stillOnRecall = historyIndex >= 0 && input.value === lastRecallValue;
-    if (!empty && !stillOnRecall) return; // let caret movement happen
+    if (!empty && !stillOnRecall) return;
     const items = loadPromptHistory("agent");
     if (items.length === 0) return;
     e.preventDefault();
@@ -163,147 +171,139 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     lastRecallValue = input.value;
     input.setSelectionRange(input.value.length, input.value.length);
   });
-  // Any direct edit cancels recall so the next ArrowUp restarts from
-  // most-recent. Without this, editing then ArrowUp would skip back two.
   input.addEventListener("input", () => {
     historyIndex = -1;
     lastRecallValue = "";
   });
 
-  const statusEl = box.querySelector<HTMLDivElement>("[data-status]")!;
-  const answerEl = box.querySelector<HTMLDivElement>("[data-answer]")!;
-  const plotEl = box.querySelector<HTMLDivElement>("[data-plot]")!;
-  const detailsEl = box.querySelector<HTMLDetailsElement>("[data-details]")!;
-  const traceEl = box.querySelector<HTMLDivElement>("[data-trace]")!;
-  const copyBtn = box.querySelector<HTMLButtonElement>("[data-action='copy-trace']")!;
-  const copyStatus = box.querySelector<HTMLSpanElement>("[data-copy-status]")!;
+  // ---- per-turn card construction ----------------------------------------
 
-  // Keep the structured trace in memory so the copy button can dump it
-  // as plain text — DOM-walking the rendered HTML is fragile and loses
-  // collapsed sections.
-  const traceItems: AgentTraceItem[] = [];
-  // Captured at submit time so 'Copy trace' includes the user's prompt
-  // alongside the tool calls. Cleared at the start of each new query.
-  let currentQuestion = "";
-  // Plots emitted this turn (captured for the Download bundle alongside
-  // the trace). We accumulate within a turn so a single download can
-  // bundle multiple plots (rare but possible if make_plot is followed
-  // by another).
-  const plotsThisTurn: { png: string; code: string; title?: string }[] = [];
-
-  const formatTraceForCopy = (): string => {
-    const lines: string[] = [];
-    if (currentQuestion) lines.push(`# Query\n${currentQuestion}\n`);
-    if (statusEl.textContent) lines.push(`# Status\n${statusEl.textContent}\n`);
-    if (answerEl.textContent) lines.push(`# Answer\n${answerEl.textContent}\n`);
-    lines.push(`# Trace (${traceItems.length} step${traceItems.length === 1 ? "" : "s"})`);
-    traceItems.forEach((item, i) => {
-      lines.push("\n" + formatStepForCopy(item, i));
-    });
-    return lines.join("\n");
+  // Newest cards prepend so the user sees the current turn right under
+  // the input without scrolling. Older turns sit further down. The
+  // sidebar is the natural scroll container — no nested scroll needed.
+  const createTurnCard = (question: string): TurnCard => {
+    const idx = allCards.length;
+    const root = document.createElement("div");
+    root.className = "turn-card";
+    root.innerHTML = `
+      <div class="turn-header">
+        <span class="turn-num">${idx + 1}</span>
+        <span class="turn-q"></span>
+      </div>
+      <div class="turn-status" data-status></div>
+      <div class="turn-answer" data-answer></div>
+      <div class="turn-plots" data-plots></div>
+      <div class="turn-tables" data-tables></div>
+      <details class="turn-details" data-details>
+        <summary>Show agent trace</summary>
+        <div class="agent-trace" data-trace></div>
+      </details>
+    `;
+    root.querySelector<HTMLSpanElement>(".turn-q")!.textContent = question;
+    threadEl.prepend(root);
+    const card: TurnCard = {
+      index: idx,
+      question,
+      root,
+      statusEl: root.querySelector<HTMLElement>("[data-status]")!,
+      answerEl: root.querySelector<HTMLElement>("[data-answer]")!,
+      plotsEl: root.querySelector<HTMLElement>("[data-plots]")!,
+      tablesEl: root.querySelector<HTMLElement>("[data-tables]")!,
+      traceEl: root.querySelector<HTMLElement>("[data-trace]")!,
+      detailsEl: root.querySelector<HTMLDetailsElement>("[data-details]")!,
+      traceItems: [],
+      plots: [],
+      tables: [],
+    };
+    allCards.push(card);
+    sessionToolbar.hidden = false;
+    return card;
   };
 
-  copyBtn.addEventListener("click", async () => {
-    const text = formatTraceForCopy();
-    try {
-      await navigator.clipboard.writeText(text);
-      copyStatus.textContent = "✓ copied";
-      copyStatus.className = "agent-trace-copy-status ok";
-    } catch {
-      // Clipboard API can be blocked in non-secure contexts; fall back
-      // to a window prompt() which lets the user copy manually.
-      window.prompt("Copy trace:", text);
-      copyStatus.textContent = "";
-    }
-    setTimeout(() => (copyStatus.textContent = ""), 1500);
-  });
-
-  // Download popover — single button, all categories checked by default,
-  // user can deselect. Generates one self-contained .md so the result
-  // opens cleanly in any markdown viewer (plots embed as data URLs).
-  const dlToggle = box.querySelector<HTMLButtonElement>("[data-action='download-toggle']")!;
-  const dlPopover = box.querySelector<HTMLDivElement>("[data-download-popover]")!;
-  const dlGoBtn = box.querySelector<HTMLButtonElement>("[data-action='download-go']")!;
-  const dlTrace = box.querySelector<HTMLInputElement>("[data-dl-trace]")!;
-  const dlPlots = box.querySelector<HTMLInputElement>("[data-dl-plots]")!;
-  const dlScripts = box.querySelector<HTMLInputElement>("[data-dl-scripts]")!;
-  const dlSession = box.querySelector<HTMLInputElement>("[data-dl-session]")!;
-  dlToggle.addEventListener("click", (e) => {
-    e.stopPropagation();
-    dlPopover.hidden = !dlPopover.hidden;
-  });
-  // Click-outside dismisses the popover. Listen on document so a click
-  // anywhere not on the popover or the toggle closes it.
-  document.addEventListener("click", (e) => {
-    if (dlPopover.hidden) return;
-    const t = e.target as Node;
-    if (!dlPopover.contains(t) && t !== dlToggle) dlPopover.hidden = true;
-  });
-  dlGoBtn.addEventListener("click", () => {
-    const md = buildSessionMarkdown({
-      includeTrace: dlTrace.checked,
-      includePlots: dlPlots.checked,
-      includeScripts: dlScripts.checked,
-      includeSession: dlSession.checked,
-    });
-    downloadBlob(new Blob([md], { type: "text/markdown" }), `tourguide-session-${Date.now()}.md`);
-    dlPopover.hidden = true;
-  });
-
-  const buildSessionMarkdown = (opts: {
-    includeTrace: boolean;
-    includePlots: boolean;
-    includeScripts: boolean;
-    includeSession: boolean;
-  }): string => {
-    const out: string[] = [];
-    out.push(`# Tourguide session\n`);
-    out.push(`Generated ${new Date().toISOString()}\n`);
-    if (currentQuestion) out.push(`## Question\n${currentQuestion}\n`);
-    if (answerEl.textContent) out.push(`## Answer\n${answerEl.textContent}\n`);
-    if (opts.includePlots && plotsThisTurn.length > 0) {
-      out.push(`## Plots`);
-      plotsThisTurn.forEach((p, i) => {
-        const label = p.title ?? `Plot ${i + 1}`;
-        out.push(`\n### ${label}\n`);
-        out.push(`![${label}](${p.png})\n`);
-      });
-    }
-    if (opts.includeScripts) {
-      const scripts = traceItems
-        .filter((t) => ["run_python", "make_plot", "python_on_layers"].includes(t.tool))
-        .map((t) => ({ tool: t.tool, code: String((t.args as Record<string, unknown>)?.python ?? "") }))
-        .filter((s) => s.code.length > 0);
-      if (scripts.length > 0) {
-        out.push(`\n## Python scripts`);
-        scripts.forEach((s, i) => {
-          out.push(`\n### Script ${i + 1} (${s.tool})\n`);
-          out.push("```python\n" + s.code + "\n```\n");
-        });
-      }
-    }
-    if (opts.includeTrace && traceItems.length > 0) {
-      out.push(`\n## Trace (${traceItems.length} steps)`);
-      traceItems.forEach((it, i) => {
-        out.push("\n" + formatStepForCopy(it, i));
-      });
-    }
-    if (opts.includeSession && sessionTurns.length > 0) {
-      out.push(`\n## Session history (most recent last)`);
-      sessionTurns.forEach((t, i) => {
-        out.push(`\n### Turn ${i + 1}\n- **Q:** ${t.question}\n- **A:** ${t.summary}`);
-      });
-    }
-    return out.join("\n");
+  const setStatus = (
+    card: TurnCard,
+    msg: string,
+    kind: "" | "err" | "ok" | "pending" = "",
+  ): void => {
+    card.statusEl.textContent = msg;
+    card.statusEl.className = `turn-status ${kind}`;
   };
 
-  const setStatus = (msg: string, kind: "" | "err" | "ok" | "pending" = ""): void => {
-    statusEl.textContent = msg;
-    statusEl.className = `query-status ${kind}`;
+  const renderPlot = (
+    card: TurnCard,
+    pngDataUrl: string,
+    code: string,
+    title?: string,
+    explanation?: string,
+  ): void => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "plot-output";
+    if (title) {
+      const h = document.createElement("h3");
+      h.className = "plot-title";
+      h.textContent = title;
+      wrapper.appendChild(h);
+    }
+    const img = document.createElement("img");
+    img.src = pngDataUrl;
+    img.className = "plot-image";
+    img.title = "Click to enlarge";
+    img.addEventListener("click", () => openFullscreenImage(pngDataUrl));
+    wrapper.appendChild(img);
+    if (explanation) {
+      const p = document.createElement("p");
+      p.className = "plot-explanation";
+      p.textContent = explanation;
+      wrapper.appendChild(p);
+    }
+    const toolbar = document.createElement("div");
+    toolbar.className = "plot-toolbar";
+    toolbar.appendChild(makeDownloadButton("⬇ PNG", () => downloadDataUrl(pngDataUrl, slugify(title) + ".png")));
+    if (code) {
+      toolbar.appendChild(
+        makeDownloadButton("⬇ .py", () =>
+          downloadBlob(new Blob([code], { type: "text/x-python" }), slugify(title) + ".py"),
+        ),
+      );
+    }
+    wrapper.appendChild(toolbar);
+    if (code) {
+      const det = document.createElement("details");
+      det.className = "plot-code";
+      det.innerHTML = `<summary>Show Python source</summary>`;
+      const pre = document.createElement("pre");
+      pre.textContent = code;
+      det.appendChild(pre);
+      wrapper.appendChild(det);
+    }
+    card.plotsEl.appendChild(wrapper);
+    card.plots.push({ png: pngDataUrl, code, title });
   };
 
-  // Format a single step the same way formatTraceForCopy does so the
-  // per-step copy button output matches what "Copy trace" produces.
+  // Inline summary card for an ingested table. The data is already in
+  // the SQL DB by the time we get here (applyCustomResult handled
+  // ingestion), so this is purely for affordance — show the user that
+  // a table was saved + give them a one-click CSV download. Browsing
+  // the full data lives in the dataset's structured browser pane.
+  const renderTable = (
+    card: TurnCard,
+    table: { name: string; columns: string[]; rows: (number | string | null)[][] },
+  ): void => {
+    const row = document.createElement("div");
+    row.className = "turn-table-row";
+    const label = document.createElement("span");
+    label.className = "turn-table-label";
+    label.innerHTML = `📊 Saved table: <code>${escapeHtml(table.name)}</code> (${table.rows.length} row${table.rows.length === 1 ? "" : "s"}, ${table.columns.length} cols)`;
+    row.appendChild(label);
+    row.appendChild(
+      makeDownloadButton(`⬇ ${table.name}.csv`, () => {
+        downloadBlob(new Blob([tableToCsv(table)], { type: "text/csv" }), `${table.name}.csv`);
+      }),
+    );
+    card.tablesEl.appendChild(row);
+    card.tables.push(table);
+  };
+
   const formatStepForCopy = (item: AgentTraceItem, index: number): string => {
     const lines: string[] = [`## Step ${index + 1}: ${item.tool}`];
     if (item.args && Object.keys(item.args).length > 0) {
@@ -318,10 +318,9 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     return lines.join("\n");
   };
 
-  const appendTrace = (item: AgentTraceItem): void => {
-    const index = traceItems.length;
-    traceItems.push(item);
-    detailsEl.hidden = false;
+  const appendTrace = (card: TurnCard, item: AgentTraceItem): void => {
+    const index = card.traceItems.length;
+    card.traceItems.push(item);
     const row = document.createElement("div");
     row.className = "agent-trace-item";
     const argStr = Object.keys(item.args ?? {}).length ? JSON.stringify(item.args, null, 2) : "";
@@ -335,11 +334,6 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
       resultLine = `<details class="agent-trace-block"><summary>result</summary><pre class="agent-trace-result">${escapeHtml(r)}</pre></details>`;
     }
-    // Tool name + per-step copy button. Click handler bound below
-    // because innerHTML can't carry function refs.
-    // For Python-emitting tools, also expose an "Open in Custom Python"
-    // button that drops the code + layer choices into the dialog so
-    // the user can edit and re-run without burning more LLM calls.
     const isPythonTool = ["run_python", "make_plot", "python_on_layers"].includes(item.tool);
     const openBtn = isPythonTool
       ? `<button class="btn-tiny agent-trace-open-step" type="button" title="Open this code in the Custom Python dialog">🐍 Edit</button>`
@@ -385,69 +379,117 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
               .filter((s) => s.layer)
           : [];
         setPendingSession({ layers, skeletons, code });
-        // Click the Custom button instead of opening the dialog
-        // directly — avoids importing the dialog module here and
-        // keeps a single open-path the rest of the app already
-        // exercises (e.g. focus / disabled-state checks).
         document.getElementById("custom-btn")?.click();
       });
     }
-    traceEl.appendChild(row);
-    traceEl.scrollTop = traceEl.scrollHeight;
+    card.traceEl.appendChild(row);
+    card.traceEl.scrollTop = card.traceEl.scrollHeight;
   };
 
-  const renderPlot = (
-    pngDataUrl: string,
-    code: string,
-    title?: string,
-    explanation?: string,
-  ): void => {
-    plotEl.hidden = false;
-    plotEl.innerHTML = "";
-    if (title) {
-      const h = document.createElement("h3");
-      h.className = "plot-title";
-      h.textContent = title;
-      plotEl.appendChild(h);
+  // ---- session-wide aggregation (Copy / Download) ------------------------
+
+  const formatSessionForCopy = (): string => {
+    const lines: string[] = [`# Tourguide session (${allCards.length} turn${allCards.length === 1 ? "" : "s"})`];
+    // Walk allCards in submit order so the markdown reads
+    // chronologically even though the on-screen layout is newest-first.
+    for (const card of allCards) {
+      lines.push(`\n## Q${card.index + 1}: ${card.question}\n`);
+      if (card.statusEl.textContent) lines.push(`_status: ${card.statusEl.textContent}_\n`);
+      if (card.answerEl.textContent) lines.push(`${card.answerEl.textContent}\n`);
+      if (card.traceItems.length > 0) {
+        lines.push(`### Trace (${card.traceItems.length} step${card.traceItems.length === 1 ? "" : "s"})`);
+        card.traceItems.forEach((it, i) => lines.push("\n" + formatStepForCopy(it, i)));
+      }
     }
-    const img = document.createElement("img");
-    img.src = pngDataUrl;
-    img.className = "plot-image";
-    img.title = "Click to enlarge";
-    img.addEventListener("click", () => openFullscreenImage(pngDataUrl));
-    plotEl.appendChild(img);
-    if (explanation) {
-      const p = document.createElement("p");
-      p.className = "plot-explanation";
-      p.textContent = explanation;
-      plotEl.appendChild(p);
-    }
-    const toolbar = document.createElement("div");
-    toolbar.className = "plot-toolbar";
-    toolbar.appendChild(makeDownloadButton("⬇ PNG", () => downloadDataUrl(pngDataUrl, slugify(title) + ".png")));
-    if (code) {
-      toolbar.appendChild(
-        makeDownloadButton("⬇ .py", () =>
-          downloadBlob(new Blob([code], { type: "text/x-python" }), slugify(title) + ".py"),
-        ),
-      );
-    }
-    plotEl.appendChild(toolbar);
-    if (code) {
-      const det = document.createElement("details");
-      det.className = "plot-code";
-      det.innerHTML = `<summary>Show Python source</summary>`;
-      const pre = document.createElement("pre");
-      pre.textContent = code;
-      det.appendChild(pre);
-      plotEl.appendChild(det);
-    }
+    return lines.join("\n");
   };
 
-  // Fullscreen overlay for plot images. Click the image (or background)
-  // or press Esc to close. We don't reuse .modal-overlay because that
-  // pattern centers a modal card with a header — for a single image we
-  // want edge-to-edge and a one-click dismiss anywhere on the dimmer.
+  copyBtn.addEventListener("click", async () => {
+    const text = formatSessionForCopy();
+    try {
+      await navigator.clipboard.writeText(text);
+      copyStatus.textContent = "✓ copied";
+      copyStatus.className = "agent-trace-copy-status ok";
+    } catch {
+      window.prompt("Copy session:", text);
+      copyStatus.textContent = "";
+    }
+    setTimeout(() => (copyStatus.textContent = ""), 1500);
+  });
+
+  dlToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    dlPopover.hidden = !dlPopover.hidden;
+  });
+  document.addEventListener("click", (e) => {
+    if (dlPopover.hidden) return;
+    const t = e.target as Node;
+    if (!dlPopover.contains(t) && t !== dlToggle) dlPopover.hidden = true;
+  });
+  dlGoBtn.addEventListener("click", () => {
+    const md = buildSessionMarkdown({
+      includeTrace: dlTrace.checked,
+      includePlots: dlPlots.checked,
+      includeScripts: dlScripts.checked,
+      includeTables: dlTables.checked,
+      includeSession: dlSession.checked,
+    });
+    downloadBlob(new Blob([md], { type: "text/markdown" }), `tourguide-session-${Date.now()}.md`);
+    dlPopover.hidden = true;
+  });
+
+  const buildSessionMarkdown = (opts: {
+    includeTrace: boolean;
+    includePlots: boolean;
+    includeScripts: boolean;
+    includeTables: boolean;
+    includeSession: boolean;
+  }): string => {
+    const out: string[] = [];
+    out.push(`# Tourguide session\n`);
+    out.push(`Generated ${new Date().toISOString()}\n`);
+    for (const card of allCards) {
+      out.push(`\n## Q${card.index + 1}: ${card.question}`);
+      if (card.answerEl.textContent) out.push(`\n${card.answerEl.textContent}`);
+      if (opts.includePlots && card.plots.length > 0) {
+        card.plots.forEach((p, i) => {
+          const label = p.title ?? `Plot ${i + 1}`;
+          out.push(`\n### ${label}\n`);
+          out.push(`![${label}](${p.png})`);
+        });
+      }
+      if (opts.includeScripts) {
+        const scripts = card.traceItems
+          .filter((t) => ["run_python", "make_plot", "python_on_layers"].includes(t.tool))
+          .map((t) => ({ tool: t.tool, code: String((t.args as Record<string, unknown>)?.python ?? "") }))
+          .filter((s) => s.code.length > 0);
+        scripts.forEach((s, i) => {
+          out.push(`\n### Script ${i + 1} (${s.tool})\n`);
+          out.push("```python\n" + s.code + "\n```");
+        });
+      }
+      if (opts.includeTables && card.tables.length > 0) {
+        card.tables.forEach((t) => {
+          out.push(`\n### Table: ${t.name} (${t.rows.length} rows)\n`);
+          out.push("```csv\n" + tableToCsv(t) + "```");
+        });
+      }
+      if (opts.includeTrace && card.traceItems.length > 0) {
+        out.push(`\n### Trace (${card.traceItems.length} steps)`);
+        card.traceItems.forEach((it, i) => out.push("\n" + formatStepForCopy(it, i)));
+      }
+    }
+    if (opts.includeSession && sessionTurns.length > 0) {
+      out.push(`\n## Session summary (the agent's per-turn recap, used as priorTurns context)`);
+      sessionTurns.forEach((t, i) => {
+        out.push(`\n### Turn ${i + 1}\n- **Q:** ${t.question}\n- **A:** ${t.summary}`);
+      });
+    }
+    return out.join("\n");
+  };
+
+  // ---- shared helpers ----------------------------------------------------
+
   const openFullscreenImage = (src: string): void => {
     const overlay = document.createElement("div");
     overlay.className = "plot-fullscreen";
@@ -505,60 +547,54 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     return t || "plot";
   };
 
+  const tableToCsv = (tbl: { columns: string[]; rows: (number | string | null)[][] }): string => {
+    const esc = (v: unknown): string => {
+      if (v === null || v === undefined) return "";
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [tbl.columns.map(esc).join(",")];
+    for (const row of tbl.rows) lines.push(row.map(esc).join(","));
+    return lines.join("\n") + "\n";
+  };
+
+  // ---- submit ------------------------------------------------------------
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const question = input.value.trim();
     if (!question) return;
-    currentQuestion = question;
-    // Persist before running so a crash / refresh mid-query still
-    // leaves the prompt recoverable via ArrowUp.
     recordPrompt(question, "agent");
     historyIndex = -1;
     lastRecallValue = "";
-    // The agent only NEEDS a descriptor (loaded layers). Organelle CSVs
-    // are required for run_sql / make_plot / run_python (DataFrame
-    // tools), but describe_dataset, python_on_layers, fly_to, and
-    // highlight_segments work without a DB. Block only when neither
-    // is loaded — and let the per-tool executors error helpfully when
-    // the model picks a DB tool against an empty DB.
+
     const db = ctx.getDB();
     const descriptor = ctx.getDescriptor();
-    if (!db && !descriptor) {
-      setStatus("Load a dataset first.", "err");
-      return;
-    }
     const backend = ctx.getBackend();
-    if (!backend.isReady()) {
-      setStatus("No AI configured. Click Settings to add a key or enable WebLLM.", "err");
+    if (!db && !descriptor) {
+      // No card to render into yet — show the gate inline as a transient
+      // status by creating a minimal card that won't pollute history.
+      const card = createTurnCard(question);
+      setStatus(card, "Load a dataset first.", "err");
       return;
     }
+    if (!backend.isReady()) {
+      const card = createTurnCard(question);
+      setStatus(card, "No AI configured. Click Settings to add a key or enable WebLLM.", "err");
+      return;
+    }
+
+    const card = createTurnCard(question);
+    input.value = "";
     button.hidden = true;
     stopBtn.hidden = false;
-    setStatus("Thinking…", "pending");
-    answerEl.textContent = "";
-    plotEl.hidden = true;
-    traceEl.innerHTML = "";
-    traceItems.length = 0;
-    plotsThisTurn.length = 0;
-    // Show the trace panel up front (collapsed by default) so even if
-    // the agent fails or is stopped before any tool fires, the Copy
-    // trace button is still reachable. Previously we only revealed it
-    // on the first appendTrace, which hid the copy path on early
-    // errors (model parse failures, 429s on first call, etc.).
-    detailsEl.hidden = false;
-    const traceQuestionEl = box.querySelector<HTMLDivElement>("[data-trace-question]");
-    if (traceQuestionEl) {
-      traceQuestionEl.hidden = false;
-      traceQuestionEl.textContent = `Query: ${question}`;
-    }
+    setStatus(card, "Thinking…", "pending");
+    // Open the trace details by default — easier to spot when something
+    // goes off-rails. User can collapse if they don't care.
+    card.detailsEl.open = false;
+
     let answeredOrFlew = false;
-    // Capture a one-line outcome from this turn so the next turn's
-    // priorTurns has something concrete to reference. We prefer the
-    // textual answer; failing that, the highest-signal viewer change.
     let turnSummary = "";
-    // Fresh AbortController per query — Stop button calls abort()
-    // which cascades through to the LLM backend (fetch / WebLLM
-    // interrupt) and unwinds the agent loop's awaits.
     const abortController = new AbortController();
     currentAbortController = abortController;
     try {
@@ -571,43 +607,47 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
         signal: abortController.signal,
         priorTurns: sessionTurns.slice(-SESSION_CONTEXT_TURNS),
         callbacks: {
-          onTrace: (t) => appendTrace(t),
-          onProgress: (m) => setStatus(m, "pending"),
+          onTrace: (t) => appendTrace(card, t),
+          onProgress: (m) => setStatus(card, m, "pending"),
           onAnswer: (text) => {
-            answerEl.textContent = text;
+            card.answerEl.textContent = text;
             answeredOrFlew = true;
             turnSummary = text;
           },
-          onPlot: (_png, _code, title) => {
-            renderPlot(_png, _code, title);
-            plotsThisTurn.push({ png: _png, code: _code, title });
+          onPlot: (png, code, title, explanation) => {
+            renderPlot(card, png, code, title, explanation);
             answeredOrFlew = true;
             if (!turnSummary) turnSummary = title ? `Showed plot: ${title}` : "Showed a plot";
           },
           onFly: (_pos, layer, id) => {
-            setStatus(`Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
+            setStatus(card, `Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
             answeredOrFlew = true;
             if (!turnSummary) turnSummary = `Flew to ${layer}${id ? ` ${id}` : ""}`;
           },
           onHighlight: (layer, ids) => {
-            setStatus(`Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
+            setStatus(card, `Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
             answeredOrFlew = true;
             if (!turnSummary) turnSummary = `Highlighted ${ids.length} segments in ${layer}`;
+          },
+          onTable: (tbl) => {
+            renderTable(card, tbl);
+            answeredOrFlew = true;
+            if (!turnSummary) turnSummary = `Saved table ${tbl.name} (${tbl.rows.length} rows)`;
           },
         },
       });
       if (!answeredOrFlew) {
-        setStatus("Agent finished without delivering an answer.", "");
+        setStatus(card, "Agent finished without delivering an answer.", "");
+      } else if (!card.statusEl.textContent || card.statusEl.classList.contains("pending")) {
+        // Clear the "Thinking…" pending state once we've delivered.
+        setStatus(card, "", "");
       }
       sessionTurns.push({ question, summary: turnSummary || "(no visible result)" });
-      renderSessionTurns();
     } catch (err) {
-      // AbortError is the user clicking Stop — show a calmer message
-      // than "Error: ..." since they did this on purpose.
       if (abortController.signal.aborted || (err as Error).name === "AbortError") {
-        setStatus("Stopped.", "");
+        setStatus(card, "Stopped.", "");
       } else {
-        setStatus((err as Error).message, "err");
+        setStatus(card, (err as Error).message, "err");
         console.error(err);
       }
     } finally {
@@ -625,4 +665,3 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
-

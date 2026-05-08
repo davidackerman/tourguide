@@ -747,42 +747,95 @@ button {
   margin-bottom: 0.75rem;
 }
 
-.session-turns {
-  margin-bottom: 0.5rem;
-  padding: 0.4rem 0.5rem;
+/* Chat-thread layout: each turn becomes a self-contained card with its
+   own status / answer / plots / tables / trace. Cards stack newest-
+   first directly below the toolbar so the user sees the in-flight
+   turn without scrolling, while older turns persist below for
+   scroll-back. The whole #sidebar is the natural scroll container. */
+.session-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+  padding: 0.3rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.session-toolbar .btn-link {
+  margin-left: auto;
+}
+
+.session-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.turn-card {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
+  padding: 0.55rem 0.6rem;
+}
+.turn-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px dashed var(--border);
+}
+.turn-num {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.turn-q {
+  font-weight: 500;
+  word-break: break-word;
+}
+.turn-status {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  margin-bottom: 0.3rem;
+  min-height: 1em;
+}
+.turn-status.err { color: var(--err, #e57373); }
+.turn-status.ok  { color: var(--ok, #81c784); }
+.turn-status.pending { color: var(--fg-dim); }
+.turn-answer {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  margin-bottom: 0.4rem;
+}
+.turn-answer:empty { margin: 0; }
+.turn-plots > * + * { margin-top: 0.6rem; }
+.turn-tables { display: flex; flex-direction: column; gap: 0.3rem; }
+.turn-table-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.4rem;
+  background: var(--bg-elev);
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+.turn-table-label code {
+  background: var(--bg);
+  padding: 0 0.25rem;
+  border-radius: 3px;
+}
+.turn-details {
+  margin-top: 0.4rem;
   font-size: 0.78rem;
 }
-.session-turns-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+.turn-details summary {
+  cursor: pointer;
   color: var(--fg-dim);
-  margin-bottom: 0.25rem;
-}
-.session-turns-label {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.7rem;
-}
-.session-turns-list {
-  list-style: decimal inside;
-  margin: 0;
-  padding: 0;
-  max-height: 140px;
-  overflow: auto;
-}
-.session-turns-list li {
-  margin-bottom: 0.35rem;
-}
-.session-turn-q {
-  font-weight: 500;
-}
-.session-turn-a {
-  color: var(--fg-dim);
-  margin-left: 1em;
 }
 
 .query-form {
