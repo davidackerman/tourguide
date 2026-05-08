@@ -75,6 +75,67 @@ interface ToolCall {
 // a follow-up.
 const MAX_ITERATIONS = 5;
 
+// Tool docs that need organelle CSVs in the SQL DB to function (run_sql
+// reads from the DB; run_python / make_plot bind df_<class> globals
+// from it). Suppressed entirely from the prompt when the DB is empty
+// so the model doesn't burn a turn calling a tool that errors with
+// "No database loaded".
+const DB_TOOL_DOCS = `  run_sql(sql: string)
+    Run a SELECT query against the organelle DB. Returns up to 50 rows.
+    SQL dialect: SQLite. Quote identifiers with double quotes. SELECT only.
+
+  make_plot(python: string, title?: string, explanation?: string)
+    Run Python via Pyodide (numpy, pandas, matplotlib already imported).
+    You get df_<class> DataFrames as globals. Produce exactly ONE matplotlib
+    figure; do NOT call plt.show() or plt.savefig() — the harness handles it.
+    Volumes in nm^3, surface area in nm^2, positions in nm; convert to um^3
+    (divide by 1e9) when plotting for readability.
+
+  run_python(python: string)
+    Run arbitrary Python via Pyodide for computation that doesn't need a
+    plot — e.g. statistics, transformations, intermediate results to feed
+    a later tool. Same environment as make_plot: df_<class> DataFrames as
+    globals, plus np / pd already imported. NOT terminal; the harness
+    feeds the captured stdout (and any value you assign to a global named
+    _out) back to you so you can call answer/fly_to next.
+    Available packages: numpy, pandas, matplotlib are pre-imported. Other
+    Pyodide-prebuilt packages (scipy, scikit-learn, sympy, networkx,
+    statsmodels, etc.) auto-load when you import them — just write
+    'import scipy.stats' or 'from sklearn.cluster import DBSCAN' directly.
+    DO NOT call micropip.install or pyodide.loadPackage; the harness
+    handles it. If a package isn't available, you'll get
+    ModuleNotFoundError — pick a different approach.
+
+    DATA SHAPES — read carefully:
+      df_<class>   pandas DataFrame. Index columns by name: df_mito["volume_nm_3"].
+                   DO NOT use bracket-name on a numpy array.
+      com_<class>  numpy (N, 3) float64 array of COMs in nanometers, ALREADY
+                   extracted. Index by integer/slice: com_mito[:, 0] for x,
+                   com_mito[i] for the i-th point. Pass com_<class>.T to
+                   scipy.stats.gaussian_kde (it expects (D, N), not (N, D)).
+                   USE com_<class> directly — do NOT rebuild it via
+                   np.array(df_x[["com_x_nm",...]]). DO NOT call pd.read_csv
+                   or any network fetch — the data is already loaded.
+
+    JSON STRING ESCAPING — read carefully:
+      Your code is a JSON string, so \\n inside a Python literal needs to
+      survive JSON unescaping. Two safe patterns:
+        1. Single-line strings, no newlines:
+             print('Densest bin COM:', max_count_bin)   # no \\n needed
+        2. If you really need a newline in a string, use a triple-quoted
+           string OR escape twice:  "\\\\n" in the JSON becomes "\\n" in
+           Python which is an actual newline at runtime.
+      DO NOT write f'foo: {x}\\nbar: {y}' as a single non-triple-quoted
+      Python literal — \\n in the JSON becomes a real line break and
+      triggers SyntaxError: unterminated string literal.
+    Conventions:
+      - print(...) anything you want returned; it lands in stdout.
+      - Set _out = <python value> for a structured return — DataFrames /
+        Series get to_dict()'d, otherwise json/repr.
+      - Globals persist across run_python calls within one user turn.
+    Use this for "what's the median volume?" / "compute X then fly to
+    the result" flows. For visual answers, prefer make_plot.`;
+
 const SCHEMA_GUIDE = (db: DatasetDB): string => {
   const tableLines = db.tables
     .map((t) => {
@@ -144,9 +205,7 @@ TOOLS:
     approximate byte size at each scale. Use this whenever the user
     asks about resolution, dimensions, or what's loaded — never guess.
 
-  run_sql(sql: string)
-    Run a SELECT query against the organelle DB. Returns up to 50 rows.
-    SQL dialect: SQLite. Quote identifiers with double quotes. SELECT only.
+${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need organelle CSVs which aren't loaded. Use python_on_layers below to compute any per-object metrics + plots directly from the segmentation voxels.)"}
 
   fly_to(position: [x, y, z], layer: string, object_id?: string)
     Move the viewer camera to these NANOMETER coordinates, switch on this
@@ -159,58 +218,6 @@ TOOLS:
     else fades to background. Use this for "show me only the …" or
     "select these segments" requests. ids can be the object_id values
     from a run_sql result, or specific numeric ids the user named.
-
-  make_plot(python: string, title?: string, explanation?: string)
-    Run Python via Pyodide (numpy, pandas, matplotlib already imported).
-    You get df_<class> DataFrames as globals. Produce exactly ONE matplotlib
-    figure; do NOT call plt.show() or plt.savefig() — the harness handles it.
-    Volumes in nm^3, surface area in nm^2, positions in nm; convert to um^3
-    (divide by 1e9) when plotting for readability.
-
-  run_python(python: string)
-    Run arbitrary Python via Pyodide for computation that doesn't need a
-    plot — e.g. statistics, transformations, intermediate results to feed
-    a later tool. Same environment as make_plot: df_<class> DataFrames as
-    globals, plus np / pd already imported. NOT terminal; the harness
-    feeds the captured stdout (and any value you assign to a global named
-    _out) back to you so you can call answer/fly_to next.
-    Available packages: numpy, pandas, matplotlib are pre-imported. Other
-    Pyodide-prebuilt packages (scipy, scikit-learn, sympy, networkx,
-    statsmodels, etc.) auto-load when you import them — just write
-    'import scipy.stats' or 'from sklearn.cluster import DBSCAN' directly.
-    DO NOT call micropip.install or pyodide.loadPackage; the harness
-    handles it. If a package isn't available, you'll get
-    ModuleNotFoundError — pick a different approach.
-
-    DATA SHAPES — read carefully:
-      df_<class>   pandas DataFrame. Index columns by name: df_mito["volume_nm_3"].
-                   DO NOT use bracket-name on a numpy array.
-      com_<class>  numpy (N, 3) float64 array of COMs in nanometers, ALREADY
-                   extracted. Index by integer/slice: com_mito[:, 0] for x,
-                   com_mito[i] for the i-th point. Pass com_<class>.T to
-                   scipy.stats.gaussian_kde (it expects (D, N), not (N, D)).
-                   USE com_<class> directly — do NOT rebuild it via
-                   np.array(df_x[["com_x_nm",...]]). DO NOT call pd.read_csv
-                   or any network fetch — the data is already loaded.
-
-    JSON STRING ESCAPING — read carefully:
-      Your code is a JSON string, so \\n inside a Python literal needs to
-      survive JSON unescaping. Two safe patterns:
-        1. Single-line strings, no newlines:
-             print('Densest bin COM:', max_count_bin)   # no \\n needed
-        2. If you really need a newline in a string, use a triple-quoted
-           string OR escape twice:  "\\\\n" in the JSON becomes "\\n" in
-           Python which is an actual newline at runtime.
-      DO NOT write f'foo: {x}\\nbar: {y}' as a single non-triple-quoted
-      Python literal — \\n in the JSON becomes a real line break and
-      triggers SyntaxError: unterminated string literal.
-    Conventions:
-      - print(...) anything you want returned; it lands in stdout.
-      - Set _out = <python value> for a structured return — DataFrames /
-        Series get to_dict()'d, otherwise json/repr.
-      - Globals persist across run_python calls within one user turn.
-    Use this for "what's the median volume?" / "compute X then fly to
-    the result" flows. For visual answers, prefer make_plot.
 
   python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
     HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
@@ -468,6 +475,14 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
   - run_python operates on the SQL-derived DataFrames (df_<class>)
     and pre-extracted COMs (com_<class>); it does NOT have access
     to layer voxels. If you need pixels, use python_on_layers.
+  - Whenever python_on_layers computes per-object metrics (volume,
+    COM, surface area, regionprops of any kind), ALWAYS set _TG_TABLE
+    so the metrics persist in the SQL DB for the rest of the
+    session. The next turn (or a follow-up question) can then run_sql
+    against them instead of re-running the heavy computation.
+    If the user asked to "plot X", the natural flow is: compute the
+    table once (set _TG_TABLE) AND set _TG_PLOT in the same call —
+    don't compute and discard.
 
 BUDGET: You have AT MOST 5 tool calls per question. Plan accordingly — most flows above finish in 2-4. If you can't reach an answer in 5, end with answer() explaining what's missing rather than running out silently.
 

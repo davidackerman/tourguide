@@ -238,8 +238,32 @@ def _worker_entrypoint(
         # (or ndi/plt/pd/...).
         exec(compile(_PRELUDE, "<tourguide-prelude>", "exec"), globals_dict)
         exec(compile(source, "<tourguide-analysis>", "exec"), globals_dict)
-        # Pull out the _TG_* outputs the user code set.
-        result = {k: v for k, v in globals_dict.items() if k.startswith("_TG_")}
+        # Auto-capture any open matplotlib figure into _TG_PLOT_PNG —
+        # mirrors the local worker's behavior so the agent can use
+        # _TG_PLOT = plt.gcf(), bare plt.* calls, or skip the variable
+        # entirely (we'll grab whatever's open). User code is also
+        # allowed to set _TG_PLOT_PNG explicitly; we don't overwrite.
+        try:
+            import io as _io
+            import base64 as _b64
+            import matplotlib.pyplot as _plt
+            if "_TG_PLOT_PNG" not in globals_dict and _plt.get_fignums():
+                _buf = _io.BytesIO()
+                _plt.savefig(_buf, format="png", bbox_inches="tight", dpi=120)
+                _plt.close("all")
+                globals_dict["_TG_PLOT_PNG"] = _b64.b64encode(_buf.getvalue()).decode("ascii")
+        except Exception:
+            # Figure capture failures are non-fatal — the rest of the
+            # analysis output is still useful.
+            pass
+        # Pull out the _TG_* outputs. Drop _TG_PLOT (the Figure object)
+        # from the result: matplotlib Figure objects don't pickle cleanly
+        # across the multiprocessing boundary, and the PNG is now in
+        # _TG_PLOT_PNG anyway.
+        result = {
+            k: v for k, v in globals_dict.items()
+            if k.startswith("_TG_") and k != "_TG_PLOT"
+        }
         out_queue.put(("ok", result))
     except BaseException as exc:  # noqa: BLE001 — we want every error
         out_queue.put(("error", {
