@@ -4,6 +4,7 @@ import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { runAgent, type AgentTraceItem, type AgentTurnSummary } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
+import { setPendingSession } from "./python_session.js";
 
 export interface QueryUIContext {
   getDB: () => DatasetDB | null;
@@ -338,10 +339,18 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     }
     // Tool name + per-step copy button. Click handler bound below
     // because innerHTML can't carry function refs.
+    // For Python-emitting tools, also expose an "Open in Custom Python"
+    // button that drops the code + layer choices into the dialog so
+    // the user can edit and re-run without burning more LLM calls.
+    const isPythonTool = ["run_python", "make_plot", "python_on_layers"].includes(item.tool);
+    const openBtn = isPythonTool
+      ? `<button class="btn-tiny agent-trace-open-step" type="button" title="Open this code in the Custom Python dialog">🐍 Edit</button>`
+      : "";
     row.innerHTML = `
       <div class="agent-trace-item-header">
         <span class="agent-trace-tool">${escapeHtml(item.tool)}</span>
         <button class="btn-tiny agent-trace-copy-step" type="button" title="Copy this step">📋</button>
+        ${openBtn}
         <span class="agent-trace-step-status" data-step-status></span>
       </div>
       ${safeArgs}${resultLine}`;
@@ -358,6 +367,33 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       }
       setTimeout(() => (stepStatus.textContent = ""), 1500);
     });
+    if (isPythonTool) {
+      const openStepBtn = row.querySelector<HTMLButtonElement>(".agent-trace-open-step")!;
+      openStepBtn.addEventListener("click", () => {
+        const a = item.args as Record<string, unknown>;
+        const code = String(a.python ?? a.code ?? "");
+        const layers = Array.isArray(a.layers) ? (a.layers as unknown[]).map(String) : [];
+        const skeletons = Array.isArray(a.skeletons)
+          ? (a.skeletons as unknown[])
+              .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+              .map((s) => ({
+                layer: String(s.layer ?? s.name ?? ""),
+                segmentIds: Array.isArray(s.segment_ids)
+                  ? (s.segment_ids as unknown[]).map(String)
+                  : Array.isArray(s.ids)
+                    ? (s.ids as unknown[]).map(String)
+                    : [],
+              }))
+              .filter((s) => s.layer)
+          : [];
+        setPendingSession({ layers, skeletons, code });
+        // Click the Custom button instead of opening the dialog
+        // directly — avoids importing the dialog module here and
+        // keeps a single open-path the rest of the app already
+        // exercises (e.g. focus / disabled-state checks).
+        document.getElementById("custom-btn")?.click();
+      });
+    }
     traceEl.appendChild(row);
     traceEl.scrollTop = traceEl.scrollHeight;
   };

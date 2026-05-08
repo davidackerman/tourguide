@@ -22,6 +22,7 @@ import type { LLMBackend } from "./llm.js";
 import { loadSettings } from "./llm.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
+import { consumePendingSession } from "./python_session.js";
 import {
   fetchHealth,
   openBrowserTunnel,
@@ -427,6 +428,42 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   };
 
   addSkeletonBtn.addEventListener("click", () => addSkeleton());
+
+  // --- Handoff from agent --------------------------------------------------
+  // If the user clicked "Open in Custom Python" on an agent trace step,
+  // the agent stuffed its layers + code into pythonSession; consume it
+  // here so the dialog opens pre-populated. Drains the buffer so a
+  // subsequent open-via-+Custom-button starts fresh.
+  const pending = consumePendingSession();
+  if (pending) {
+    // Replace the auto-added default slot with whatever the agent had.
+    // We do this *after* the default slot's async addLayer() call has
+    // appended to `slots`, so we wipe and rebuild on the next tick.
+    void (async () => {
+      // Wait one frame so the default addLayer() has settled.
+      await new Promise((r) => setTimeout(r, 0));
+      // Wipe existing slots first.
+      for (const s of slots.slice()) {
+        s.row.remove();
+      }
+      slots.length = 0;
+      for (const layerName of pending.layers) {
+        const layer = zarrLayers.find((l) => l.name === layerName);
+        if (layer) await addLayer(layer);
+      }
+      for (const sk of pending.skeletons) {
+        const layer = skeletonLayers.find((l) => l.name === sk.layer);
+        if (!layer) continue;
+        addSkeleton();
+        const slot = skeletonSlots[skeletonSlots.length - 1];
+        if (!slot) continue;
+        slot.layer = layer;
+        slot.segmentIds = sk.segmentIds;
+        renderSkeletonSlot(slot);
+      }
+      if (pending.code) codeEl.value = pending.code;
+    })();
+  }
 
   // --- Run -----------------------------------------------------------------
 
