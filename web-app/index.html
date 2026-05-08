@@ -17,9 +17,13 @@
           </select>
           <button id="load-data-btn" class="btn-secondary" title="Load a different dataset (URL, folder, YAML, or NG state)">+ Load</button>
         </div>
-        <div class="topbar-group">
-          <button id="analyze-btn" class="btn-secondary" title="Compute per-object stats (volume, position, etc.) on a zarr segmentation. No AI needed.">∑ Analyze</button>
-          <button id="custom-btn" class="btn-secondary" title="Plain-English Python on one or more layers — REQUIRES AI (set up in Settings).">🐍 Custom</button>
+        <!-- Analyze + Custom buttons are kept in the DOM so the agent's
+             🐍 Edit handoff can programmatically click #custom-btn, but
+             hidden from the toolbar — the agent is the unified entry
+             point for measure / morphology / Python now. -->
+        <div class="topbar-group" hidden>
+          <button id="analyze-btn" class="btn-secondary" title="(deprecated) Use the agent — say e.g. 'measure properties of mito'">∑ Analyze</button>
+          <button id="custom-btn" class="btn-secondary" title="(deprecated) Opened via per-step 🐍 Edit on agent traces">🐍 Custom</button>
         </div>
         <div class="topbar-group">
           <button id="download-btn" class="btn-secondary" title="Download zarr layers as .zip">⬇ Save zarr</button>

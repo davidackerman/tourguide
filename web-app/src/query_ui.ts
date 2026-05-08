@@ -23,7 +23,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   box.className = "query-box";
   box.innerHTML = `
     <div class="query-ai-hint" data-ai-hint hidden>
-      ⚠ AI not configured — plain-English questions, agent trace, and 🐍 Custom Python need an AI backend.
+      ⚠ AI not configured — the agent needs an AI backend.
       <button class="btn-link" data-action="open-settings">Set up in Settings</button>
     </div>
     <div class="session-turns" data-session hidden>
@@ -37,11 +37,9 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       <input
         type="text"
         class="query-input"
-        placeholder="Ask: 'largest mito' or 'plot mito volumes'"
+        placeholder="Ask: 'measure properties of mito' or 'plot mito volumes'"
         autocomplete="off"
-        list="tg-agent-history"
       />
-      <datalist id="tg-agent-history" data-history-list></datalist>
       <button class="btn-primary" type="submit" data-action="ask">Ask</button>
       <button class="btn-secondary" type="button" data-action="stop" hidden>Stop</button>
     </form>
@@ -134,42 +132,42 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     renderSessionTurns();
   });
 
-  const historyList = box.querySelector<HTMLDataListElement>("[data-history-list]")!;
-  const refreshHistoryList = (): void => {
-    const items = loadPromptHistory("agent");
-    historyList.innerHTML = items
-      .map((p) => `<option value="${p.replace(/"/g, "&quot;")}"></option>`)
-      .join("");
-  };
-  refreshHistoryList();
-
-  // Shell-style ArrowUp/Down recall over the agent's prompt history.
-  // Preserves whatever the user was typing before they started recalling
-  // ("draft") so ArrowDown past index 0 brings it back. Index -1 means
-  // "showing draft"; 0..N-1 walks the persisted history (most-recent
-  // first). We refuse to recall while a query is in flight — it would
-  // visually overwrite the in-progress prompt mid-execution.
+  // ArrowUp/Down recall through the agent's persisted prompt history.
+  // Triggers ONLY when the input is empty OR the user is already in
+  // recall mode (showing a previous prompt unmodified) — Claude-style.
+  // Typing anything releases the keys back to the browser's default
+  // caret-movement behavior. Index -1 == "empty / showing draft",
+  // 0..N-1 walks history most-recent-first. We refuse to recall while
+  // a query is in flight (button.hidden) so we don't visually clobber
+  // the in-progress prompt.
   let historyIndex = -1;
-  let draft = "";
+  // The string the input held when recall last set its value — used to
+  // detect "user hasn't edited the recalled prompt", so ArrowUp again
+  // continues stepping back instead of bailing on the empty-check.
+  let lastRecallValue = "";
   input.addEventListener("keydown", (e) => {
     if (button.hidden) return; // running; don't intercept
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    const empty = input.value.length === 0;
+    const stillOnRecall = historyIndex >= 0 && input.value === lastRecallValue;
+    if (!empty && !stillOnRecall) return; // let caret movement happen
     const items = loadPromptHistory("agent");
     if (items.length === 0) return;
     e.preventDefault();
-    if (historyIndex === -1) draft = input.value;
     if (e.key === "ArrowUp") {
       historyIndex = Math.min(items.length - 1, historyIndex + 1);
     } else {
       historyIndex = Math.max(-1, historyIndex - 1);
     }
-    input.value = historyIndex === -1 ? draft : items[historyIndex];
-    // Move caret to end so the user can keep typing immediately.
+    input.value = historyIndex === -1 ? "" : items[historyIndex];
+    lastRecallValue = input.value;
     input.setSelectionRange(input.value.length, input.value.length);
   });
-  // Any direct edit cancels recall mode so the next ArrowUp starts fresh.
+  // Any direct edit cancels recall so the next ArrowUp restarts from
+  // most-recent. Without this, editing then ArrowUp would skip back two.
   input.addEventListener("input", () => {
     historyIndex = -1;
+    lastRecallValue = "";
   });
 
   const statusEl = box.querySelector<HTMLDivElement>("[data-status]")!;
@@ -512,12 +510,11 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     const question = input.value.trim();
     if (!question) return;
     currentQuestion = question;
-    // Persist before running so a crash / refresh mid-query still leaves
-    // the prompt recoverable in the dropdown.
+    // Persist before running so a crash / refresh mid-query still
+    // leaves the prompt recoverable via ArrowUp.
     recordPrompt(question, "agent");
-    refreshHistoryList();
     historyIndex = -1;
-    draft = "";
+    lastRecallValue = "";
     // The agent only NEEDS a descriptor (loaded layers). Organelle CSVs
     // are required for run_sql / make_plot / run_python (DataFrame
     // tools), but describe_dataset, python_on_layers, fly_to, and

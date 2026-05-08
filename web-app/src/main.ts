@@ -247,7 +247,7 @@ async function ingestAndRender(d: DatasetDescriptor, baseUrl: string | null): Pr
   currentDB = null;
   const csvLayers = d.layers.filter((l) => l.csv);
   if (csvLayers.length === 0) {
-    browserHost.innerHTML = `<p class="placeholder">No organelle CSVs in this dataset — nothing to query yet. Add a <code>csv</code> field to layers in the descriptor to enable the structured browser, or click ∑ Analyze to compute stats on a zarr segmentation.</p>`;
+    browserHost.innerHTML = `<p class="placeholder">No organelle CSVs in this dataset — nothing to query yet. Ask the agent (e.g. "measure properties of mito") to compute stats on a zarr segmentation.</p>`;
     return;
   }
   browserHost.innerHTML = `<p class="placeholder">Loading ${csvLayers.length} CSV file(s)…</p>`;
