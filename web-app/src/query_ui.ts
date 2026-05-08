@@ -518,9 +518,16 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     refreshHistoryList();
     historyIndex = -1;
     draft = "";
+    // The agent only NEEDS a descriptor (loaded layers). Organelle CSVs
+    // are required for run_sql / make_plot / run_python (DataFrame
+    // tools), but describe_dataset, python_on_layers, fly_to, and
+    // highlight_segments work without a DB. Block only when neither
+    // is loaded — and let the per-tool executors error helpfully when
+    // the model picks a DB tool against an empty DB.
     const db = ctx.getDB();
-    if (!db) {
-      setStatus("Load a dataset with organelle CSVs first.", "err");
+    const descriptor = ctx.getDescriptor();
+    if (!db && !descriptor) {
+      setStatus("Load a dataset first.", "err");
       return;
     }
     const backend = ctx.getBackend();
@@ -561,7 +568,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       await runAgent(question, {
         db,
         setDB: ctx.setDB,
-        descriptor: ctx.getDescriptor(),
+        descriptor,
         viewer: ctx.viewer,
         backend,
         signal: abortController.signal,

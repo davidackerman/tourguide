@@ -122,7 +122,7 @@ COORDINATES: ALL positions everywhere — CSV com_x_nm / com_y_nm / com_z_nm col
 
 ${d ? LAYER_GUIDE(d) : ""}
 
-${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — only answer() and done() are useful."}
+${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — run_sql / run_python / make_plot are unavailable, but describe_dataset, python_on_layers, fly_to, highlight_segments, answer, done all work."}
 
 NEVER GUESS DATASET PROPERTIES. If the user asks about a layer's resolution / scale / shape / dtype / available downsamplings, call describe_dataset(layer_name) and answer from its return value. Never invent numbers like "1 × 1 × 1 nm" — when uncertain, say so or call describe_dataset.
 
