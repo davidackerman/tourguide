@@ -203,7 +203,11 @@ async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
 // later user-initiated dataset switches strip the (now-stale) hash.
 let initialApplyDone = false;
 
-async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Promise<void> {
+async function applyDescriptor(
+  d: DatasetDescriptor,
+  baseUrl: string | null,
+  ngStateOverride?: Record<string, unknown>,
+): Promise<void> {
   // NG auto-syncs its viewer state to the URL hash on every interaction.
   // For *subsequent* dataset switches we strip the hash so a leftover
   // position/segments set from a previous dataset doesn't apply to the
@@ -217,7 +221,7 @@ async function applyDescriptor(d: DatasetDescriptor, baseUrl: string | null): Pr
   }
   initialApplyDone = true;
   currentDescriptor = d;
-  viewer.loadDescriptor(d);
+  viewer.loadDescriptor(d, ngStateOverride);
   renderMeta(d);
   await ingestAndRender(d, baseUrl);
   // Intentionally no auto-frame: Neuroglancer fits its camera to the
@@ -453,10 +457,10 @@ async function ingestSharedTables(tables: SharedTable[]): Promise<void> {
   renderStructuredBrowser(browserHost, { db: currentDB, viewer });
 }
 
-function loadDescriptorDirect(d: DatasetDescriptor): void {
+function loadDescriptorDirect(d: DatasetDescriptor, ngState?: Record<string, unknown>): void {
   currentIsCustom = true;
   currentCatalogIndex = null;
-  void applyDescriptor(d, null);
+  void applyDescriptor(d, null, ngState);
   const customOptValue = "__custom__";
   let customOpt = select.querySelector<HTMLOptionElement>(`option[value="${customOptValue}"]`);
   if (!customOpt) {
@@ -470,21 +474,16 @@ function loadDescriptorDirect(d: DatasetDescriptor): void {
 
 loadBtn.addEventListener("click", () => {
   openLoaderDialog((d, ngState) => {
-    loadDescriptorDirect(d);
-    // The "Paste NG state" tab passes back the original NG state so we
-    // can overlay the camera + selected segments on top of the freshly
-    // loaded descriptor. loadDescriptorDirect → applyDescriptor is
-    // fire-and-forget (awaits CSV ingest internally), so we defer past
-    // its synchronous viewer.loadDescriptor before applying.
+    // For the "Paste NG state" path, pass the parsed state straight to
+    // loadDescriptor as the override. NG's restoreState then sees the
+    // user's actual dimensions + position + selected segments in one
+    // shot, instead of the previous two-pass dance (descriptorToNgState
+    // first, applyNgState 200ms later) that conflated unit scales.
     if (ngState) {
-      setTimeout(() => {
-        try {
-          viewer.applyNgState(ngState);
-        } catch (err) {
-          console.error("Failed to apply NG state from loader:", err);
-        }
-      }, 200);
+      loadDescriptorDirect(d, ngState);
+      return;
     }
+    loadDescriptorDirect(d);
   });
 });
 

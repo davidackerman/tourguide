@@ -73,7 +73,7 @@ export class BundledViewer {
     return this.viewer;
   }
 
-  loadDescriptor(d: DatasetDescriptor): void {
+  loadDescriptor(d: DatasetDescriptor, ngStateOverride?: Record<string, unknown>): void {
     // restoreState replaces declared layers but NG keeps its in-memory
     // navigation state (camera position, zoom, layout) across the call.
     // That's why a dataset switch leaves the camera pointing at the
@@ -105,9 +105,22 @@ export class BundledViewer {
     // state — the descriptor's layer URLs are already in the hash anyway,
     // since the user copied from a tab on the same dataset.
     const viewer = this.ensureViewer();
+    const hashHasNgState = window.location.hash.startsWith("#!");
+    // When the caller passed an explicit ngStateOverride (paste-NG-state
+    // load path), use it directly. Doing both — first restoreState with
+    // descriptorToNgState (1nm/unit dimensions), then applyNgState with
+    // the user's state (e.g. 4nm/unit) — would race: NG processes the
+    // first state asynchronously and the second restoreState reading
+    // halfway-applied dimensions caused position values to be
+    // interpreted in the wrong unit, leaving the camera at the previous
+    // dataset's coordinates.
+    if (ngStateOverride) {
+      this.currentState = ngStateOverride as unknown as ReturnType<typeof descriptorToNgState>;
+      viewer.state.restoreState(ngStateOverride);
+      return;
+    }
     const state = descriptorToNgState(d);
     this.currentState = state;
-    const hashHasNgState = window.location.hash.startsWith("#!");
     if (!(isFirstMount && hashHasNgState)) {
       viewer.state.restoreState(state as unknown as Record<string, unknown>);
     }
