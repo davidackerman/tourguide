@@ -284,3 +284,72 @@ export function runQuery(db: Database, sql: string): QueryResult {
     stmt.free();
   }
 }
+
+// Persist an ad-hoc result table into the SQL DB. Used by both the
+// Custom Analysis dialog and the agent's python_on_layers tool when a
+// run sets _TG_TABLE — having both paths go through the same helper
+// keeps schema / type-inference behavior identical.
+export async function ingestTableIntoDB(
+  deps: { getDB: () => DatasetDB | null; setDB: (db: DatasetDB) => void },
+  tbl: { name: string; columns: string[]; rows: (number | string | null)[][] },
+): Promise<void> {
+  let db = deps.getDB();
+  if (!db) {
+    const SQL = await loadSqlJs();
+    db = { db: new SQL.Database(), tables: [] };
+    deps.setDB(db);
+  }
+  const tableName = tbl.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+  const types = inferTableTypes(tbl.columns, tbl.rows);
+  const colsDdl = tbl.columns.map((c) => `"${c}" ${types[c]}`).join(", ");
+  db.db.run(`DROP TABLE IF EXISTS "${tableName}";`);
+  db.db.run(`CREATE TABLE "${tableName}" (${colsDdl});`);
+  const placeholders = tbl.columns.map(() => "?").join(", ");
+  const colList = tbl.columns.map((c) => `"${c}"`).join(", ");
+  const stmt = db.db.prepare(`INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders});`);
+  db.db.run("BEGIN;");
+  try {
+    for (const row of tbl.rows) {
+      stmt.run(row.map((v) => (v === undefined ? null : v)));
+    }
+    db.db.run("COMMIT;");
+  } catch (e) {
+    db.db.run("ROLLBACK;");
+    throw e;
+  } finally {
+    stmt.free();
+  }
+  const entry: IngestedTable = {
+    table_name: tableName,
+    organelle_class: tableName,
+    layer_name: tableName,
+    row_count: tbl.rows.length,
+    columns: tbl.columns,
+  };
+  const existingIdx = db.tables.findIndex((t) => t.table_name === tableName);
+  if (existingIdx >= 0) db.tables[existingIdx] = entry;
+  else db.tables.push(entry);
+}
+
+function inferTableTypes(
+  columns: string[],
+  rows: (number | string | null)[][],
+): Record<string, "INTEGER" | "REAL" | "TEXT"> {
+  const out: Record<string, "INTEGER" | "REAL" | "TEXT"> = {};
+  columns.forEach((col, i) => {
+    let allInt = true;
+    let allNum = true;
+    for (const row of rows.slice(0, 200)) {
+      const v = row[i];
+      if (v === null || v === undefined) continue;
+      if (typeof v !== "number") {
+        allInt = false;
+        allNum = false;
+      } else if (!Number.isInteger(v)) {
+        allInt = false;
+      }
+    }
+    out[col] = allInt ? "INTEGER" : allNum ? "REAL" : "TEXT";
+  });
+  return out;
+}

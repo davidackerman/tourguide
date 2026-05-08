@@ -1,7 +1,7 @@
 import type { LLMBackend, LLMMessage } from "./llm.js";
 import { WebLLMBackend, GeminiBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
-import { runQuery } from "./db.js";
+import { ingestTableIntoDB, runQuery } from "./db.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { loadPyodide } from "./plot.js";
 import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
@@ -41,6 +41,10 @@ export interface AgentTurnSummary {
 
 export interface AgentContext {
   db: DatasetDB | null;
+  // Optional setter so python_on_layers can ingest a result table into
+  // the SQL DB (and have the next turn run_sql against it). When
+  // omitted the table is recorded in the trace but not persisted.
+  setDB?: (db: DatasetDB) => void;
   descriptor: DatasetDescriptor | null;
   viewer: BundledViewer;
   backend: LLMBackend;
@@ -85,15 +89,29 @@ const SCHEMA_GUIDE = (db: DatasetDB): string => {
   return `SQL tables (THIS is the truth — table and column names below are what actually exist; never invent or copy from examples):\n${tableLines}\n\nPython DataFrames:\n${dataframes}\n\nPre-extracted numpy arrays (USE THESE for spatial / scipy work — no need to convert from DataFrame):\n${numpy}`;
 };
 
+// Classify a source URL into a coarse kind. Includes mesh / skeleton
+// detection so multi-source layers (a segmentation that has all three:
+// volume + precomputed mesh + precomputed skeleton) surface them all.
+function sourceKind(url: string): string {
+  const m = url.match(/^(zarr2?|zarr3|n5|precomputed|graphene)/);
+  const proto = m?.[1] ?? "url";
+  // Path-based signals — common Janelia / cellmap convention is
+  // .../neuroglancer/mesh/... and .../neuroglancer/skeleton/... for
+  // the auxiliary precomputed sources attached to a segmentation.
+  if (/\/skeleton\b|\/skeletons?\//i.test(url)) return "precomputed-skeleton";
+  if (/\/mesh\b|\/meshes?\//i.test(url)) return "precomputed-mesh";
+  return proto;
+}
+
 const LAYER_GUIDE = (d: DatasetDescriptor): string => {
   if (d.layers.length === 0) return "No layers loaded.";
   const lines = d.layers.map((l) => {
     const sourceList = Array.isArray(l.source) ? l.source : [l.source];
-    const kind = sourceList[0]?.match(/^(zarr2?|zarr3|n5|precomputed|graphene)/)?.[1] ?? "url";
+    const kinds = sourceList.map(sourceKind).filter((k, i, a) => a.indexOf(k) === i);
     const cls = l.organelle_class ? ` class=${l.organelle_class}` : "";
-    return `  "${l.name}"  type=${l.type}  source=${kind}${cls}`;
+    return `  "${l.name}"  type=${l.type}  sources=${kinds.join("+")}${cls}`;
   });
-  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info):\n${lines.join("\n")}`;
+  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info). 'sources=zarr+precomputed-mesh+precomputed-skeleton' means the layer has all three views (volume, 3D meshes, skeletons) — segmentation analyses can use whichever is appropriate:\n${lines.join("\n")}`;
 };
 
 const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): string => `
@@ -628,7 +646,7 @@ async function execPythonOnLayers(
       (m) => ctx.callbacks.onProgress?.(m),
     );
 
-    return applyCustomResult(result, code, ctx);
+    return await applyCustomResult(result, code, ctx);
   } finally {
     client.terminate();
   }
@@ -638,11 +656,11 @@ async function execPythonOnLayers(
 // Mirrors what custom_analysis_ui's renderOutput does for layer-add
 // effects — keeps the two surfaces behaviourally consistent without
 // re-extracting the renderer in this commit.
-function applyCustomResult(
+async function applyCustomResult(
   result: CustomAnalysisResult,
   code: string,
   ctx: AgentContext,
-): { summary: string; produced: string[] } {
+): Promise<{ summary: string; produced: string[] }> {
   const produced: string[] = [];
 
   if (result.narration) {
@@ -696,13 +714,24 @@ function applyCustomResult(
     registerLayer(ctx.descriptor, { name, type, source });
     produced.push(`newLayer(${name}, ${shape.join("×")} ${dtype})`);
   }
-  // Tables emitted by python_on_layers aren't ingested into the SQL DB
-  // here — that requires the dialog's helpers (loadSqlJs + create/insert)
-  // and would expand this commit too far. The agent can still see the
-  // table data via stdout if it printed; raw ingestion lands with the
-  // shared renderer in Theme D.
+  // Tables emitted by python_on_layers go straight into the SQL DB
+  // when ctx.setDB is wired (it is, from query_ui). The next agent
+  // turn can run_sql against them — e.g. python_on_layers produces a
+  // table of mito sizes, then run_sql ORDER BY size DESC LIMIT 1.
   if (result.table) {
-    produced.push(`table(${result.table.name}, ${result.table.rows.length} rows; not ingested in this build)`);
+    if (ctx.setDB) {
+      try {
+        await ingestTableIntoDB(
+          { getDB: () => ctx.db, setDB: ctx.setDB },
+          result.table,
+        );
+        produced.push(`table(${result.table.name}, ${result.table.rows.length} rows; ingested)`);
+      } catch (err) {
+        produced.push(`table(${result.table.name}; ingest failed: ${(err as Error).message})`);
+      }
+    } else {
+      produced.push(`table(${result.table.name}, ${result.table.rows.length} rows; not ingested — no setDB)`);
+    }
   }
 
   const summary = produced.length > 0 ? `Produced: ${produced.join(", ")}` : "No output channels set.";
@@ -740,7 +769,10 @@ async function execDescribeDataset(
           name: l.name,
           type: l.type,
           organelle_class: l.organelle_class ?? null,
-          source_kind: sourceList[0]?.match(/^(zarr2?|zarr3|n5|precomputed|graphene)/)?.[1] ?? "url",
+          source_kinds: sourceList.map(sourceKind),
+          has_volume: sourceList.some((s) => /^(zarr2?|zarr3|n5|graphene)/.test(s) || /\.zarr(\/|$)/i.test(s) || /precomputed:\/\//.test(s)),
+          has_mesh: sourceList.some((s) => /\/mesh\b|\/meshes?\//i.test(s)),
+          has_skeleton: sourceList.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s)),
           inspectable: isZarrSource(l.source),
         };
       }),

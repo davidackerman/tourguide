@@ -7,6 +7,10 @@ import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 
 export interface QueryUIContext {
   getDB: () => DatasetDB | null;
+  // Optional: when set, python_on_layers tables are ingested into the
+  // SQL DB so the next agent turn can run_sql against them. Without
+  // this the agent only sees the table summary in its trace.
+  setDB?: (db: DatasetDB) => void;
   getDescriptor: () => DatasetDescriptor | null;
   getBackend: () => LLMBackend;
   viewer: BundledViewer;
@@ -520,6 +524,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     try {
       await runAgent(question, {
         db,
+        setDB: ctx.setDB,
         descriptor: ctx.getDescriptor(),
         viewer: ctx.viewer,
         backend,

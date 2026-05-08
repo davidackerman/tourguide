@@ -7,10 +7,9 @@
 // stats/regionprops flow is already a guided wizard, this one is more of an
 // REPL.
 
-import type { Database } from "sql.js";
 import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
-import type { DatasetDB, IngestedTable } from "./db.js";
-import { loadSqlJs, runQuery } from "./db.js";
+import type { DatasetDB } from "./db.js";
+import { ingestTableIntoDB, runQuery } from "./db.js";
 import {
   AnalysisClient,
   SAFE_INPUT_BYTES,
@@ -828,85 +827,7 @@ async function ingestCustomTable(
   cb: CustomAnalysisUICallbacks,
   tbl: { name: string; columns: string[]; rows: (number | string | null)[][] },
 ): Promise<void> {
-  let db = cb.getDB();
-  if (!db) {
-    const SQL = await loadSqlJs();
-    db = { db: new SQL.Database(), tables: [] };
-    cb.setDB(db);
-  }
-  const tableName = tbl.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-  const types = inferTypes(tbl.columns, tbl.rows);
-  createTable(db.db, tableName, types, tbl.columns);
-  insertRows(db.db, tableName, tbl.columns, tbl.rows);
-  const entry: IngestedTable = {
-    table_name: tableName,
-    organelle_class: tableName,
-    layer_name: tableName,
-    row_count: tbl.rows.length,
-    columns: tbl.columns,
-  };
-  const existingIdx = db.tables.findIndex((t) => t.table_name === tableName);
-  if (existingIdx >= 0) db.tables[existingIdx] = entry;
-  else db.tables.push(entry);
-}
-
-function inferTypes(
-  columns: string[],
-  rows: (number | string | null)[][],
-): Record<string, "INTEGER" | "REAL" | "TEXT"> {
-  const out: Record<string, "INTEGER" | "REAL" | "TEXT"> = {};
-  columns.forEach((col, i) => {
-    let allInt = true;
-    let allNum = true;
-    for (const row of rows.slice(0, 200)) {
-      const v = row[i];
-      if (v === null || v === undefined) continue;
-      if (typeof v !== "number") {
-        allInt = false;
-        allNum = false;
-      } else if (!Number.isInteger(v)) {
-        allInt = false;
-      }
-    }
-    out[col] = allInt ? "INTEGER" : allNum ? "REAL" : "TEXT";
-  });
-  return out;
-}
-
-function createTable(
-  db: Database,
-  tableName: string,
-  types: Record<string, "INTEGER" | "REAL" | "TEXT">,
-  columnOrder: string[],
-): void {
-  const cols = columnOrder.map((c) => `"${c}" ${types[c]}`).join(", ");
-  db.run(`DROP TABLE IF EXISTS "${tableName}";`);
-  db.run(`CREATE TABLE "${tableName}" (${cols});`);
-}
-
-function insertRows(
-  db: Database,
-  tableName: string,
-  columns: string[],
-  rows: (number | string | null)[][],
-): void {
-  const placeholders = columns.map(() => "?").join(", ");
-  const colList = columns.map((c) => `"${c}"`).join(", ");
-  const stmt = db.prepare(
-    `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders});`,
-  );
-  db.run("BEGIN;");
-  try {
-    for (const row of rows) {
-      stmt.run(row.map((v) => (v === undefined ? null : v)));
-    }
-    db.run("COMMIT;");
-  } catch (e) {
-    db.run("ROLLBACK;");
-    throw e;
-  } finally {
-    stmt.free();
-  }
+  await ingestTableIntoDB({ getDB: cb.getDB, setDB: cb.setDB }, tbl);
 }
 
 function humanBytes(n: number): string {

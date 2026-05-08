@@ -176,6 +176,12 @@ updateBackendIndicator();
 
 renderQueryBox(queryHost, {
   getDB: () => currentDB,
+  setDB: (db) => {
+    currentDB = db;
+    if (browserHost && currentDB.tables.length > 0) {
+      void renderStructuredBrowser(browserHost, { db: currentDB, viewer });
+    }
+  },
   getDescriptor: () => currentDescriptor,
   getBackend: () => backend,
   viewer,
