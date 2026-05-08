@@ -3,6 +3,9 @@ import {
   saveSettings,
   backendFromSettings,
   GeminiBackend,
+  AnthropicBackend,
+  OpenAICompatibleBackend,
+  OPENAI_COMPATIBLE_PRESETS,
   WebLLMBackend,
   WEBLLM_MODELS,
   webllmModelLabel,
@@ -12,6 +15,7 @@ import {
   listGeminiModels,
   type Settings,
   type LLMBackend,
+  type LLMProvider,
   type GeminiModelInfo,
 } from "./llm.js";
 
@@ -104,14 +108,27 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <button class="modal-close" aria-label="Close">×</button>
       </header>
       <div class="modal-body">
-        <h3>AI backend</h3>
-        <p class="hint">AI unlocks plain-English queries and auto-generated plot / analysis code. Gemini is the recommended path — paste a free key and you're done.</p>
+        <h3>Cloud LLM</h3>
+        <p class="hint">AI unlocks plain-English queries and auto-generated plot / analysis code. Gemini's free tier is the easiest start, but any provider's API key works.</p>
 
-        <div class="settings-section" data-section="gemini">
-          <label class="radio-row gemini-default-row">
-            <input type="radio" name="backend" value="gemini" ${current.backend === "gemini" ? "checked" : ""}>
-            <span><strong>Gemini (cloud)</strong> — paste your API key below</span>
-          </label>
+        <label>
+          Provider
+          <select data-field="provider">
+            <option value="gemini" ${current.backend === "gemini" ? "selected" : ""}>Gemini (recommended free tier)</option>
+            <option value="anthropic" ${current.backend === "anthropic" ? "selected" : ""}>Anthropic Claude</option>
+            <option value="openai" ${current.backend === "openai" ? "selected" : ""}>OpenAI</option>
+            <option value="openrouter" ${current.backend === "openrouter" ? "selected" : ""}>OpenRouter (one key for Claude/Gemini/Llama/…)</option>
+            <option value="xai" ${current.backend === "xai" ? "selected" : ""}>xAI Grok</option>
+            <option value="openai_compatible" ${current.backend === "openai_compatible" ? "selected" : ""}>Local / custom (OpenAI-compatible)</option>
+            <option value="none" ${current.backend === "none" ? "selected" : ""}>None — disables the agent</option>
+          </select>
+        </label>
+
+        <!-- Per-provider sections. Visibility is driven by the
+             dropdown above; values persist independently in
+             localStorage so swapping providers doesn't lose what
+             you typed. -->
+        <div class="provider-section" data-provider-section="gemini" ${current.backend === "gemini" ? "" : "hidden"}>
           <label>
             Gemini API key
             <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/app/apikey" autocomplete="off" />
@@ -120,32 +137,106 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             Gemini model
             <select data-field="geminiModel">${renderGeminiModelOptions(current.geminiModel)}</select>
           </label>
-          <p class="hint">Key is stored in your browser's localStorage only. As of 2026-05-07, <code>gemini-3.1-flash-lite-preview</code> had the most generous free tier (15 RPM · 500 req/day) — quotas change, see <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">your dashboard</a>.</p>
+          <p class="hint">As of 2026-05-07, <code>gemini-3.1-flash-lite-preview</code> had the most generous free tier (15 RPM · 500 req/day) — quotas change, see <a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">your dashboard</a>.</p>
           <button class="btn-secondary" data-action="test-gemini">Test key</button>
-          <span class="test-result" data-test-result></span>
+          <span class="test-result" data-test-result-gemini></span>
         </div>
+
+        <div class="provider-section" data-provider-section="anthropic" ${current.backend === "anthropic" ? "" : "hidden"}>
+          <label>
+            Anthropic API key
+            <input type="password" data-field="anthropicApiKey" value="${escapeAttr(current.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
+          </label>
+          <label>
+            Claude model
+            <input type="text" data-field="anthropicModel" value="${escapeAttr(current.anthropicModel || "claude-sonnet-4.6")}" placeholder="claude-sonnet-4.6" />
+          </label>
+          <p class="hint">Hits api.anthropic.com directly using <code>anthropic-dangerous-direct-browser-access</code>. Common model ids: <code>claude-sonnet-4.6</code>, <code>claude-opus-4.7</code>, <code>claude-haiku-4.5</code>.</p>
+          <button class="btn-secondary" data-action="test-anthropic">Test key</button>
+          <span class="test-result" data-test-result-anthropic></span>
+        </div>
+
+        <div class="provider-section" data-provider-section="openai" ${current.backend === "openai" ? "" : "hidden"}>
+          <label>
+            OpenAI API key
+            <input type="password" data-field="openaiApiKey-openai" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
+          </label>
+          <label>
+            Model
+            <input type="text" data-field="openaiModel-openai" value="${escapeAttr(current.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openai.placeholderModel}" />
+          </label>
+          <p class="hint">Hits <code>${OPENAI_COMPATIBLE_PRESETS.openai.url}/chat/completions</code>. Get a key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a>.</p>
+          <button class="btn-secondary" data-action="test-oai">Test key</button>
+          <span class="test-result" data-test-result-oai></span>
+        </div>
+
+        <div class="provider-section" data-provider-section="openrouter" ${current.backend === "openrouter" ? "" : "hidden"}>
+          <label>
+            OpenRouter API key
+            <input type="password" data-field="openaiApiKey-openrouter" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
+          </label>
+          <label>
+            Model
+            <input type="text" data-field="openaiModel-openrouter" value="${escapeAttr(current.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openrouter.placeholderModel}" />
+          </label>
+          <p class="hint">One key for Claude / Gemini / Llama / etc. Browse models at <a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a>. Hits <code>${OPENAI_COMPATIBLE_PRESETS.openrouter.url}/chat/completions</code>.</p>
+          <button class="btn-secondary" data-action="test-oai">Test key</button>
+          <span class="test-result" data-test-result-oai></span>
+        </div>
+
+        <div class="provider-section" data-provider-section="xai" ${current.backend === "xai" ? "" : "hidden"}>
+          <label>
+            xAI API key
+            <input type="password" data-field="openaiApiKey-xai" value="${escapeAttr(current.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
+          </label>
+          <label>
+            Model
+            <input type="text" data-field="openaiModel-xai" value="${escapeAttr(current.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.xai.placeholderModel}" />
+          </label>
+          <p class="hint">Hits <code>${OPENAI_COMPATIBLE_PRESETS.xai.url}/chat/completions</code>. Get a key at <a href="https://console.x.ai" target="_blank" rel="noopener">console.x.ai</a>.</p>
+          <button class="btn-secondary" data-action="test-oai">Test key</button>
+          <span class="test-result" data-test-result-oai></span>
+        </div>
+
+        <div class="provider-section" data-provider-section="openai_compatible" ${current.backend === "openai_compatible" ? "" : "hidden"}>
+          <label>
+            Base URL
+            <input type="text" data-field="openaiBaseUrl" value="${escapeAttr(current.openaiBaseUrl)}" placeholder="http://localhost:11434/v1" />
+          </label>
+          <label>
+            API key (optional for local servers)
+            <input type="password" data-field="openaiApiKey-custom" value="${escapeAttr(current.openaiApiKey)}" autocomplete="off" />
+          </label>
+          <label>
+            Model
+            <input type="text" data-field="openaiModel-custom" value="${escapeAttr(current.openaiModel)}" placeholder="llama3.2" />
+          </label>
+          <p class="hint">For Ollama (<code>http://localhost:11434/v1</code>), vLLM, LM Studio, llama.cpp server, or any other endpoint that speaks OpenAI's <code>/chat/completions</code>. Local URLs skip the auth check.</p>
+          <button class="btn-secondary" data-action="test-oai">Test connection</button>
+          <span class="test-result" data-test-result-oai></span>
+        </div>
+
+        <div class="provider-section" data-provider-section="none" ${current.backend === "none" ? "" : "hidden"}>
+          <p class="hint">Agent disabled. The structured browser still works for ingested CSVs.</p>
+        </div>
+
+        <p class="hint storage-note">🔒 Your API key is stored in your browser's localStorage only — Tourguide's frontend is static-hosted, it never touches a server we control. The key is sent directly to the provider you picked.</p>
 
         <details class="settings-advanced">
           <summary>Advanced — local WebLLM, analysis backend, model refresh</summary>
 
-          <h4>Other AI backends</h4>
-          <div class="radio-group">
-            <label class="radio-row">
-              <input type="radio" name="backend" value="none" ${current.backend === "none" ? "checked" : ""}>
-              <span><strong>None</strong> — structured browser only (disables the agent)</span>
-            </label>
-            <label class="radio-row">
-              <input type="radio" name="backend" value="webllm" ${current.backend === "webllm" ? "checked" : ""} ${webgpu ? "" : "disabled"}>
-              <span><strong>WebLLM (in-browser)</strong> — runs locally, no key ${webgpu ? "" : "<em>(needs WebGPU — Chrome/Edge/Safari 18+)</em>"}</span>
-            </label>
-          </div>
-
+          <h4>WebLLM (in-browser, no API key)</h4>
           <div class="settings-section" data-section="webllm">
+            <p class="hint">Use WebLLM to run a small LLM entirely in your browser via WebGPU. ${webgpu ? "" : "<em>(needs WebGPU — Chrome / Edge / Safari 18+.)</em>"} Set Provider to "None" above and toggle this on instead — picking it here overrides the cloud Provider selection on Save.</p>
+            <label class="radio-row">
+              <input type="checkbox" data-field="useWebllm" ${current.backend === "webllm" ? "checked" : ""} ${webgpu ? "" : "disabled"}>
+              <span>Use WebLLM instead of a cloud provider</span>
+            </label>
             <label>
               WebLLM model
               <select data-field="webllmModel">${webllmOptions}</select>
             </label>
-            <p class="hint">Listed best-for-agent first — top entries handle multi-step SQL + Python reliably; lower entries are smaller / less code-tuned. Model downloads to your browser cache on first use.</p>
+            <p class="hint">Listed best-for-agent first. Top entries handle multi-step SQL + Python reliably; lower entries are smaller / less code-tuned. Model downloads to your browser cache on first use.</p>
             <div class="webgpu-diagnosis" data-webgpu-diagnosis>Checking WebGPU…</div>
             <button class="btn-secondary" data-action="test-webllm">Load now (optional)</button>
             <span class="test-result" data-webllm-result></span>
@@ -237,9 +328,54 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
     const el = overlay.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-field="${f}"]`);
     return el?.value ?? "";
   };
-  const backendValue = (): Settings["backend"] => {
-    const el = overlay.querySelector<HTMLInputElement>(`input[name="backend"]:checked`);
-    return (el?.value as Settings["backend"]) ?? "none";
+  // Provider dropdown drives which provider section is visible.
+  // Each provider section's inputs persist independently via Save —
+  // switching providers doesn't clear what you've typed in the
+  // others. WebLLM has its own checkbox inside Advanced that
+  // overrides the provider dropdown if checked.
+  const providerSelect = overlay.querySelector<HTMLSelectElement>(`[data-field="provider"]`)!;
+  const providerSections = overlay.querySelectorAll<HTMLDivElement>(`[data-provider-section]`);
+  const showProviderSection = (provider: string): void => {
+    providerSections.forEach((sec) => {
+      sec.hidden = sec.getAttribute("data-provider-section") !== provider;
+    });
+  };
+  providerSelect.addEventListener("change", () => showProviderSection(providerSelect.value));
+
+  // The OpenAI-compatible group (openai / openrouter / xai / custom)
+  // shares one stored API key + model under the hood — just shown
+  // through different placeholders / labels per provider. We keep the
+  // four input nodes in lockstep so the user typing the OpenRouter
+  // key while on the OpenRouter section also updates what they'd see
+  // if they switched to the OpenAI section. Same for model.
+  const oaiKeyInputs = overlay.querySelectorAll<HTMLInputElement>(
+    `input[data-field^="openaiApiKey-"]`,
+  );
+  const oaiModelInputs = overlay.querySelectorAll<HTMLInputElement>(
+    `input[data-field^="openaiModel-"]`,
+  );
+  const syncSiblings = (src: HTMLInputElement, group: NodeListOf<HTMLInputElement>): void => {
+    group.forEach((el) => {
+      if (el !== src) el.value = src.value;
+    });
+  };
+  oaiKeyInputs.forEach((el) =>
+    el.addEventListener("input", () => syncSiblings(el, oaiKeyInputs)),
+  );
+  oaiModelInputs.forEach((el) =>
+    el.addEventListener("input", () => syncSiblings(el, oaiModelInputs)),
+  );
+  // Helper: read whichever shared OpenAI-compatible field is currently
+  // visible (they all hold the same value after sync, so any non-empty
+  // one works — but pick the one matching the active provider for
+  // cleanliness).
+  const getOaiKey = (): string => {
+    const live = overlay.querySelector<HTMLInputElement>(`input[data-field^="openaiApiKey-"]`);
+    return live?.value ?? "";
+  };
+  const getOaiModel = (): string => {
+    const live = overlay.querySelector<HTMLInputElement>(`input[data-field^="openaiModel-"]`);
+    return live?.value ?? "";
   };
 
   // Refresh-models button: list the user's available Gemini models via
@@ -292,29 +428,96 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
     }
   });
 
-  const testBtn = overlay.querySelector<HTMLButtonElement>("[data-action='test-gemini']")!;
-  const testResult = overlay.querySelector<HTMLSpanElement>("[data-test-result]")!;
-  testBtn.addEventListener("click", async () => {
-    const key = get("geminiApiKey").trim();
-    if (!key) {
-      testResult.textContent = "Paste a key first";
-      testResult.className = "test-result err";
-      return;
-    }
-    testResult.textContent = "Testing…";
-    testResult.className = "test-result pending";
-    testBtn.disabled = true;
-    try {
-      const backend = new GeminiBackend(key, get("geminiModel"));
-      await backend.validate();
-      testResult.textContent = "OK";
-      testResult.className = "test-result ok";
-    } catch (err) {
-      testResult.textContent = (err as Error).message.slice(0, 120);
-      testResult.className = "test-result err";
-    } finally {
-      testBtn.disabled = false;
-    }
+  // Test buttons — one per provider section. Each runs validate() on
+  // a freshly-constructed backend with the key/model from its own
+  // section, so the user gets feedback specific to where they're
+  // typing.
+  const wireTestButton = (
+    selector: string,
+    resultSelector: string,
+    build: () => { backend: { validate(): Promise<void> } | null; emptyMsg: string },
+  ): void => {
+    const btn = overlay.querySelector<HTMLButtonElement>(selector);
+    const out = overlay.querySelector<HTMLSpanElement>(resultSelector);
+    if (!btn || !out) return;
+    btn.addEventListener("click", async () => {
+      const { backend, emptyMsg } = build();
+      if (!backend) {
+        out.textContent = emptyMsg;
+        out.className = "test-result err";
+        return;
+      }
+      out.textContent = "Testing…";
+      out.className = "test-result pending";
+      btn.disabled = true;
+      try {
+        await backend.validate();
+        out.textContent = "OK";
+        out.className = "test-result ok";
+      } catch (err) {
+        out.textContent = (err as Error).message.slice(0, 200);
+        out.className = "test-result err";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  };
+  wireTestButton(
+    "[data-action='test-gemini']",
+    "[data-test-result-gemini]",
+    () => {
+      const key = get("geminiApiKey").trim();
+      if (!key) return { backend: null, emptyMsg: "Paste a key first" };
+      return { backend: new GeminiBackend(key, get("geminiModel")), emptyMsg: "" };
+    },
+  );
+  wireTestButton(
+    "[data-action='test-anthropic']",
+    "[data-test-result-anthropic]",
+    () => {
+      const key = get("anthropicApiKey").trim();
+      if (!key) return { backend: null, emptyMsg: "Paste a key first" };
+      return { backend: new AnthropicBackend(key, get("anthropicModel") || "claude-sonnet-4.6"), emptyMsg: "" };
+    },
+  );
+  // OAI-compatible group: one Test button per provider section, all
+  // hooked to the same builder (they share state).
+  overlay.querySelectorAll<HTMLButtonElement>("[data-action='test-oai']").forEach((btn) => {
+    const out = btn.parentElement?.querySelector<HTMLSpanElement>("[data-test-result-oai]");
+    if (!out) return;
+    btn.addEventListener("click", async () => {
+      const provider = providerSelect.value;
+      const baseUrl =
+        provider === "openai_compatible"
+          ? get("openaiBaseUrl").trim()
+          : OPENAI_COMPATIBLE_PRESETS[provider]?.url ?? "";
+      const key = getOaiKey().trim();
+      const model = getOaiModel().trim();
+      if (!baseUrl) {
+        out.textContent = "Base URL is empty";
+        out.className = "test-result err";
+        return;
+      }
+      if (!model) {
+        out.textContent = "Model is empty";
+        out.className = "test-result err";
+        return;
+      }
+      out.textContent = "Testing…";
+      out.className = "test-result pending";
+      btn.disabled = true;
+      try {
+        const backend = new OpenAICompatibleBackend(baseUrl, key, model);
+        await backend.validate();
+        out.textContent = "OK";
+        out.className = "test-result ok";
+      } catch (err) {
+        out.textContent = (err as Error).message.slice(0, 200);
+        out.className = "test-result err";
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
 
   const testAnalysisBtn = overlay.querySelector<HTMLButtonElement>("[data-action='test-analysis-backend']")!;
@@ -370,7 +573,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   const webllmProgressFill = overlay.querySelector<HTMLDivElement>("[data-webllm-progress-fill]")!;
   const webgpuDiagEl = overlay.querySelector<HTMLDivElement>("[data-webgpu-diagnosis]")!;
 
-  const webllmRadio = overlay.querySelector<HTMLInputElement>(`input[name="backend"][value="webllm"]`)!;
+  const webllmCheckbox = overlay.querySelector<HTMLInputElement>(`input[data-field="useWebllm"]`)!;
 
   void (async () => {
     const d = await diagnoseWebGPU();
@@ -380,7 +583,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         ? "shader-f16 supported — any model works."
         : "shader-f16 NOT supported on this GPU — pick a <code>f32</code> model variant from the dropdown (f16 ones will fail to load).";
       webgpuDiagEl.innerHTML = `<div>✓ WebGPU available</div><div>${f16Note}</div>`;
-      webllmRadio.disabled = false;
+      webllmCheckbox.disabled = false;
       testWebLLMBtn.disabled = false;
     } else {
       webgpuDiagEl.className = "webgpu-diagnosis err";
@@ -388,7 +591,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       if (d.detail) lines.push(d.detail);
       if (d.fixHint) lines.push(`<strong>Fix:</strong> ${d.fixHint}`);
       webgpuDiagEl.innerHTML = lines.map((l) => `<div>${l}</div>`).join("");
-      webllmRadio.disabled = true;
+      webllmCheckbox.disabled = true;
       testWebLLMBtn.disabled = true;
     }
   })();
@@ -419,10 +622,26 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
   });
 
   overlay.querySelector("[data-action='save']")!.addEventListener("click", () => {
+    // The visible Provider dropdown is the source of truth UNLESS
+    // the WebLLM checkbox is on (in which case backend = "webllm"
+    // overrides whatever cloud provider was picked).
+    const cloudProvider = providerSelect.value as LLMProvider;
+    const useWebllm = webllmCheckbox.checked;
+    const backend: LLMProvider = useWebllm ? "webllm" : cloudProvider;
+    // Preserve the openai_compatible base URL the user typed; for the
+    // preset providers (openai/openrouter/xai), the base URL comes
+    // from OPENAI_COMPATIBLE_PRESETS — but we still store any
+    // user-typed URL so switching back to "openai_compatible" later
+    // re-shows it.
     const next: Settings = {
-      backend: backendValue(),
+      backend,
       geminiApiKey: get("geminiApiKey").trim(),
       geminiModel: get("geminiModel") || "gemini-2.5-flash",
+      anthropicApiKey: get("anthropicApiKey").trim(),
+      anthropicModel: get("anthropicModel").trim() || "claude-sonnet-4.6",
+      openaiApiKey: getOaiKey().trim(),
+      openaiModel: getOaiModel().trim(),
+      openaiBaseUrl: get("openaiBaseUrl").trim(),
       webllmModel: get("webllmModel") || WEBLLM_MODELS[0].id,
       analysisBackendUrl: get("analysisBackendUrl").trim(),
     };

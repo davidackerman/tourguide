@@ -1036,6 +1036,30 @@ button {
   background: var(--bg);
 }
 
+/* Per-provider input block, swapped in/out by the Cloud LLM provider
+   dropdown. Same styling as .settings-section so the form looks
+   consistent regardless of which provider is selected. */
+.provider-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  margin-top: 0.5rem;
+}
+.provider-section[hidden] { display: none; }
+
+.storage-note {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
 .test-result {
   font-size: 0.8rem;
   margin-left: 0.5rem;

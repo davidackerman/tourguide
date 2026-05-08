@@ -478,6 +478,358 @@ export class GeminiBackend implements LLMBackend {
   }
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI-compatible backend
+// ---------------------------------------------------------------------------
+// Speaks the OpenAI chat-completions API at any baseUrl. Covers OpenAI
+// itself, xAI Grok, OpenRouter, Together, Groq (the chip company),
+// Fireworks, DeepInfra, Mistral, and any local server (Ollama / vLLM /
+// LM Studio / llama.cpp) that exposes the same endpoint.
+//
+// What's deliberately not abstracted away:
+//   - jsonMode → response_format: { type: "json_object" } (OpenAI's
+//     own param; OpenRouter passes through; older / smaller local
+//     servers might ignore it, in which case the agent's prompt
+//     "respond with a single JSON object" still works.)
+//   - signal wired to fetch + the wait-for-retry sleep.
+//   - 5xx retry: same exponential backoff (1/2/4s) GeminiBackend uses.
+export class OpenAICompatibleBackend implements LLMBackend {
+  id = "openai_compatible";
+  name = "OpenAI-compatible (cloud / local)";
+  private baseUrl: string;
+  private apiKey: string;
+  private model: string;
+
+  constructor(baseUrl: string, apiKey: string, model: string) {
+    this.baseUrl = baseUrl.replace(/\/$/, ""); // tolerate trailing slash
+    this.apiKey = apiKey;
+    this.model = model;
+  }
+
+  isReady(): boolean {
+    // Local endpoints (localhost / 127.0.0.1 / file scheme) commonly
+    // skip auth — accept those without a key. Cloud endpoints need
+    // a key.
+    if (!this.baseUrl) return false;
+    if (this.apiKey) return true;
+    return isLocalUrl(this.baseUrl);
+  }
+
+  static requestCount = 0;
+
+  async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
+    const useStream = !!options.onToken;
+    const url = `${this.baseUrl}/chat/completions`;
+    // OpenAI uses the standard {role, content} message shape directly —
+    // system messages stay as role:"system" (unlike Anthropic / Gemini).
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: options.temperature ?? 0.1,
+      max_tokens: options.maxTokens ?? 1024,
+      stream: useStream,
+    };
+    if (options.jsonMode) body.response_format = { type: "json_object" };
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
+
+    OpenAICompatibleBackend.requestCount += 1;
+    let res = await this.doFetch(url, headers, body, options.signal);
+
+    // Retry on 5xx (model overloaded / transient gateway errors). The
+    // backoff is the same shape Gemini uses for 503; we deliberately
+    // don't retry 4xx (bad request, auth, quota) — those won't get
+    // better with another try.
+    let retries5xx = 0;
+    while (res.status >= 500 && res.status < 600 && retries5xx < 3) {
+      const waitMs = 1000 * 2 ** retries5xx;
+      retries5xx += 1;
+      options.onToken?.("", `${this.providerLabel()} returned ${res.status}; retrying in ${waitMs / 1000}s (attempt ${retries5xx}/3)…`);
+      await waitWithSignal(waitMs, options.signal);
+      OpenAICompatibleBackend.requestCount += 1;
+      res = await this.doFetch(url, headers, body, options.signal);
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${this.providerLabel()} API error ${res.status}: ${text.slice(0, 400)}`);
+    }
+
+    if (!useStream) {
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const text = data.choices?.[0]?.message?.content ?? "";
+      if (!text) throw new Error(`${this.providerLabel()} returned empty response`);
+      return text;
+    }
+
+    // SSE stream parse — same {data: {...}\n\n} envelope as Gemini.
+    // OpenAI emits `data: [DONE]` to mark the end of the stream;
+    // ignore it.
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error(`${this.providerLabel()} stream missing body`);
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let accumulated = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const json = line.slice(6).trim();
+        if (!json || json === "[DONE]") continue;
+        try {
+          const chunk = JSON.parse(json) as {
+            choices?: Array<{ delta?: { content?: string } }>;
+          };
+          const t = chunk.choices?.[0]?.delta?.content ?? "";
+          if (t) {
+            accumulated += t;
+            options.onToken?.(t, accumulated);
+          }
+        } catch {
+          // partial / malformed line — keep streaming
+        }
+      }
+    }
+    if (!accumulated) throw new Error(`${this.providerLabel()} returned empty stream`);
+    return accumulated;
+  }
+
+  // Reads the host portion of the configured base URL so error
+  // messages name the actual provider ("OpenRouter API error 401"
+  // instead of "OpenAI-compatible API error 401" for an OpenRouter
+  // request — clearer when the user has multiple providers configured).
+  private providerLabel(): string {
+    try {
+      const host = new URL(this.baseUrl).host;
+      if (host.includes("openrouter")) return "OpenRouter";
+      if (host.includes("openai")) return "OpenAI";
+      if (host.includes("x.ai")) return "xAI";
+      if (host.includes("groq.com")) return "Groq";
+      if (host.includes("together.ai")) return "Together";
+      if (host.includes("fireworks")) return "Fireworks";
+      if (host.includes("mistral")) return "Mistral";
+      if (host.includes("localhost") || host.startsWith("127.")) return "Local LLM server";
+      return host;
+    } catch {
+      return "OpenAI-compatible";
+    }
+  }
+
+  private async doFetch(
+    url: string,
+    headers: Record<string, string>,
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    return await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async validate(): Promise<void> {
+    await this.complete(
+      [{ role: "user", content: "Reply with only the word: ok" }],
+      { maxTokens: 64 },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic Claude (native API)
+// ---------------------------------------------------------------------------
+// Hits api.anthropic.com/v1/messages directly. Different from
+// OpenAI-compatible:
+//   - system is a top-level field, NOT a role:"system" message
+//   - x-api-key header (not Authorization: Bearer)
+//   - anthropic-dangerous-direct-browser-access: true (Anthropic's
+//     opt-in for client-side requests; without this they reject CORS)
+//   - SSE envelope is content_block_delta events with .delta.text
+//   - no response_format param — agent's prompt already says
+//     "respond with a single JSON object" so it works fine
+export class AnthropicBackend implements LLMBackend {
+  id = "anthropic";
+  name = "Anthropic Claude";
+  private apiKey: string;
+  private model: string;
+
+  constructor(apiKey: string, model = "claude-sonnet-4.6") {
+    this.apiKey = apiKey;
+    this.model = model;
+  }
+
+  isReady(): boolean {
+    return this.apiKey.length > 0;
+  }
+
+  static requestCount = 0;
+
+  async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
+    const useStream = !!options.onToken;
+    const url = `https://api.anthropic.com/v1/messages`;
+    // Pull system messages OUT into a top-level field; flatten user+
+    // assistant into the messages array. Anthropic's API rejects
+    // role:"system" inside messages, so this transform is required.
+    const systemParts: string[] = [];
+    const apiMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
+    for (const m of messages) {
+      if (m.role === "system") {
+        systemParts.push(m.content);
+      } else {
+        apiMessages.push({ role: m.role, content: m.content });
+      }
+    }
+    const body: Record<string, unknown> = {
+      model: this.model,
+      max_tokens: options.maxTokens ?? 1024,
+      messages: apiMessages,
+      stream: useStream,
+      temperature: options.temperature ?? 0.1,
+    };
+    if (systemParts.length > 0) body.system = systemParts.join("\n\n");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-api-key": this.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    };
+
+    AnthropicBackend.requestCount += 1;
+    let res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+
+    let retries5xx = 0;
+    while (res.status >= 500 && res.status < 600 && retries5xx < 3) {
+      const waitMs = 1000 * 2 ** retries5xx;
+      retries5xx += 1;
+      options.onToken?.("", `Anthropic returned ${res.status}; retrying in ${waitMs / 1000}s (attempt ${retries5xx}/3)…`);
+      await waitWithSignal(waitMs, options.signal);
+      AnthropicBackend.requestCount += 1;
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Anthropic API error ${res.status}: ${text.slice(0, 400)}`);
+    }
+
+    if (!useStream) {
+      const data = (await res.json()) as {
+        content?: Array<{ type?: string; text?: string }>;
+      };
+      const text = (data.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("");
+      if (!text) throw new Error("Anthropic returned empty response");
+      return text;
+    }
+
+    // Anthropic SSE: events of various types arrive as
+    //   event: content_block_delta
+    //   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+    // We only care about content_block_delta events with a text_delta.
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("Anthropic stream missing body");
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let accumulated = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const json = line.slice(6).trim();
+        if (!json) continue;
+        try {
+          const chunk = JSON.parse(json) as {
+            type?: string;
+            delta?: { type?: string; text?: string };
+          };
+          if (chunk.type === "content_block_delta" && chunk.delta?.type === "text_delta") {
+            const t = chunk.delta.text ?? "";
+            if (t) {
+              accumulated += t;
+              options.onToken?.(t, accumulated);
+            }
+          }
+        } catch {
+          // partial / malformed line — keep streaming
+        }
+      }
+    }
+    if (!accumulated) throw new Error("Anthropic returned empty stream");
+    return accumulated;
+  }
+
+  async validate(): Promise<void> {
+    await this.complete(
+      [{ role: "user", content: "Reply with only the word: ok" }],
+      { maxTokens: 64 },
+    );
+  }
+}
+
+// Shared sleep that respects the agent's abort signal — used by
+// retry/backoff paths in all backends. Without this, an abort during
+// the wait would silently complete and fire the next attempt anyway.
+function waitWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("aborted", "AbortError"));
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        clearTimeout(t);
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    }
+  });
+}
+
+// True for URLs the user is running on their own machine — local
+// servers commonly skip auth, so isReady() can return true even with
+// an empty API key.
+function isLocalUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.hostname === "localhost" ||
+      u.hostname === "127.0.0.1" ||
+      u.hostname === "[::1]" ||
+      u.hostname.endsWith(".local")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export interface GeminiModelInfo {
   // Model ID for the API path: 'models/<id>'. Strip the 'models/' prefix
   // before passing to GeminiBackend's constructor.
@@ -600,15 +952,65 @@ function formatQuotaError(status: number, body: string, delaySec?: number): stri
 
 const LS_KEY = "tourguide.settings.v1";
 
+// LLM provider selection. The four "openai*" values all use
+// OpenAICompatibleBackend under the hood — they differ only in which
+// base URL is locked in (presets or user-supplied). Splitting them at
+// the type level lets the Settings UI radio-style remember "I'm using
+// OpenRouter" vs "I'm using OpenAI" even though they share one key
+// field, one model field, and one URL field.
+export type LLMProvider =
+  | "none"
+  | "gemini"
+  | "anthropic"
+  | "openai"
+  | "openrouter"
+  | "xai"
+  | "openai_compatible"
+  | "webllm";
+
 export interface Settings {
-  backend: "none" | "gemini" | "webllm";
+  backend: LLMProvider;
   geminiApiKey: string;
   geminiModel: string;
+  // Native Anthropic Claude — direct to api.anthropic.com.
+  anthropicApiKey: string;
+  anthropicModel: string;
+  // OpenAI-compatible. Shared across openai / openrouter / xai /
+  // openai_compatible — only one of those is the live backend at a
+  // time, picked via `backend`. The base URL is set by the preset
+  // (OpenAI / OpenRouter / xAI) and editable when backend is
+  // openai_compatible (the user supplies their own URL for local
+  // Ollama / vLLM / LM Studio / etc).
+  openaiApiKey: string;
+  openaiModel: string;
+  openaiBaseUrl: string;
   webllmModel: string;
   // Optional HF-Space analysis backend (see hf-space/app.py). Empty string
   // disables the remote path — everything still works via Pyodide.
   analysisBackendUrl: string;
 }
+
+// Provider → preset URL. Used by the Settings UI to auto-fill
+// openaiBaseUrl when the user picks one of the locked-URL providers.
+// `openai_compatible` is intentionally absent — that's the "Custom"
+// option where the user types their own URL.
+export const OPENAI_COMPATIBLE_PRESETS: Record<string, { url: string; placeholderModel: string; label: string }> = {
+  openai: {
+    url: "https://api.openai.com/v1",
+    placeholderModel: "gpt-5",
+    label: "OpenAI",
+  },
+  openrouter: {
+    url: "https://openrouter.ai/api/v1",
+    placeholderModel: "anthropic/claude-sonnet-4.6",
+    label: "OpenRouter (one key for Claude/Gemini/Llama/...)",
+  },
+  xai: {
+    url: "https://api.x.ai/v1",
+    placeholderModel: "grok-4",
+    label: "xAI Grok",
+  },
+};
 
 // Shared tourguide analysis Space. Each user who wants isolated compute can
 // duplicate this to their own HF account and paste the new URL into Settings
@@ -619,9 +1021,8 @@ const DEFAULT_SETTINGS: Settings = {
   // Gemini is the recommended path — works without setup beyond
   // pasting an API key. Selecting it as the default doesn't enable AI
   // on its own (backendFromSettings still returns NullBackend until
-  // the key is set), but it pre-checks the radio so the Settings
-  // dialog surfaces the key field directly instead of forcing a click
-  // through "None".
+  // the key is set), but it pre-checks the dropdown so the Settings
+  // dialog surfaces the key field directly.
   backend: "gemini",
   geminiApiKey: "",
   // 2026-05-07: 3.1-flash-lite-preview had the most generous free
@@ -629,6 +1030,11 @@ const DEFAULT_SETTINGS: Settings = {
   // Users can switch via Settings → Refresh once Google moves the
   // generous limits elsewhere.
   geminiModel: "gemini-3.1-flash-lite-preview",
+  anthropicApiKey: "",
+  anthropicModel: "claude-sonnet-4.6",
+  openaiApiKey: "",
+  openaiModel: "",
+  openaiBaseUrl: "",
   webllmModel: WEBLLM_MODELS[0].id,
   analysisBackendUrl: DEFAULT_ANALYSIS_BACKEND,
 };
@@ -651,6 +1057,28 @@ export function saveSettings(s: Settings): void {
 export function backendFromSettings(s: Settings): LLMBackend {
   if (s.backend === "gemini" && s.geminiApiKey) {
     return new GeminiBackend(s.geminiApiKey, s.geminiModel);
+  }
+  if (s.backend === "anthropic" && s.anthropicApiKey) {
+    return new AnthropicBackend(s.anthropicApiKey, s.anthropicModel);
+  }
+  // OpenAI-compatible group — preset providers (openai / openrouter /
+  // xai) all use the URL from OPENAI_COMPATIBLE_PRESETS rather than
+  // whatever's stored in settings, so a stale URL from a previous
+  // selection can't leak across providers. The "openai_compatible"
+  // catch-all uses the user-supplied URL directly.
+  if (
+    s.backend === "openai" ||
+    s.backend === "openrouter" ||
+    s.backend === "xai" ||
+    s.backend === "openai_compatible"
+  ) {
+    const url =
+      s.backend === "openai_compatible"
+        ? s.openaiBaseUrl
+        : (OPENAI_COMPATIBLE_PRESETS[s.backend]?.url ?? s.openaiBaseUrl);
+    if (url && (s.openaiApiKey || isLocalUrl(url))) {
+      return new OpenAICompatibleBackend(url, s.openaiApiKey, s.openaiModel);
+    }
   }
   if (s.backend === "webllm") {
     return new WebLLMBackend(s.webllmModel);
