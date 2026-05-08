@@ -841,6 +841,42 @@ button {
 .query-form {
   display: flex;
   gap: 0.4rem;
+  /* Pin the input to the bottom of the sidebar viewport so it stays
+     reachable as the thread grows — chat-app convention. The sidebar
+     itself scrolls; the form rides along the bottom of its scroll
+     viewport. Backed with a solid color so cards don't bleed through. */
+  position: sticky;
+  bottom: 0;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0;
+  background: var(--bg-elev);
+  z-index: 10;
+}
+
+.trace-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+  user-select: none;
+  cursor: pointer;
+}
+.trace-toggle input { margin: 0; }
+
+.turn-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.4rem;
+}
+.turn-meta-line {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg-elev);
+  padding: 0.2rem 0.4rem;
+  border-radius: 3px;
 }
 
 .query-input {

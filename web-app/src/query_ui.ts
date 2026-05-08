@@ -28,6 +28,7 @@ interface TurnCard {
   index: number;
   question: string;
   root: HTMLElement;
+  metaEl: HTMLElement;
   statusEl: HTMLElement;
   answerEl: HTMLElement;
   plotsEl: HTMLElement;
@@ -37,7 +38,28 @@ interface TurnCard {
   traceItems: AgentTraceItem[];
   plots: { png: string; code: string; title?: string }[];
   tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
+  metaLines: string[];
 }
+
+const TRACE_OPEN_KEY = "tourguide.agentTraceOpen";
+const loadTraceOpenPref = (): boolean => {
+  // Default to open: lets the user "see what it's thinking" without
+  // toggling a disclosure each turn. Persisted across reloads.
+  try {
+    const v = localStorage.getItem(TRACE_OPEN_KEY);
+    if (v === null) return true;
+    return v === "1";
+  } catch {
+    return true;
+  }
+};
+const saveTraceOpenPref = (v: boolean): void => {
+  try {
+    localStorage.setItem(TRACE_OPEN_KEY, v ? "1" : "0");
+  } catch {
+    /* private mode / quota — silently drop */
+  }
+};
 
 export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): void {
   container.innerHTML = "";
@@ -48,16 +70,6 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       ⚠ AI not configured — the agent needs an AI backend.
       <button class="btn-link" data-action="open-settings">Set up in Settings</button>
     </div>
-    <form class="query-form">
-      <input
-        type="text"
-        class="query-input"
-        placeholder="Ask: 'measure properties of mito' or 'plot mito volumes'"
-        autocomplete="off"
-      />
-      <button class="btn-primary" type="submit" data-action="ask">Ask</button>
-      <button class="btn-secondary" type="button" data-action="stop" hidden>Stop</button>
-    </form>
     <div class="session-toolbar" data-session-toolbar hidden>
       <button class="btn-secondary btn-tiny" data-action="copy-session" type="button">📋 Copy session</button>
       <div class="download-menu">
@@ -71,10 +83,23 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
           <button class="btn-primary btn-tiny" data-action="download-go" type="button">Download</button>
         </div>
       </div>
+      <label class="trace-toggle" title="Show the agent trace expanded by default on each turn">
+        <input type="checkbox" data-trace-default /> trace
+      </label>
       <button class="btn-link" data-action="new-session" type="button">New session</button>
       <span class="agent-trace-copy-status" data-copy-status></span>
     </div>
     <div class="session-thread" data-thread></div>
+    <form class="query-form">
+      <input
+        type="text"
+        class="query-input"
+        placeholder="Ask: 'measure properties of mito' or 'plot mito volumes'"
+        autocomplete="off"
+      />
+      <button class="btn-primary" type="submit" data-action="ask">Ask</button>
+      <button class="btn-secondary" type="button" data-action="stop" hidden>Stop</button>
+    </form>
   `;
   container.appendChild(box);
 
@@ -97,6 +122,11 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const dlScripts = box.querySelector<HTMLInputElement>("[data-dl-scripts]")!;
   const dlTables = box.querySelector<HTMLInputElement>("[data-dl-tables]")!;
   const dlSession = box.querySelector<HTMLInputElement>("[data-dl-session]")!;
+  const traceDefaultCheckbox = box.querySelector<HTMLInputElement>("[data-trace-default]")!;
+  traceDefaultCheckbox.checked = loadTraceOpenPref();
+  traceDefaultCheckbox.addEventListener("change", () => {
+    saveTraceOpenPref(traceDefaultCheckbox.checked);
+  });
 
   // Reflect backend readiness in the persistent hint above the Ask
   // input. Show the hint and dim the Ask button when no backend is
@@ -190,6 +220,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
         <span class="turn-num">${idx + 1}</span>
         <span class="turn-q"></span>
       </div>
+      <div class="turn-meta" data-meta hidden></div>
       <div class="turn-status" data-status></div>
       <div class="turn-answer" data-answer></div>
       <div class="turn-plots" data-plots></div>
@@ -200,24 +231,48 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       </details>
     `;
     root.querySelector<HTMLSpanElement>(".turn-q")!.textContent = question;
-    threadEl.prepend(root);
+    // New cards append at the END so the thread reads top-to-bottom
+    // chronologically (oldest first) and the newest one sits right
+    // above the form at the bottom — matches Claude/ChatGPT/iMessage
+    // muscle memory.
+    threadEl.appendChild(root);
+    const detailsEl = root.querySelector<HTMLDetailsElement>("[data-details]")!;
+    detailsEl.open = traceDefaultCheckbox.checked;
     const card: TurnCard = {
       index: idx,
       question,
       root,
+      metaEl: root.querySelector<HTMLElement>("[data-meta]")!,
       statusEl: root.querySelector<HTMLElement>("[data-status]")!,
       answerEl: root.querySelector<HTMLElement>("[data-answer]")!,
       plotsEl: root.querySelector<HTMLElement>("[data-plots]")!,
       tablesEl: root.querySelector<HTMLElement>("[data-tables]")!,
       traceEl: root.querySelector<HTMLElement>("[data-trace]")!,
-      detailsEl: root.querySelector<HTMLDetailsElement>("[data-details]")!,
+      detailsEl,
       traceItems: [],
       plots: [],
       tables: [],
+      metaLines: [],
     };
     allCards.push(card);
     sessionToolbar.hidden = false;
+    // Scroll the new card into view at the bottom of the sidebar so the
+    // user sees the in-flight turn without manually scrolling.
+    requestAnimationFrame(() => {
+      root.scrollIntoView({ block: "end", behavior: "smooth" });
+    });
     return card;
+  };
+
+  // Render any sticky per-step meta info (runtime / scales / etc.) in
+  // a small grayed-out strip under the question. Multiple lines stack.
+  const appendMeta = (card: TurnCard, info: string): void => {
+    card.metaLines.push(info);
+    card.metaEl.hidden = false;
+    const line = document.createElement("div");
+    line.className = "turn-meta-line";
+    line.textContent = info;
+    card.metaEl.appendChild(line);
   };
 
   const setStatus = (
@@ -634,6 +689,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
             answeredOrFlew = true;
             if (!turnSummary) turnSummary = `Saved table ${tbl.name} (${tbl.rows.length} rows)`;
           },
+          onMeta: (info) => appendMeta(card, info),
         },
       });
       if (!answeredOrFlew) {

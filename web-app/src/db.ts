@@ -293,11 +293,16 @@ export async function ingestTableIntoDB(
   deps: { getDB: () => DatasetDB | null; setDB: (db: DatasetDB) => void },
   tbl: { name: string; columns: string[]; rows: (number | string | null)[][] },
 ): Promise<void> {
+  // Build the DB instance + table metadata first, THEN call setDB once
+  // at the end. The previous flow called setDB with an empty
+  // db.tables (just-allocated DB), then pushed the IngestedTable
+  // entry — main.ts's setDB hook re-renders the structured browser,
+  // so the early call painted a "0 tables" view that never updated
+  // when the entry actually landed.
   let db = deps.getDB();
   if (!db) {
     const SQL = await loadSqlJs();
     db = { db: new SQL.Database(), tables: [] };
-    deps.setDB(db);
   }
   const tableName = tbl.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
   const types = inferTableTypes(tbl.columns, tbl.rows);
@@ -329,6 +334,10 @@ export async function ingestTableIntoDB(
   const existingIdx = db.tables.findIndex((t) => t.table_name === tableName);
   if (existingIdx >= 0) db.tables[existingIdx] = entry;
   else db.tables.push(entry);
+  // Always (re-)notify after the entry is in place — covers both the
+  // first-table case (DB freshly created) and the subsequent-table
+  // case (existing DB, new entry just appended).
+  deps.setDB(db);
 }
 
 function inferTableTypes(

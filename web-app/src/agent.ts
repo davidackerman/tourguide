@@ -34,6 +34,12 @@ export interface AgentCallbacks {
   // ingested into the SQL DB by applyCustomResult; this callback is
   // purely for surface-level affordance.
   onTable?: (table: { name: string; columns: string[]; rows: (number | string | null)[][] }) => void;
+  // "Sticky" per-step metadata that should be visible after the step
+  // completes, separate from the transient onProgress messages. Used
+  // by python_on_layers to surface which runtime + scales were chosen
+  // ("Ran on backend; scales: mito@s2 (3.1 GB)") so the user sees it
+  // without expanding the agent trace.
+  onMeta?: (info: string) => void;
 }
 
 export interface AgentTurnSummary {
@@ -915,6 +921,10 @@ async function execPythonOnLayers(
     const scaleBlurb = layersForRequest
       .map((l) => `${l._layerName}@${l._scalePath || "root"} (${humanBytes(l._approxBytes)})`)
       .join(", ");
+    const metaLine = `${runtime === "backend" ? "🖥️ backend" : "💻 local"} · ${scaleBlurb}${
+      resolvedSkeletons.length > 0 ? ` · ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
+    }`;
+    ctx.callbacks.onMeta?.(metaLine);
     ctx.callbacks.onProgress?.(
       `python_on_layers: running on ${runtime} — ${runtimeReason}. ${scaleBlurb}${
         resolvedSkeletons.length > 0 ? ` + ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
