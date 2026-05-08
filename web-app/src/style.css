@@ -880,6 +880,10 @@ button {
   background: var(--bg-elev);
   padding: 0.2rem 0.4rem;
   border-radius: 3px;
+  /* python_on_layers fires a multi-line meta (header + per-layer
+     shape / voxel-size detail). Preserve embedded newlines without
+     making horizontal whitespace literal. */
+  white-space: pre-line;
 }
 
 /* ask_user inline form — rendered between the turn-meta strip and the

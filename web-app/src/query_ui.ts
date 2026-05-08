@@ -216,6 +216,14 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     const idx = allCards.length;
     const root = document.createElement("div");
     root.className = "turn-card";
+    // Order matches the chronological flow of a turn:
+    //   header (the user's question)
+    //   meta (runtime + scale chosen)
+    //   status (what the agent is doing right now)
+    //   trace (what the agent did, expandable; lives BEFORE the
+    //          results because chronologically the steps came first)
+    //   answer (the agent's textual conclusion)
+    //   plots / tables (the artifacts produced)
     root.innerHTML = `
       <div class="turn-header">
         <span class="turn-num">${idx + 1}</span>
@@ -223,13 +231,13 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       </div>
       <div class="turn-meta" data-meta hidden></div>
       <div class="turn-status" data-status></div>
-      <div class="turn-answer" data-answer></div>
-      <div class="turn-plots" data-plots></div>
-      <div class="turn-tables" data-tables></div>
       <details class="turn-details" data-details>
         <summary>Show agent trace</summary>
         <div class="agent-trace" data-trace></div>
       </details>
+      <div class="turn-answer" data-answer></div>
+      <div class="turn-plots" data-plots></div>
+      <div class="turn-tables" data-tables></div>
     `;
     root.querySelector<HTMLSpanElement>(".turn-q")!.textContent = question;
     // Append so the thread reads chronologically top-to-bottom — same
@@ -896,9 +904,12 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       });
       if (!answeredOrFlew) {
         setStatus(card, "Agent finished without delivering an answer.", "");
-      } else if (!card.statusEl.textContent || card.statusEl.classList.contains("pending")) {
-        // Clear the "Thinking…" pending state once we've delivered.
-        setStatus(card, "", "");
+      } else {
+        // Always end with a clear "done" — overwrites any leftover
+        // "Step N: writing answer …" that was hanging around when the
+        // executor returned. Green "ok" styling so it's visually
+        // distinct from the in-flight pending state.
+        setStatus(card, "✓ Done.", "ok");
       }
       sessionTurns.push({ question, summary: turnSummary || "(no visible result)" });
     } catch (err) {

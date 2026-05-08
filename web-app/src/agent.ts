@@ -320,6 +320,13 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
     NEW LAYER, or analyze SKELETONS (length, branching, geodesic
     distances, tortuosity), or compute regionprops / connected
     components ("measure properties of mito", "list mito by volume").
+
+    REQUIRED args every call: { "python": "<your code>", "layers": [...] }
+    The "python" key is ALWAYS required — emitting just
+    {"layers": ["mito"]} fails immediately with "python_on_layers
+    requires 'python'". Even a trivial call needs the code body.
+    Don't use "code" / "script" / "source" — only "python".
+
     Pass at least one of:
       'layers'    — array of zarr layer names from describe_dataset.
                     The harness picks the FINEST scale that fits the
@@ -997,6 +1004,8 @@ async function execPythonOnLayers(
       _scalePath: string;
       _approxBytes: number;
       _layerName: string;
+      _shape: number[];
+      _voxelNm: [number, number, number];
     }[] = [];
     for (const { layer, url, insp } of layerInspections) {
       let idx = insp.scales.length - 1; // coarsest fallback
@@ -1018,6 +1027,8 @@ async function execPythonOnLayers(
         _scalePath: scale.path,
         _approxBytes: scale.approxBytes,
         _layerName: layer.name,
+        _shape: scale.shape,
+        _voxelNm: scale.voxelNm,
       });
     }
 
@@ -1033,12 +1044,22 @@ async function execPythonOnLayers(
       };
     });
 
+    const fmtVoxel = (v: [number, number, number]): string =>
+      v.map((x) => (Number.isInteger(x) ? String(x) : x.toFixed(1))).join("×");
     const scaleBlurb = layersForRequest
       .map((l) => `${l._layerName}@${l._scalePath || "root"} (${humanBytes(l._approxBytes)})`)
       .join(", ");
+    // Detailed per-layer line surfaces shape + voxel size + total
+    // voxel count alongside the scale path. Shows up under the
+    // backend/local + scale blurb so the user can tell whether
+    // they got coarse or fine data without expanding the trace.
+    const detailLines = layersForRequest.map((l) => {
+      const numVox = l._shape.reduce((a, b) => a * b, 1);
+      return `   shape ${l._shape.join("×")} · ${fmtVoxel(l._voxelNm)} nm/vox · ${numVox.toLocaleString()} voxels`;
+    });
     const metaLine = `${runtime === "backend" ? "🖥️ backend" : "💻 local"} · ${scaleBlurb}${
       resolvedSkeletons.length > 0 ? ` · ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
-    }`;
+    }\n${detailLines.join("\n")}`;
     ctx.callbacks.onMeta?.(metaLine);
     ctx.callbacks.onProgress?.(
       `python_on_layers: running on ${runtime} — ${runtimeReason}. ${scaleBlurb}${
@@ -1599,6 +1620,9 @@ function synthesizeErrorHint(
     }
   }
   if (tool === "python_on_layers") {
+    if (lower.includes("requires 'python'")) {
+      return `python_on_layers needs the code under the key "python" in args. Example: {"tool": "python_on_layers", "args": {"python": "import numpy as np\\n_TG_NARRATION = str(mito.shape)", "layers": ["mito"]}}. Don't use "code" / "script" / "source" — only "python". Don't omit it.`;
+    }
     if (lower.includes("modulenotfounderror") || lower.includes("no module named")) {
       const m = errMsg.match(/No module named ['"]?([\w.]+)['"]?/i);
       const pkg = m ? m[1] : "<that module>";
