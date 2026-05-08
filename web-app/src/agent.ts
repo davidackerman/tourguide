@@ -12,6 +12,8 @@ import {
   SAFE_INPUT_BYTES,
   type CustomAnalysisResult,
 } from "./analysis.js";
+import { loadSettings } from "./llm.js";
+import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
 export interface AgentTraceItem {
   tool: string;
@@ -210,28 +212,56 @@ TOOLS:
     Use this for "what's the median volume?" / "compute X then fly to
     the result" flows. For visual answers, prefer make_plot.
 
-  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}])
-    HEAVY-LIFT path. Runs Python in a Web Worker with the actual layer
-    voxels (and/or precomputed skeletons) loaded as numpy arrays — use
-    this when the user asks you to OPERATE ON LAYERS (erode, dilate,
-    threshold, skeletonize, mesh, find contacts, distance transforms),
-    PRODUCE A NEW LAYER, or analyze SKELETONS (length, branching,
-    geodesic distances, tortuosity).
+  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
+    HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
+    precomputed skeletons) loaded as numpy arrays — use this when the
+    user asks you to OPERATE ON LAYERS (erode, dilate, threshold,
+    skeletonize, mesh, find contacts, distance transforms), PRODUCE A
+    NEW LAYER, or analyze SKELETONS (length, branching, geodesic
+    distances, tortuosity), or compute regionprops / connected
+    components ("measure properties of mito", "list mito by volume").
     Pass at least one of:
       'layers'    — array of zarr layer names from describe_dataset.
-                    Each is read at the coarsest scale that fits the
-                    safe memory budget and bound to a numpy array under
-                    its 'organelle_class' (or sanitized layer name).
+                    The harness picks the FINEST scale that fits the
+                    chosen runtime's byte budget (≤1.5 GB for local
+                    Pyodide, ≤5 GB for HF backend) and binds each as a
+                    numpy array under its 'organelle_class' (or
+                    sanitized layer name).
       'skeletons' — array of {"layer": str, "segment_ids": [...]} for
-                    layers that have a precomputed-skeleton source
-                    (check describe_dataset's has_skeleton flag). Each
-                    binds a Python dict named '<layer>_skel' keyed by
-                    int segment_id, with values
-                    {"vertices": (N,3) float32 nm, "edges": (M,2) uint32}.
-                    A sibling '<layer>_skel_missing_ids' lists IDs that
-                    had no skeleton file. Always provide segment_ids
-                    explicitly — usually the row IDs from a prior
-                    run_sql ORDER BY <metric> LIMIT N.
+                    layers with a precomputed-skeleton source
+                    (describe_dataset's has_skeleton). Binds
+                    '<layer>_skel = {seg_id: {"vertices": (N,3) f32 nm,
+                    "edges": (M,2) u32}}'. A sibling
+                    '<layer>_skel_missing_ids' lists IDs without files.
+                    Always provide segment_ids explicitly — usually
+                    from a prior run_sql ORDER BY <metric> LIMIT N.
+      'runtime'   — "auto" (default; harness picks). Use "backend" only
+                    when the user explicitly asks for full resolution
+                    or you know the dataset is huge. Use "local" only
+                    if you want to force Pyodide.
+
+    RUNTIME AUTO-SELECTION (you don't usually need to think about this,
+    but it shapes what code to write):
+      - 'skeletons' present                       → forced LOCAL
+      - code imports cc3d / fastmorph / fastremap
+        / edt / kimimaro / zmesh, OR sets
+        _TG_NEW_MESH_LAYER                        → forced BACKEND
+      - else if total finest-scale ≤1.5 GB        → LOCAL
+      - else if backend URL configured            → BACKEND
+      - else                                       → LOCAL (downsampled)
+    Result narration always tells the user which runtime + scale ran,
+    so they can ask for full resolution as a follow-up.
+
+    PACKAGES BY RUNTIME:
+      LOCAL  (Pyodide): numpy, scipy.ndimage, skimage.measure /
+              morphology, pandas, matplotlib. NO Seung-lab pkgs.
+      BACKEND (HF Space): the LOCAL set + cc3d, fastmorph (incl.
+              spherical_erode / spherical_dilate), fastremap, edt,
+              kimimaro, zmesh. Use these for instance-label
+              morphology, fast CC, and meshing. Per-layer
+              'spacing'/'offset' come in array-axis order (typically
+              z,y,x); pass anisotropy=layers["x"]["spacing"] to
+              fastmorph.spherical_* directly without flipping.
     Output channels — set any to deliver results:
       _TG_NEW_LAYER       persist a derived volume as a new NG layer.
                           Set to {"data": ndarray, "name": str,
@@ -252,21 +282,70 @@ TOOLS:
     on each layer is in the SAME axis order — pass it directly to
     fastmorph.spherical_erode(anisotropy=...) without flipping.
     Examples:
+      "measure properties of mito" -> python_on_layers
+        layers=["mito"]
+        python="""
+import numpy as np, pandas as pd
+import cc3d
+from skimage import measure as _sk
+labels = cc3d.connected_components(mito, connectivity=26)
+spacing = layers["mito"]["spacing"]   # array-axis order (z,y,x typically)
+offset  = layers["mito"]["offset"]
+props = _sk.regionprops_table(
+    labels,
+    spacing=spacing,
+    properties=("label", "area", "centroid", "bbox", "equivalent_diameter"),
+)
+df = pd.DataFrame(props)
+df["volume_nm_3"] = df["area"]
+# centroid-{0,1,2} are in the SAME axis order as spacing — z,y,x.
+# Convert to world-nm xyz and add the layer offset (also array-axis
+# order). com_x_nm gets the LAST axis (x), z gets the FIRST.
+ax = layers["mito"]["axes"]
+def col(name):
+    return f"centroid-{ax.index(name)}"
+df["com_x_nm"] = df[col("x")] + offset[ax.index("x")]
+df["com_y_nm"] = df[col("y")] + offset[ax.index("y")]
+df["com_z_nm"] = df[col("z")] + offset[ax.index("z")]
+df["object_id"] = df["label"].astype(int)
+_TG_TABLE = df[["object_id","volume_nm_3","com_x_nm","com_y_nm","com_z_nm","equivalent_diameter"]]
+_TG_TABLE_NAME = "mito"
+_TG_NARRATION = f"Measured {len(df)} mito components."
+"""
+
       "erode mito by 50 nm" -> python_on_layers
         layers=["mito"]
         python="""
-import numpy as np
-from scipy.ndimage import binary_erosion
-arr = mito > 0
-# 50 nm radius in voxels along each array axis
-spacing = layers["mito"]["spacing"]
-r_vox = [max(1, int(round(50.0 / s))) for s in spacing]
-struct = np.ones([2*r+1 for r in r_vox], dtype=bool)
-out = binary_erosion(arr, structure=struct).astype(np.uint8)
+# Backend runtime auto-picks since fastmorph is imported.
+import fastmorph
+spacing = layers["mito"]["spacing"]   # array-axis order; pass directly
+out = fastmorph.spherical_erode(mito, radius=50, anisotropy=spacing)
 _TG_NEW_LAYER = {"data": out, "name": "mito_eroded_50nm",
                  "type": "segmentation",
                  "spacing_nm": spacing,
                  "offset_nm": layers["mito"]["offset"]}
+"""
+
+      "make meshes for mito + cilia" -> python_on_layers
+        layers=["mito", "cilia"]
+        python="""
+# zmesh import → forces backend runtime. _TG_NEW_MESH_LAYER renders
+# precomputed meshes one shot per layer.
+import zmesh
+results = []
+for name in ["mito", "cilia"]:
+    arr = layers[name]["array"]
+    spacing = layers[name]["spacing"]   # array-axis order
+    mesher = zmesh.Mesher(spacing)
+    mesher.mesh(arr)
+    # _TG_NEW_MESH_LAYER takes a labels volume and the harness writes
+    # a precomputed mesh layer. One per loop iteration is fine; later
+    # iterations overwrite earlier ones, so usually call this once per
+    # turn — for two layers, two python_on_layers calls is cleanest.
+_TG_NEW_MESH_LAYER = {"labels": layers["mito"]["array"],
+                      "name": "mito_meshes",
+                      "spacing": layers["mito"]["spacing"],
+                      "offsets": layers["mito"]["offset"]}
 """
 
       "length of the longest mito skeletons" ->
@@ -667,33 +746,109 @@ async function execPythonOnLayers(
     }
   }
 
+  // Decide which runtime (local Pyodide worker vs HF backend) to use.
+  // 'auto' is the default, but a few signals force one or the other:
+  //   - skeletons present → must run local (HF backend doesn't accept
+  //     skeletonLayers yet; sending would NameError on <var>_skel)
+  //   - code imports any Seung-lab pkg or sets _TG_NEW_MESH_LAYER →
+  //     must run on backend (zmesh / fastmorph / cc3d / kimimaro / edt
+  //     / fastremap aren't in Pyodide)
+  // When neither is forced, we prefer local for speed/quota and only
+  // fall through to backend when the input is too big for Pyodide's
+  // ~4 GB WASM ceiling.
+  const requestedRuntime = String(args.runtime ?? "auto").toLowerCase();
+  const settings = loadSettings();
+  const backendUrl = settings.analysisBackendUrl.trim();
+  const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
+  const codeNeedsMeshLayer = /\b_TG_NEW_MESH_LAYER\s*=/.test(code);
+  const mustBeLocal = resolvedSkeletons.length > 0;
+  const mustBeBackend = codeImportsSeungLab || codeNeedsMeshLayer;
+  if (mustBeLocal && mustBeBackend) {
+    throw new Error(
+      "Conflict: this code uses Seung-lab packages or _TG_NEW_MESH_LAYER (backend-only) but also has skeleton inputs (local-only). Split into two python_on_layers calls — one for skeleton work, one for mesh/heavy ops.",
+    );
+  }
+  // The size-vs-budget decision needs inspect results, so we run inspect
+  // first, then resolve effective runtime. ESTIMATED total bytes feeds
+  // both the runtime choice and the per-layer scale pick.
   ctx.callbacks.onProgress?.(
     resolved.length > 0
       ? "python_on_layers: inspecting layers…"
       : "python_on_layers: preparing skeletons…",
   );
+  // Pyodide WASM hits OOM around ~1.5 GB of input (intermediates blow
+  // up). HF backend has 16 GB but we want headroom; targeting ≤5 GB of
+  // input keeps regionprops + ndi + a couple of intermediates safe.
+  const LOCAL_TARGET_BYTES = SAFE_INPUT_BYTES; // 1.5 GB
+  const BACKEND_TARGET_BYTES = 5 * 1024 ** 3;
   const client = new AnalysisClient();
-  const layersForRequest: {
-    varName: string;
-    url: string;
-    scalePath: string;
-    axesOrder: string[];
-    voxelNm: [number, number, number];
-    offsetNm: [number, number, number];
-  }[] = [];
+  const layerInspections: { name: string; layer: DatasetLayer; url: string; insp: Awaited<ReturnType<typeof client.inspect>> }[] = [];
+  const finestBytes: number[] = [];
   try {
     for (const { name, layer } of resolved) {
       const url = normalizeZarrUrl(layer.source);
       const insp = await client.inspect(url, ctx.descriptor.voxel_size_nm, (m) =>
         ctx.callbacks.onProgress?.(`Inspecting ${name}: ${m}`),
       );
-      // Pick the coarsest scale under the safe byte budget — same rule
-      // as custom_analysis_ui's default. Falls back to coarsest if every
-      // scale is over budget (Pyodide will OOM but the user sees what
-      // happened).
-      let idx = insp.scales.length - 1;
-      for (let i = insp.scales.length - 1; i >= 0; i--) {
-        if (insp.scales[i].approxBytes <= SAFE_INPUT_BYTES) {
+      layerInspections.push({ name, layer, url, insp });
+      // Index 0 is the finest scale. Track to gauge whether even the
+      // finest fits in our target — if yes for everyone, no need to
+      // route through backend purely for size.
+      if (insp.scales[0]) finestBytes.push(insp.scales[0].approxBytes);
+    }
+
+    // Effective runtime resolution.
+    let runtime: "local" | "backend";
+    let runtimeReason: string;
+    if (requestedRuntime === "local" || requestedRuntime === "backend") {
+      runtime = requestedRuntime;
+      runtimeReason = `requested explicitly`;
+    } else if (mustBeLocal) {
+      runtime = "local";
+      runtimeReason = "skeleton inputs require local runtime";
+    } else if (mustBeBackend) {
+      if (!backendUrl) {
+        throw new Error(
+          "This code needs the HF backend (Seung-lab packages or _TG_NEW_MESH_LAYER) but no analysis backend URL is configured. Open Settings → Advanced → Analysis backend.",
+        );
+      }
+      runtime = "backend";
+      runtimeReason = "code uses Seung-lab packages or _TG_NEW_MESH_LAYER";
+    } else {
+      const totalFinest = finestBytes.reduce((a, b) => a + b, 0);
+      if (totalFinest <= LOCAL_TARGET_BYTES) {
+        runtime = "local";
+        runtimeReason = `${humanBytes(totalFinest)} fits Pyodide`;
+      } else if (backendUrl) {
+        runtime = "backend";
+        runtimeReason = `finest scale total ${humanBytes(totalFinest)} > Pyodide budget`;
+      } else {
+        runtime = "local";
+        runtimeReason = "no backend URL configured; will downsample";
+      }
+    }
+    const targetBytes = runtime === "backend" ? BACKEND_TARGET_BYTES : LOCAL_TARGET_BYTES;
+
+    // Per-layer scale: pick the FINEST scale that still fits the
+    // chosen runtime's byte budget. If even the coarsest is bigger
+    // than the budget, fall back to coarsest (will likely OOM but
+    // surfaces the issue with a clear runtime+scale message).
+    const layersForRequest: {
+      varName: string;
+      url: string;
+      scalePath: string;
+      axesOrder: string[];
+      voxelNm: [number, number, number];
+      offsetNm: [number, number, number];
+      // Diagnostics we surface in the result narration.
+      _scalePath: string;
+      _approxBytes: number;
+      _layerName: string;
+    }[] = [];
+    for (const { layer, url, insp } of layerInspections) {
+      let idx = insp.scales.length - 1; // coarsest fallback
+      for (let i = 0; i < insp.scales.length; i++) {
+        if (insp.scales[i].approxBytes <= targetBytes) {
           idx = i;
           break;
         }
@@ -707,6 +862,9 @@ async function execPythonOnLayers(
         axesOrder: insp.axes.map((a) => a.name),
         voxelNm: scale.voxelNm,
         offsetNm: scale.offsetNm,
+        _scalePath: scale.path,
+        _approxBytes: scale.approxBytes,
+        _layerName: layer.name,
       });
     }
 
@@ -722,27 +880,77 @@ async function execPythonOnLayers(
       };
     });
 
+    const scaleBlurb = layersForRequest
+      .map((l) => `${l._layerName}@${l._scalePath || "root"} (${humanBytes(l._approxBytes)})`)
+      .join(", ");
     ctx.callbacks.onProgress?.(
-      `python_on_layers: running (${layersForRequest.length} layer${layersForRequest.length === 1 ? "" : "s"}${
-        resolvedSkeletons.length > 0 ? `, ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
-      })…`,
-    );
-    const result = await client.customAnalyze(
-      {
-        kind: "custom",
-        layers: layersForRequest,
-        skeletonLayers: resolvedSkeletons.length > 0 ? resolvedSkeletons : undefined,
-        tables,
-        code,
-        timeoutMs: 60000,
-      },
-      (m) => ctx.callbacks.onProgress?.(m),
+      `python_on_layers: running on ${runtime} — ${runtimeReason}. ${scaleBlurb}${
+        resolvedSkeletons.length > 0 ? ` + ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
+      }`,
     );
 
-    return await applyCustomResult(result, code, ctx);
+    const requestLayers = layersForRequest.map(({ _scalePath, _approxBytes, _layerName, ...rest }) => {
+      void _scalePath;
+      void _approxBytes;
+      void _layerName;
+      return rest;
+    });
+
+    let result: CustomAnalysisResult;
+    if (runtime === "backend") {
+      // Cold-start tolerance — if the Space is asleep, this can take a
+      // few minutes. waitForBackendReady streams progress messages.
+      await waitForBackendReady(backendUrl, {
+        onProgress: (_state, msg) => ctx.callbacks.onProgress?.(msg),
+      });
+      const sessionId =
+        typeof crypto?.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      result = await postAnalysisRequest(
+        backendUrl,
+        {
+          layers: requestLayers,
+          tables,
+          code,
+          timeoutMs: 300_000,
+          sessionId,
+        },
+        ctx.signal,
+      );
+    } else {
+      result = await client.customAnalyze(
+        {
+          kind: "custom",
+          layers: requestLayers,
+          skeletonLayers: resolvedSkeletons.length > 0 ? resolvedSkeletons : undefined,
+          tables,
+          code,
+          timeoutMs: 60000,
+        },
+        (m) => ctx.callbacks.onProgress?.(m),
+      );
+    }
+
+    const applied = await applyCustomResult(result, code, ctx);
+    // Prepend runtime + scale info so the next agent turn (and the
+    // visible answer) reflect what we actually did. The user's choice
+    // explicitly: "let em know which".
+    const runtimeLine = `Ran on ${runtime} (${runtimeReason}); scales: ${scaleBlurb}.`;
+    return {
+      summary: `${runtimeLine}\n${applied.summary}`,
+      produced: applied.produced,
+    };
   } finally {
     client.terminate();
   }
+}
+
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 // Wire a CustomAnalysisResult through the agent's callbacks + viewer.
