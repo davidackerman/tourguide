@@ -15,6 +15,12 @@
 //      consume them with no changes.
 
 import * as zarr from "zarrita";
+import {
+  fetchSkeleton,
+  fetchSkeletonInfo,
+  normalizeSkeletonBase,
+  type ParsedSkeleton,
+} from "./skeleton_loader.js";
 
 // Pin to same Pyodide version as plot.ts so both features share a cache of
 // wheels when the browser revisits.
@@ -57,6 +63,15 @@ export interface CustomRequest {
     axesOrder: string[];
     voxelNm: [number, number, number];
     offsetNm: [number, number, number];
+  }[];
+  // Precomputed skeleton inputs — fetched per segment, parsed, transformed
+  // to nm, and exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
+  // "edges": ndarray (M,2)}} on the Python side. Also collected under
+  // `skeletons` dict for symmetry with `layers`.
+  skeletonLayers?: {
+    varName: string;
+    source: string; // precomputed:// URL (scheme prefix optional, will be stripped)
+    segmentIds: string[];
   }[];
   // DataFrames already in the sql.js DB that should be exposed to Python as
   // df_<organelle_class> (already the make_plot convention).
@@ -889,6 +904,38 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
     if (cancelled) return;
   }
 
+  // Fetch any requested skeletons. Each (varName) loads the
+  // precomputed info once + each segment file in series. Failed segments
+  // are dropped with a warning so a missing skeleton doesn't sink the
+  // whole turn — the Python side gets whichever segments resolved.
+  const skeletons: Record<string, Map<string, ParsedSkeleton>> = {};
+  const skeletonMisses: Record<string, string[]> = {};
+  for (const skel of msg.skeletonLayers ?? []) {
+    const base = normalizeSkeletonBase(skel.source);
+    progress(`Loading skeleton info for ${skel.varName} …`, "skeleton");
+    const info = await fetchSkeletonInfo(base);
+    if (cancelled) return;
+    const got = new Map<string, ParsedSkeleton>();
+    const misses: string[] = [];
+    for (const segId of skel.segmentIds) {
+      try {
+        progress(
+          `Reading ${skel.varName}[${segId}] (${got.size + 1}/${skel.segmentIds.length}) …`,
+          "skeleton",
+        );
+        got.set(segId, await fetchSkeleton(base, segId, info));
+      } catch (err) {
+        // 404s are common — segments without a skeleton file. Don't
+        // throw; just record the miss so the Python side knows.
+        misses.push(segId);
+        console.warn(`[worker] skeleton ${skel.varName}[${segId}] failed: ${(err as Error).message}`);
+      }
+      if (cancelled) return;
+    }
+    skeletons[skel.varName] = got;
+    if (misses.length > 0) skeletonMisses[skel.varName] = misses;
+  }
+
   progress("Loading Python runtime …", "python");
   const py = await ensurePyodide();
   // Custom mode needs pandas + matplotlib in addition to the regionprops set.
@@ -904,6 +951,28 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
     py.globals.set(`__tg_${name}_spacing`, info.spacing);
     py.globals.set(`__tg_${name}_offsets`, info.offsets);
     py.globals.set(`__tg_${name}_axes`, info.axes);
+  }
+  // Bind skeletons. Each segment's flat Float32Array (vertices) +
+  // Uint32Array (edges) goes through as a Pyodide-converted typed array;
+  // SETUP_PY reshapes both back to (N, 3) / (M, 2). Per-segment binding
+  // (vs one giant per-layer concat) keeps the Python side's shape simple
+  // and lets the user do `mito_skel[some_id]['vertices']` directly.
+  py.globals.set(
+    "_tg_skel_layer_names",
+    Object.keys(skeletons),
+  );
+  py.globals.set(
+    "_tg_skel_misses_json",
+    JSON.stringify(skeletonMisses),
+  );
+  for (const [layerName, perSeg] of Object.entries(skeletons)) {
+    const segIds: string[] = [];
+    for (const [segId, parsed] of perSeg.entries()) {
+      segIds.push(segId);
+      py.globals.set(`__tg_skel_${layerName}_${segId}_v`, parsed.vertices);
+      py.globals.set(`__tg_skel_${layerName}_${segId}_e`, parsed.edges);
+    }
+    py.globals.set(`__tg_skel_${layerName}_seg_ids`, segIds);
   }
   py.globals.set("_tg_user_code", msg.code);
   py.globals.set("_tg_timeout_ms", msg.timeoutMs);
@@ -935,6 +1004,31 @@ for _name in list(_tg_layer_names):
     }
     # Expose the bare array under its var name (the common case).
     globals()[_name] = _arr
+
+# Reconstruct skeletons. Each requested skeleton layer becomes a dict
+# keyed by segment_id (as int when it parses cleanly, else str) — values
+# are { "vertices": (N,3) float32 in nm, "edges": (M,2) uint32 }. We
+# expose under the bare varName for ergonomics and also collect under
+# 'skeletons' for parallel structure to 'layers'.
+skeletons = {}
+_tg_skel_misses = json.loads(_tg_skel_misses_json)
+for _name in list(_tg_skel_layer_names):
+    _per_seg = {}
+    for _seg in list(globals()[f'__tg_skel_{_name}_seg_ids']):
+        _v = np.asarray(globals()[f'__tg_skel_{_name}_{_seg}_v'], dtype=np.float32).reshape(-1, 3)
+        _e = np.asarray(globals()[f'__tg_skel_{_name}_{_seg}_e'], dtype=np.uint32).reshape(-1, 2)
+        try:
+            _key = int(_seg)
+        except (TypeError, ValueError):
+            _key = str(_seg)
+        _per_seg[_key] = {"vertices": _v, "edges": _e}
+    skeletons[_name] = _per_seg
+    globals()[_name] = _per_seg
+    _miss = _tg_skel_misses.get(_name) or []
+    if _miss:
+        # Surface missing IDs as a sibling so user code / the agent can
+        # check what wasn't loaded without a separate round-trip.
+        globals()[f"{_name}_missing_ids"] = list(_miss)
 
 # Build DataFrames from sql.js tables sent across the wire.
 _tg_tables = json.loads(_tg_tables_json)

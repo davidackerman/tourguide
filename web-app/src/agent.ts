@@ -210,15 +210,28 @@ TOOLS:
     Use this for "what's the median volume?" / "compute X then fly to
     the result" flows. For visual answers, prefer make_plot.
 
-  python_on_layers(python: string, layers: string[])
+  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}])
     HEAVY-LIFT path. Runs Python in a Web Worker with the actual layer
-    voxels loaded as numpy arrays — use this when the user asks you to
-    OPERATE ON LAYERS (erode, dilate, threshold, skeletonize, mesh, find
-    contacts, distance transforms) or to PRODUCE A NEW LAYER.
-    'layers' is an array of layer names from describe_dataset (or from
-    the dataset header at the top of this prompt). Each layer is read
-    at the coarsest scale that fits the safe memory budget and bound to
-    a numpy array under its 'organelle_class' (or sanitized layer name).
+    voxels (and/or precomputed skeletons) loaded as numpy arrays — use
+    this when the user asks you to OPERATE ON LAYERS (erode, dilate,
+    threshold, skeletonize, mesh, find contacts, distance transforms),
+    PRODUCE A NEW LAYER, or analyze SKELETONS (length, branching,
+    geodesic distances, tortuosity).
+    Pass at least one of:
+      'layers'    — array of zarr layer names from describe_dataset.
+                    Each is read at the coarsest scale that fits the
+                    safe memory budget and bound to a numpy array under
+                    its 'organelle_class' (or sanitized layer name).
+      'skeletons' — array of {"layer": str, "segment_ids": [...]} for
+                    layers that have a precomputed-skeleton source
+                    (check describe_dataset's has_skeleton flag). Each
+                    binds a Python dict named '<layer>_skel' keyed by
+                    int segment_id, with values
+                    {"vertices": (N,3) float32 nm, "edges": (M,2) uint32}.
+                    A sibling '<layer>_skel_missing_ids' lists IDs that
+                    had no skeleton file. Always provide segment_ids
+                    explicitly — usually the row IDs from a prior
+                    run_sql ORDER BY <metric> LIMIT N.
     Output channels — set any to deliver results:
       _TG_NEW_LAYER       persist a derived volume as a new NG layer.
                           Set to {"data": ndarray, "name": str,
@@ -254,6 +267,29 @@ _TG_NEW_LAYER = {"data": out, "name": "mito_eroded_50nm",
                  "type": "segmentation",
                  "spacing_nm": spacing,
                  "offset_nm": layers["mito"]["offset"]}
+"""
+
+      "length of the longest mito skeletons" ->
+         (1) run_sql to pick the IDs:
+             SELECT object_id FROM mito ORDER BY volume_nm_3 DESC LIMIT 5
+         (2) python_on_layers with skeletons=[{"layer":"mito","segment_ids":[...]}]
+        python="""
+# mito_skel = {seg_id: {"vertices": (N,3) nm, "edges": (M,2)}}
+lengths = {}
+for sid, sk in mito_skel.items():
+    v = sk["vertices"]; e = sk["edges"]
+    if len(e) == 0:
+        lengths[sid] = 0.0
+        continue
+    seg = v[e[:, 0]] - v[e[:, 1]]
+    lengths[sid] = float(np.linalg.norm(seg, axis=1).sum())
+import pandas as pd
+df = pd.DataFrame({"segment_id": list(lengths.keys()),
+                   "length_nm": list(lengths.values())})
+df = df.sort_values("length_nm", ascending=False).reset_index(drop=True)
+_TG_TABLE = df
+_TG_TABLE_NAME = "mito_skeleton_lengths"
+_TG_NARRATION = f"Top mito by skeleton length: {df.iloc[0].segment_id} ({df.iloc[0].length_nm/1000:.1f} um)"
 """
 
   answer(text: string)
@@ -556,12 +592,15 @@ async function execPythonOnLayers(
   const code = coerceCodeArg(args, ["python", "code", "script", "source", "body"]);
   if (!code) throw new Error("python_on_layers requires 'python'");
   const layersArg = args.layers;
-  if (!Array.isArray(layersArg) || layersArg.length === 0) {
+  const skeletonsArg = args.skeletons;
+  const hasLayers = Array.isArray(layersArg) && layersArg.length > 0;
+  const hasSkeletons = Array.isArray(skeletonsArg) && skeletonsArg.length > 0;
+  if (!hasLayers && !hasSkeletons) {
     throw new Error(
-      "python_on_layers requires 'layers' (array of layer names from describe_dataset).",
+      "python_on_layers requires either 'layers' (zarr layer names) or 'skeletons' ([{layer, segment_ids}]).",
     );
   }
-  const layerNames = (layersArg as unknown[]).map((v) => String(v));
+  const layerNames = hasLayers ? (layersArg as unknown[]).map((v) => String(v)) : [];
 
   // Resolve each name to a descriptor entry. Reject up front rather than
   // letting the worker fail on a bad URL — the model will recover faster
@@ -577,13 +616,62 @@ async function execPythonOnLayers(
     }
     if (!isZarrSource(layer.source)) {
       throw new Error(
-        `Layer '${name}' is not a zarr source — python_on_layers currently only supports zarr layers (skeleton / mesh-only sources need the Custom Analysis dialog or aren't yet supported).`,
+        `Layer '${name}' is not a zarr source — pass skeleton sources via 'skeletons' instead of 'layers'.`,
       );
     }
     resolved.push({ name, layer });
   }
 
-  ctx.callbacks.onProgress?.("python_on_layers: inspecting layers…");
+  // Resolve skeleton entries. Each entry maps a layer name + segment IDs
+  // to the precomputed-skeleton source URL on that layer, suffixing the
+  // varName with "_skel" so it doesn't collide if the same name also
+  // appears in 'layers' (volume).
+  interface SkelResolved {
+    varName: string;
+    source: string;
+    segmentIds: string[];
+  }
+  const resolvedSkeletons: SkelResolved[] = [];
+  if (hasSkeletons) {
+    for (const raw of skeletonsArg as unknown[]) {
+      if (!raw || typeof raw !== "object") {
+        throw new Error("Each entry in 'skeletons' must be an object with 'layer' and 'segment_ids'.");
+      }
+      const r = raw as Record<string, unknown>;
+      const layerName = String(r.layer ?? r.name ?? "").trim();
+      if (!layerName) throw new Error("skeletons[].layer is required");
+      const idsRaw = r.segment_ids ?? r.ids;
+      if (!Array.isArray(idsRaw) || idsRaw.length === 0) {
+        throw new Error(`skeletons['${layerName}'].segment_ids is required (non-empty list).`);
+      }
+      const segmentIds = (idsRaw as unknown[]).map((v) => String(v));
+      const layer = ctx.descriptor.layers.find((l) => l.name === layerName);
+      if (!layer) {
+        throw new Error(`No layer named '${layerName}' for skeleton input.`);
+      }
+      const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+      const skelSource = sources.find(
+        (s) => /\/skeleton\b|\/skeletons?\//i.test(s) || /^precomputed:\/\/.*skeleton/i.test(s),
+      );
+      if (!skelSource) {
+        throw new Error(
+          `Layer '${layerName}' has no precomputed-skeleton source (call describe_dataset to see what sources it has).`,
+        );
+      }
+      const safeVar = layerName.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+      resolvedSkeletons.push({
+        varName: `${safeVar}_skel`,
+        source: skelSource,
+        segmentIds,
+      });
+    }
+  }
+
+  ctx.callbacks.onProgress?.(
+    resolved.length > 0
+      ? "python_on_layers: inspecting layers…"
+      : "python_on_layers: preparing skeletons…",
+  );
   const client = new AnalysisClient();
   const layersForRequest: {
     varName: string;
@@ -634,11 +722,16 @@ async function execPythonOnLayers(
       };
     });
 
-    ctx.callbacks.onProgress?.("python_on_layers: running on layer voxels…");
+    ctx.callbacks.onProgress?.(
+      `python_on_layers: running (${layersForRequest.length} layer${layersForRequest.length === 1 ? "" : "s"}${
+        resolvedSkeletons.length > 0 ? `, ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
+      })…`,
+    );
     const result = await client.customAnalyze(
       {
         kind: "custom",
         layers: layersForRequest,
+        skeletonLayers: resolvedSkeletons.length > 0 ? resolvedSkeletons : undefined,
         tables,
         code,
         timeoutMs: 60000,
