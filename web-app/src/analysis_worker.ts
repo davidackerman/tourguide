@@ -996,11 +996,22 @@ for _name in list(_tg_layer_names):
     _arr = np.asarray(globals()[f'__tg_{_name}_data']).reshape(
         tuple(int(x) for x in list(globals()[f'__tg_{_name}_shape']))
     )
+    _sp = tuple(float(x) for x in list(globals()[f'__tg_{_name}_spacing']))
+    _of = tuple(float(x) for x in list(globals()[f'__tg_{_name}_offsets']))
+    _ax = [str(a) for a in list(globals()[f'__tg_{_name}_axes'])]
+    # Aliases on the layer dict — describe_dataset returns voxel_size_nm
+    # / offset_nm, scipy/skimage convention is 'spacing'. Accept any of
+    # these so the model's reasonable guesses just work instead of
+    # KeyError-looping on naming inconsistency.
     layers[_name] = {
         "array": _arr,
-        "spacing": tuple(float(x) for x in list(globals()[f'__tg_{_name}_spacing'])),
-        "offsets": tuple(float(x) for x in list(globals()[f'__tg_{_name}_offsets'])),
-        "axes":    [str(a) for a in list(globals()[f'__tg_{_name}_axes'])],
+        "spacing": _sp,
+        "voxel_size_nm": _sp,
+        "spacing_nm": _sp,
+        "offsets": _of,
+        "offset_nm": _of,
+        "offset": _of,
+        "axes": _ax,
     }
     # Expose the bare array under its var name (the common case).
     globals()[_name] = _arr
@@ -1238,16 +1249,21 @@ if _TG_ADD_SOURCE_LAYER is not None:
 _tg_new_layer_spec = None
 if _TG_NEW_LAYER is not None:
     nl = _TG_NEW_LAYER
-    arr = nl.get("array") if isinstance(nl, dict) else None
+    if not isinstance(nl, dict):
+        raise ValueError("_TG_NEW_LAYER must be a dict")
+    # Accept the alias names the model commonly tries, in priority order.
+    # 'array' / 'data' for the volume; spacing aliases match the layer
+    # dict's aliases above; offset accepted in singular and plural.
+    arr = nl.get("array")
+    if arr is None: arr = nl.get("data")
     if arr is None:
-        raise ValueError("_TG_NEW_LAYER must be a dict with an 'array' key")
+        raise ValueError("_TG_NEW_LAYER must contain 'array' (the ndarray)")
     if not isinstance(arr, np.ndarray):
         arr = np.asarray(arr)
-    # Default spacing/offsets/axes to the first selected input layer's values.
     _default = layers[list(_tg_layer_names)[0]] if list(_tg_layer_names) else None
-    _spacing = nl.get("spacing")
+    _spacing = nl.get("spacing") or nl.get("voxel_size_nm") or nl.get("spacing_nm")
     if _spacing is None and _default is not None: _spacing = _default["spacing"]
-    _offsets = nl.get("offsets")
+    _offsets = nl.get("offsets") or nl.get("offset_nm") or nl.get("offset")
     if _offsets is None and _default is not None: _offsets = _default["offsets"]
     _axes = nl.get("axes")
     if _axes is None and _default is not None: _axes = _default["axes"]

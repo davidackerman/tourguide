@@ -73,11 +73,7 @@ interface ToolCall {
 // cap mostly lets a confused model burn through your Gemini free-tier
 // quota chasing its tail. If a real query needs more, the user can ask
 // a follow-up.
-// Bumped from 5 to 8: with describe_dataset + python_on_layers + an
-// inevitable retry on a Python KeyError / first-pass typo, 5 was tight
-// enough to cap turns mid-recovery. 8 still keeps the model from
-// chasing its tail forever on a confused multi-tool flow.
-const MAX_ITERATIONS = 8;
+const MAX_ITERATIONS = 5;
 
 const SCHEMA_GUIDE = (db: DatasetDB): string => {
   const tableLines = db.tables
@@ -230,23 +226,13 @@ TOOLS:
                     chosen runtime's byte budget (≤1.5 GB for local
                     Pyodide, ≤5 GB for HF backend) and binds each as a
                     numpy array under its 'organelle_class' (or
-                    sanitized layer name).
-                    PER-LAYER METADATA — every requested layer is also
-                    available at layers["<varName>"] as a dict with
-                    EXACTLY these keys (subscript only, no attribute
-                    access):
-                       "array"   — the numpy ndarray (same as the bare
-                                   variable)
-                       "spacing" — voxel size nm, ARRAY-AXIS order
-                                   (typically z,y,x — see "axes")
-                       "offsets" — world origin nm, ARRAY-AXIS order
-                                   (NOTE plural 'offsets', not 'offset')
-                       "axes"    — list of axis names like
-                                   ["z","y","x"], defines the order of
-                                   spacing/offsets above
-                    Do NOT guess other keys (no 'voxel_size_nm',
-                    'spacing_nm', 'offset', 'shape', 'dtype' on this
-                    dict — they don't exist; use the listed four).
+                    sanitized layer name). Per-layer metadata is at
+                    layers["<varName>"]: "array" (ndarray), "spacing"
+                    / "voxel_size_nm" (voxel size nm, array-axis
+                    order), "offsets" / "offset_nm" (world origin nm,
+                    array-axis order), "axes" (e.g. ["z","y","x"]).
+                    Both spacing/voxel_size_nm and offsets/offset_nm
+                    are aliases — use whichever you remember.
       'skeletons' — array of {"layer": str, "segment_ids": [...]} for
                     layers with a precomputed-skeleton source
                     (describe_dataset's has_skeleton). Binds
@@ -286,11 +272,15 @@ TOOLS:
       _TG_NEW_LAYER       persist a derived volume as a new NG layer.
                           Set to {"array": ndarray, "name": str,
                           "type": "image"|"segmentation",
-                          "spacing": [sz, sy, sx]   # array-axis order
-                          "offsets": [oz, oy, ox]   # array-axis order
-                          "axes": ["z","y","x"]}     # optional, defaults to first input layer's axes
-                          NOTE the keys are "array"/"spacing"/"offsets" —
-                          NOT "data"/"spacing_nm"/"offset_nm".
+                          "spacing": [sz, sy, sx],   # array-axis order
+                          "offsets": [oz, oy, ox],   # array-axis order
+                          "axes": ["z","y","x"]}     # optional; defaults to first input layer's axes
+                          Aliases accepted: "data" for "array",
+                          "voxel_size_nm" / "spacing_nm" for "spacing",
+                          "offset_nm" / "offset" for "offsets". If you
+                          omit spacing/offsets, they default to the
+                          first input layer's values — fine when the
+                          output shape matches the input.
       _TG_NEW_MESH_LAYER  per-id meshing → precomputed mesh layer.
       _TG_PLOT            matplotlib figure (auto-captured).
       _TG_FLY             {"pos": [x,y,z], "segment_id": str?, "layer": str?}.
@@ -1385,13 +1375,13 @@ function synthesizeErrorHint(
     if (lower.includes("not a zarr source")) {
       return `python_on_layers currently only loads zarr layers. Skeleton / precomputed-mesh inputs aren't yet supported through this tool.`;
     }
-    // KeyError on the layers dict — agent guessed a wrong key. Surface
-    // the exact four allowed keys so it doesn't burn iterations cycling
-    // through 'offset' / 'voxel_size_nm' / 'spacing_nm' / etc.
+    // KeyError on the layers dict — should be rare now that we alias
+    // the common variants, but if the model invents something
+    // genuinely outside the set we surface the canonical keys.
     if (lower.includes("keyerror")) {
       const m = errMsg.match(/KeyError:\s*['"]?([^'"\n]+)['"]?/);
       const bad = m ? m[1] : "<that key>";
-      return `KeyError on '${bad}'. layers["<name>"] is a dict with EXACTLY these keys: "array" (ndarray), "spacing" (voxel size nm, array-axis order), "offsets" (plural — world origin nm, array-axis order), "axes" (e.g. ["z","y","x"]). It does NOT have 'offset' (singular), 'voxel_size_nm', 'spacing_nm', 'shape', or 'dtype'. For a derived volume passed via _TG_NEW_LAYER use the same key names: {"array": ndarray, "name": str, "type": "segmentation"|"image", "spacing": [...], "offsets": [...]}.`;
+      return `KeyError on '${bad}'. layers["<name>"] has: "array", "spacing" (alias "voxel_size_nm"), "offsets" (alias "offset_nm"), "axes". For shape/dtype, use array.shape and array.dtype on the bare variable.`;
     }
   }
   return "";
