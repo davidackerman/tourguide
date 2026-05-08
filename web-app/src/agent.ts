@@ -1057,7 +1057,10 @@ async function execPythonOnLayers(
       const numVox = l._shape.reduce((a, b) => a * b, 1);
       return `   shape ${l._shape.join("×")} · ${fmtVoxel(l._voxelNm)} nm/vox · ${numVox.toLocaleString()} voxels`;
     });
-    const metaLine = `${runtime === "backend" ? "🖥️ backend" : "💻 local"} · ${scaleBlurb}${
+    const runtimeLabel = runtime === "backend"
+      ? "🖥️ started on HF backend"
+      : "💻 started locally (in-browser Pyodide)";
+    const metaLine = `${runtimeLabel} · ${scaleBlurb}${
       resolvedSkeletons.length > 0 ? ` · ${resolvedSkeletons.length} skeleton input${resolvedSkeletons.length === 1 ? "" : "s"}` : ""
     }\n${detailLines.join("\n")}`;
     ctx.callbacks.onMeta?.(metaLine);

@@ -366,6 +366,32 @@ export class GeminiBackend implements LLMBackend {
       body: JSON.stringify(body),
       signal: options.signal,
     });
+    // 503 UNAVAILABLE = "model is overloaded; try again later". Gemini
+    // doesn't include a Retry-After, so use a short exponential backoff
+    // (1s, 2s, 4s) before surfacing the error. Aborts via the signal
+    // jump out of the wait.
+    let retries503 = 0;
+    while (res.status === 503 && retries503 < 3) {
+      const waitMs = 1000 * 2 ** retries503;
+      retries503 += 1;
+      options.onToken?.("", `Gemini overloaded (503); retrying in ${waitMs / 1000}s (attempt ${retries503}/3)…`);
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, waitMs);
+        if (options.signal) {
+          options.signal.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        }
+      });
+      GeminiBackend.requestCount += 1;
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+    }
     if (res.status === 429) {
       // Parse Gemini's retryInfo block to see how long to wait. Free-tier
       // RPM bumps usually give a small delay (~10–30s); we honor it once
@@ -394,6 +420,13 @@ export class GeminiBackend implements LLMBackend {
       }
     } else if (!res.ok) {
       const text = await res.text();
+      // For 503 specifically (model overloaded after our retries),
+      // a short friendly message beats dumping the JSON envelope.
+      if (res.status === 503) {
+        throw new Error(
+          `Gemini is overloaded right now (503 UNAVAILABLE). Tried ${retries503} retries with backoff. Try again in a moment, or switch model in Settings.`,
+        );
+      }
       throw new Error(`Gemini API error ${res.status}: ${text.slice(0, 400)}`);
     }
     if (!useStream) {
