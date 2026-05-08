@@ -692,14 +692,27 @@ layers:
     }
     const name = ngstateNameInput.value.trim() || "ngstate_paste";
     try {
-      // Build a placeholder descriptor first; voxel size is auto-filled
-      // below the same way the YAML loader does it.
+      // Pull voxel size + initial position out of the NG state's own
+      // 'dimensions' and 'position' fields when available. This is the
+      // ground truth for a state pasted from a working NG tab — the
+      // user already has it set correctly there. Without this we'd fall
+      // back to autofillVoxelFromFirstSource (zarr metadata probe),
+      // which fails for layer URLs that point at sub-arrays rather than
+      // a multiscales root and leaves the descriptor at the [1,1,1]
+      // placeholder. That displayed as "1 × 1 × 1 nm" in the sidebar
+      // and made every nm coordinate off by a factor of (true voxel size).
+      const fromNg = readVoxelAndPositionFromNgState(parsed.ng);
       let descriptor = buildDescriptorFromInput({
         name,
-        voxel_size_nm: [1, 1, 1], // placeholder, autofill replaces below
+        voxel_size_nm: fromNg.voxel_size_nm ?? [1, 1, 1],
         layers,
+        initial_position: fromNg.position_nm,
       });
-      descriptor = await autofillVoxelFromFirstSource(descriptor);
+      // Only run the zarr probe if the NG state didn't carry dimensions —
+      // for state pasted from a working tab it always will.
+      if (!fromNg.voxel_size_nm) {
+        descriptor = await autofillVoxelFromFirstSource(descriptor);
+      }
       onLoad(descriptor, parsed.ng);
       close();
     } catch (err) {
@@ -708,6 +721,59 @@ layers:
   });
 
   document.body.appendChild(overlay);
+}
+
+// Parse Neuroglancer state's `dimensions` + `position` into world-nm
+// values for our descriptor.
+//
+// `dimensions` shape (per NG): { x: [scale, unit], y: [scale, unit], z: [scale, unit], ... }
+//   scale is a number, unit is a string like "m" / "nm" / "um". Anything
+//   non-spatial (t / c) is skipped. `position` is in *NG output units*,
+//   i.e. multiply by scale (in metres) × 1e9 to convert to nm.
+//
+// Returns whichever fields are recoverable; either may be undefined.
+function readVoxelAndPositionFromNgState(ng: Record<string, unknown>): {
+  voxel_size_nm?: [number, number, number];
+  position_nm?: [number, number, number];
+} {
+  const dims = ng.dimensions;
+  if (!dims || typeof dims !== "object") return {};
+  const dimsObj = dims as Record<string, unknown>;
+  // Map axis name → metres-per-unit. NG stores spatial axes as
+  // [scale_in_unit, unit_string]; common units are "m", "nm", "um".
+  const M: Record<string, number> = { m: 1, mm: 1e-3, um: 1e-6, µm: 1e-6, nm: 1e-9, "Å": 1e-10 };
+  const axisToMpu: Record<string, number> = {};
+  for (const [name, raw] of Object.entries(dimsObj)) {
+    if (!Array.isArray(raw) || raw.length < 2) continue;
+    const scale = Number(raw[0]);
+    const unit = String(raw[1]);
+    if (!Number.isFinite(scale)) continue;
+    if (!(unit in M)) continue;
+    axisToMpu[name] = scale * M[unit];
+  }
+  let voxel_size_nm: [number, number, number] | undefined;
+  if (axisToMpu.x !== undefined && axisToMpu.y !== undefined && axisToMpu.z !== undefined) {
+    voxel_size_nm = [axisToMpu.x * 1e9, axisToMpu.y * 1e9, axisToMpu.z * 1e9];
+  }
+  // Position. NG stores it in dim-axis order, which is the iteration
+  // order of the dimensions object. We need to map by axis name so a
+  // {z, y, x} state becomes our {x, y, z} world-nm.
+  let position_nm: [number, number, number] | undefined;
+  const pos = ng.position;
+  if (Array.isArray(pos) && pos.length >= 3 && voxel_size_nm) {
+    const axisNames = Object.keys(dimsObj);
+    const byAxis: Record<string, number> = {};
+    for (let i = 0; i < axisNames.length && i < pos.length; i++) {
+      const v = Number(pos[i]);
+      if (!Number.isFinite(v)) continue;
+      // Convert from NG units to nm using the per-axis metres-per-unit.
+      byAxis[axisNames[i]] = v * (axisToMpu[axisNames[i]] ?? 1e-9) * 1e9;
+    }
+    if (byAxis.x !== undefined && byAxis.y !== undefined && byAxis.z !== undefined) {
+      position_nm = [byAxis.x, byAxis.y, byAxis.z];
+    }
+  }
+  return { voxel_size_nm, position_nm };
 }
 
 function escapeAttr(s: string): string {
