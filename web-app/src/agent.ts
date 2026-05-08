@@ -73,7 +73,11 @@ interface ToolCall {
 // cap mostly lets a confused model burn through your Gemini free-tier
 // quota chasing its tail. If a real query needs more, the user can ask
 // a follow-up.
-const MAX_ITERATIONS = 5;
+// Bumped from 5 to 8: with describe_dataset + python_on_layers + an
+// inevitable retry on a Python KeyError / first-pass typo, 5 was tight
+// enough to cap turns mid-recovery. 8 still keeps the model from
+// chasing its tail forever on a confused multi-tool flow.
+const MAX_ITERATIONS = 8;
 
 const SCHEMA_GUIDE = (db: DatasetDB): string => {
   const tableLines = db.tables
@@ -227,6 +231,22 @@ TOOLS:
                     Pyodide, ≤5 GB for HF backend) and binds each as a
                     numpy array under its 'organelle_class' (or
                     sanitized layer name).
+                    PER-LAYER METADATA — every requested layer is also
+                    available at layers["<varName>"] as a dict with
+                    EXACTLY these keys (subscript only, no attribute
+                    access):
+                       "array"   — the numpy ndarray (same as the bare
+                                   variable)
+                       "spacing" — voxel size nm, ARRAY-AXIS order
+                                   (typically z,y,x — see "axes")
+                       "offsets" — world origin nm, ARRAY-AXIS order
+                                   (NOTE plural 'offsets', not 'offset')
+                       "axes"    — list of axis names like
+                                   ["z","y","x"], defines the order of
+                                   spacing/offsets above
+                    Do NOT guess other keys (no 'voxel_size_nm',
+                    'spacing_nm', 'offset', 'shape', 'dtype' on this
+                    dict — they don't exist; use the listed four).
       'skeletons' — array of {"layer": str, "segment_ids": [...]} for
                     layers with a precomputed-skeleton source
                     (describe_dataset's has_skeleton). Binds
@@ -264,10 +284,13 @@ TOOLS:
               fastmorph.spherical_* directly without flipping.
     Output channels — set any to deliver results:
       _TG_NEW_LAYER       persist a derived volume as a new NG layer.
-                          Set to {"data": ndarray, "name": str,
+                          Set to {"array": ndarray, "name": str,
                           "type": "image"|"segmentation",
-                          "spacing_nm": [sx, sy, sz],
-                          "offset_nm": [ox, oy, oz]}.
+                          "spacing": [sz, sy, sx]   # array-axis order
+                          "offsets": [oz, oy, ox]   # array-axis order
+                          "axes": ["z","y","x"]}     # optional, defaults to first input layer's axes
+                          NOTE the keys are "array"/"spacing"/"offsets" —
+                          NOT "data"/"spacing_nm"/"offset_nm".
       _TG_NEW_MESH_LAYER  per-id meshing → precomputed mesh layer.
       _TG_PLOT            matplotlib figure (auto-captured).
       _TG_FLY             {"pos": [x,y,z], "segment_id": str?, "layer": str?}.
@@ -290,7 +313,7 @@ import cc3d
 from skimage import measure as _sk
 labels = cc3d.connected_components(mito, connectivity=26)
 spacing = layers["mito"]["spacing"]   # array-axis order (z,y,x typically)
-offset  = layers["mito"]["offset"]
+offsets = layers["mito"]["offsets"]   # SAME axis order as spacing
 props = _sk.regionprops_table(
     labels,
     spacing=spacing,
@@ -299,14 +322,13 @@ props = _sk.regionprops_table(
 df = pd.DataFrame(props)
 df["volume_nm_3"] = df["area"]
 # centroid-{0,1,2} are in the SAME axis order as spacing — z,y,x.
-# Convert to world-nm xyz and add the layer offset (also array-axis
-# order). com_x_nm gets the LAST axis (x), z gets the FIRST.
+# Convert to world-nm xyz, adding the per-axis offset.
 ax = layers["mito"]["axes"]
 def col(name):
     return f"centroid-{ax.index(name)}"
-df["com_x_nm"] = df[col("x")] + offset[ax.index("x")]
-df["com_y_nm"] = df[col("y")] + offset[ax.index("y")]
-df["com_z_nm"] = df[col("z")] + offset[ax.index("z")]
+df["com_x_nm"] = df[col("x")] + offsets[ax.index("x")]
+df["com_y_nm"] = df[col("y")] + offsets[ax.index("y")]
+df["com_z_nm"] = df[col("z")] + offsets[ax.index("z")]
 df["object_id"] = df["label"].astype(int)
 _TG_TABLE = df[["object_id","volume_nm_3","com_x_nm","com_y_nm","com_z_nm","equivalent_diameter"]]
 _TG_TABLE_NAME = "mito"
@@ -320,10 +342,10 @@ _TG_NARRATION = f"Measured {len(df)} mito components."
 import fastmorph
 spacing = layers["mito"]["spacing"]   # array-axis order; pass directly
 out = fastmorph.spherical_erode(mito, radius=50, anisotropy=spacing)
-_TG_NEW_LAYER = {"data": out, "name": "mito_eroded_50nm",
+_TG_NEW_LAYER = {"array": out, "name": "mito_eroded_50nm",
                  "type": "segmentation",
-                 "spacing_nm": spacing,
-                 "offset_nm": layers["mito"]["offset"]}
+                 "spacing": spacing,
+                 "offsets": layers["mito"]["offsets"]}
 """
 
       "make meshes for mito + cilia" -> python_on_layers
@@ -345,7 +367,7 @@ for name in ["mito", "cilia"]:
 _TG_NEW_MESH_LAYER = {"labels": layers["mito"]["array"],
                       "name": "mito_meshes",
                       "spacing": layers["mito"]["spacing"],
-                      "offsets": layers["mito"]["offset"]}
+                      "offsets": layers["mito"]["offsets"]}
 """
 
       "length of the longest mito skeletons" ->
@@ -1358,10 +1380,18 @@ function synthesizeErrorHint(
     if (lower.includes("modulenotfounderror") || lower.includes("no module named")) {
       const m = errMsg.match(/No module named ['"]?([\w.]+)['"]?/i);
       const pkg = m ? m[1] : "<that module>";
-      return `Module '${pkg}' isn't available in this analysis runtime. Available locally (Pyodide): numpy, scipy, scikit-image, pandas, matplotlib. Available on the HF backend (Run-on-backend toggle in the Custom Analysis dialog): cc3d, fastmorph, fastremap, edt, kimimaro, zmesh — switch to the backend if you need those. To add a new package permanently, edit hf-space/requirements.txt in the project repo (or in the user's HF Space fork) and redeploy. Pick a different approach with the available libraries for now.`;
+      return `Module '${pkg}' isn't available in this analysis runtime. Available locally (Pyodide): numpy, scipy, scikit-image, pandas, matplotlib. Available on the HF backend (auto-routing kicks in when you import these): cc3d, fastmorph, fastremap, edt, kimimaro, zmesh. To add a new package permanently, edit hf-space/requirements.txt and redeploy. Pick a different approach with the available libraries for now.`;
     }
     if (lower.includes("not a zarr source")) {
       return `python_on_layers currently only loads zarr layers. Skeleton / precomputed-mesh inputs aren't yet supported through this tool.`;
+    }
+    // KeyError on the layers dict — agent guessed a wrong key. Surface
+    // the exact four allowed keys so it doesn't burn iterations cycling
+    // through 'offset' / 'voxel_size_nm' / 'spacing_nm' / etc.
+    if (lower.includes("keyerror")) {
+      const m = errMsg.match(/KeyError:\s*['"]?([^'"\n]+)['"]?/);
+      const bad = m ? m[1] : "<that key>";
+      return `KeyError on '${bad}'. layers["<name>"] is a dict with EXACTLY these keys: "array" (ndarray), "spacing" (voxel size nm, array-axis order), "offsets" (plural — world origin nm, array-axis order), "axes" (e.g. ["z","y","x"]). It does NOT have 'offset' (singular), 'voxel_size_nm', 'spacing_nm', 'shape', or 'dtype'. For a derived volume passed via _TG_NEW_LAYER use the same key names: {"array": ndarray, "name": str, "type": "segmentation"|"image", "spacing": [...], "offsets": [...]}.`;
     }
   }
   return "";
