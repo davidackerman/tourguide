@@ -471,26 +471,47 @@ _TG_NEW_MESH_LAYER = {"labels": layers["mito"]["array"],
 """
 
       "length of the longest mito skeletons" ->
-         (1) run_sql to pick the IDs:
+         (1) run_sql to pick the IDs (or use describe_dataset if no
+             SQL table exists yet):
              SELECT object_id FROM mito ORDER BY volume_nm_3 DESC LIMIT 5
-         (2) python_on_layers with skeletons=[{"layer":"mito","segment_ids":[...]}]
+         (2) python_on_layers with ONLY skeletons (do NOT also pass
+             layers=["mito"] — that loads the volume too and wastes
+             hundreds of MB. The volume isn't needed for skeleton
+             length.):
+        skeletons=[{"layer":"mito","segment_ids":[...]}]
+        # NO 'layers' field at all.
         python="""
 # mito_skel = {seg_id: {"vertices": (N,3) nm, "edges": (M,2)}}
-lengths = {}
+import numpy as np, pandas as pd
+rows = []
 for sid, sk in mito_skel.items():
     v = sk["vertices"]; e = sk["edges"]
-    if len(e) == 0:
-        lengths[sid] = 0.0
-        continue
-    seg = v[e[:, 0]] - v[e[:, 1]]
-    lengths[sid] = float(np.linalg.norm(seg, axis=1).sum())
-import pandas as pd
-df = pd.DataFrame({"segment_id": list(lengths.keys()),
-                   "length_nm": list(lengths.values())})
-df = df.sort_values("length_nm", ascending=False).reset_index(drop=True)
+    L = 0.0 if len(e) == 0 else float(
+        np.linalg.norm(v[e[:, 0]] - v[e[:, 1]], axis=1).sum()
+    )
+    # Skeleton-vertex centroid as a stand-in COM. If the prior turn
+    # already saved real volume-derived COMs, the merge step below
+    # keeps those (the merged-by-object_id behaviour means existing
+    # com_x_nm/y/z survive when we also write com_x_nm here, and
+    # the merge picks new values column-by-column — i.e. our
+    # centroid wins where it overlaps; harmless either way).
+    c = v.mean(axis=0) if len(v) else np.array([0.0, 0.0, 0.0])
+    rows.append({
+        "object_id": int(sid),
+        "length_nm": L,
+        "com_x_nm": float(c[0]),
+        "com_y_nm": float(c[1]),
+        "com_z_nm": float(c[2]),
+    })
+df = pd.DataFrame(rows).sort_values("length_nm", ascending=False).reset_index(drop=True)
 _TG_TABLE = df
-_TG_TABLE_NAME = "mito_skeleton_lengths"
-_TG_NARRATION = f"Top mito by skeleton length: {df.iloc[0].segment_id} ({df.iloc[0].length_nm/1000:.1f} um)"
+_TG_TABLE_NAME = "mito"   # merges into the existing mito table by
+                          # object_id — prior columns (volume_nm_3,
+                          # surface_area_nm_2, ...) survive untouched.
+top = df.iloc[0]
+_TG_NARRATION = f"Longest mito by skeleton length: {int(top.object_id)} ({top.length_nm/1000:.1f} um)"
+_TG_FLY = {"layer": "mito", "segment_id": str(int(top.object_id)),
+           "pos": [float(top.com_x_nm), float(top.com_y_nm), float(top.com_z_nm)]}
 """
 
   answer(text: string)
@@ -592,6 +613,20 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     surface_area_nm_2, etc.). The structured browser uses these to
     let the user click a row and fly the viewer to that segment;
     skipping them breaks click-to-fly silently.
+  - TABLES MERGE BY object_id, NOT REPLACE: when you set
+    _TG_TABLE_NAME to a name that already exists in the SQL DB AND
+    both the existing table and your new DataFrame have an
+    object_id column, the harness MERGES on object_id — new columns
+    are added to existing rows, new values overwrite old ones for
+    columns that overlap, and existing rows whose object_id isn't
+    in your new DataFrame are preserved untouched. Two consequences:
+      (a) When you compute a NEW metric for an existing organelle
+          class (e.g. you've already saved 'mito' with volume + COM,
+          and now you're computing skeleton length), DON'T re-emit
+          the old columns — just object_id + the new metric. The
+          merge brings everything together.
+      (b) Re-running the same computation is safe — same columns +
+          object_ids → in-place update, no row duplication.
   - REQUIRED _TG_TABLE_NAME: when the table is per-object metrics
     for a layer X, name the table EXACTLY "X" (not "X_volumes" /
     "X_metrics" / "X_data"). The browser uses the table name as the

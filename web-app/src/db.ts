@@ -313,16 +313,70 @@ export async function ingestTableIntoDB(
     db = { db: new SQL.Database(), tables: [] };
   }
   const tableName = tbl.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-  const types = inferTableTypes(tbl.columns, tbl.rows);
-  const colsDdl = tbl.columns.map((c) => `"${c}" ${types[c]}`).join(", ");
+
+  // Merge-by-object_id: if a table with this name already exists AND
+  // both the existing rows and the incoming rows have an object_id
+  // column, MERGE instead of replacing. New columns get added; new
+  // values overwrite old where columns overlap; existing rows whose
+  // object_id isn't in the incoming set are preserved (with NULLs in
+  // any new columns). This keeps prior turns' metrics (volume,
+  // com_x_nm/y/z, etc.) alive when a follow-up turn computes only
+  // length_nm — without merge, click-to-fly silently broke whenever
+  // the second turn had fewer columns than the first.
+  const existingTableMeta = db.tables.find((t) => t.table_name === tableName);
+  const idCol = "object_id";
+  const newHasId = tbl.columns.includes(idCol);
+  const oldHasId =
+    existingTableMeta !== undefined && existingTableMeta.columns.includes(idCol);
+  let mergedColumns: string[];
+  let mergedRows: (number | string | null)[][];
+  if (existingTableMeta && newHasId && oldHasId) {
+    // Read existing rows, then merge.
+    const existing = runQuery(db.db, `SELECT * FROM "${tableName}"`);
+    const newIdIdx = tbl.columns.indexOf(idCol);
+    const oldIdIdx = existing.columns.indexOf(idCol);
+    // Column union, preserving existing-table order then appending
+    // new-only columns. The id column lives once.
+    const allCols = [...existing.columns];
+    for (const c of tbl.columns) if (!allCols.includes(c)) allCols.push(c);
+    // Map id → merged row keyed by allCols.
+    const byId = new Map<string, (number | string | null)[]>();
+    for (const row of existing.rows) {
+      const id = String(row[oldIdIdx]);
+      const merged = allCols.map((c) => {
+        const oi = existing.columns.indexOf(c);
+        return oi >= 0 ? (row[oi] as number | string | null) : null;
+      });
+      byId.set(id, merged);
+    }
+    for (const row of tbl.rows) {
+      const id = String(row[newIdIdx]);
+      const prior = byId.get(id) ?? allCols.map(() => null);
+      // New values overwrite prior for columns the new table actually has.
+      tbl.columns.forEach((c, ni) => {
+        const ai = allCols.indexOf(c);
+        if (ai >= 0) prior[ai] = row[ni];
+      });
+      byId.set(id, prior);
+    }
+    mergedColumns = allCols;
+    mergedRows = [...byId.values()];
+  } else {
+    // Fresh ingest, or no shared object_id key — full replace as before.
+    mergedColumns = tbl.columns;
+    mergedRows = tbl.rows;
+  }
+
+  const types = inferTableTypes(mergedColumns, mergedRows);
+  const colsDdl = mergedColumns.map((c) => `"${c}" ${types[c]}`).join(", ");
   db.db.run(`DROP TABLE IF EXISTS "${tableName}";`);
   db.db.run(`CREATE TABLE "${tableName}" (${colsDdl});`);
-  const placeholders = tbl.columns.map(() => "?").join(", ");
-  const colList = tbl.columns.map((c) => `"${c}"`).join(", ");
+  const placeholders = mergedColumns.map(() => "?").join(", ");
+  const colList = mergedColumns.map((c) => `"${c}"`).join(", ");
   const stmt = db.db.prepare(`INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders});`);
   db.db.run("BEGIN;");
   try {
-    for (const row of tbl.rows) {
+    for (const row of mergedRows) {
       stmt.run(row.map((v) => (v === undefined ? null : v)));
     }
     db.db.run("COMMIT;");
@@ -355,8 +409,8 @@ export async function ingestTableIntoDB(
     table_name: tableName,
     organelle_class: tableName,
     layer_name: resolvedLayerName,
-    row_count: tbl.rows.length,
-    columns: tbl.columns,
+    row_count: mergedRows.length,
+    columns: mergedColumns,
   };
   const existingIdx = db.tables.findIndex((t) => t.table_name === tableName);
   if (existingIdx >= 0) db.tables[existingIdx] = entry;
