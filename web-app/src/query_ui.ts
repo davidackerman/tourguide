@@ -300,6 +300,14 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const wrap = document.createElement("div");
       wrap.className = "ask-form";
+      // Heading makes the form unmissable when scrolling — the previous
+      // version sat between meta and answer with no visual signal that
+      // the agent was *waiting* for the user. Easy to type into the
+      // chat input by mistake instead of using the radio buttons.
+      const header = document.createElement("div");
+      header.className = "ask-form-header";
+      header.textContent = "❓ The agent has a question for you";
+      wrap.appendChild(header);
       const promptEl = document.createElement("div");
       promptEl.className = "ask-form-prompt";
       promptEl.textContent = prompt;
@@ -445,19 +453,34 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       // way once submitted.
       card.metaEl.after(wrap);
 
+      // Disable the chat input + Ask button while the form is open
+      // so the user can't type a free-text answer that the agent
+      // would never see. We restore the original placeholder + state
+      // when the form settles.
+      const prevPlaceholder = input.placeholder;
+      const prevInputDisabled = input.disabled;
+      const prevButtonDisabled = button.disabled;
+      input.disabled = true;
+      input.placeholder = "↑ Answer the agent's question above to continue…";
+      button.disabled = true;
+
       let settled = false;
       const settle = (ok: boolean, value?: Record<string, unknown>): void => {
         if (settled) return;
         settled = true;
-        // Disable inputs so the user can scroll back and see what they
-        // picked, but can't submit twice or change the answer after
-        // the agent's already moved on.
+        // Disable form inputs so the user can scroll back and see
+        // what they picked, but can't submit twice or change the
+        // answer after the agent's already moved on.
         wrap.classList.add("ask-form-submitted");
         wrap.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(
           "input, select, button",
         ).forEach((el) => {
           el.disabled = true;
         });
+        // Re-enable the chat input now that the question is answered.
+        input.disabled = prevInputDisabled;
+        button.disabled = prevButtonDisabled;
+        input.placeholder = prevPlaceholder;
         if (ok && value) resolve(value);
         else reject(new DOMException("ask_user cancelled", "AbortError"));
       };
@@ -474,9 +497,11 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
         if (signal.aborted) settle(false);
         else signal.addEventListener("abort", () => settle(false), { once: true });
       }
-      // Focus the first focusable input so keyboard users can answer
-      // immediately without reaching for the mouse.
+      // Scroll the form into view + focus the first input so keyboard
+      // users can answer immediately without reaching for the mouse,
+      // and the form is impossible to miss visually.
       requestAnimationFrame(() => {
+        wrap.scrollIntoView({ block: "center", behavior: "smooth" });
         const first = wrap.querySelector<HTMLElement>("input, select, button.btn-primary");
         first?.focus();
       });

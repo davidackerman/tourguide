@@ -894,10 +894,26 @@ button {
 .ask-form {
   margin: 0.5rem 0;
   padding: 0.6rem 0.7rem;
-  border: 1px solid var(--accent, #4a7);
+  border: 2px solid var(--accent, #4a7);
   border-radius: 4px;
   background: var(--bg);
   font-size: 0.85rem;
+  /* Pulse on initial render so the user notices the form even if
+     they were watching the chat input. Brief, no animation while
+     idle (the keyframes only fire once per element on add). */
+  animation: ask-form-pulse 0.9s ease-out 1;
+}
+@keyframes ask-form-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent, #4a7); }
+  100% { box-shadow: 0 0 0 12px transparent; }
+}
+.ask-form-header {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent, #4a7);
+  margin-bottom: 0.4rem;
 }
 .ask-form-prompt {
   font-weight: 500;
