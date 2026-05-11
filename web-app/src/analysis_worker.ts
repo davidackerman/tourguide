@@ -21,6 +21,10 @@ import {
   normalizeSkeletonBase,
   type ParsedSkeleton,
 } from "./skeleton_loader.js";
+import {
+  fetchLegacyMesh,
+  type ParsedMesh,
+} from "./precomputed_mesh_loader.js";
 
 // Pin to same Pyodide version as plot.ts so both features share a cache of
 // wheels when the browser revisits.
@@ -78,6 +82,17 @@ export interface CustomRequest {
     // per-source transform into the skeleton's coords so the
     // multi-source layer (volume + mesh + skeleton) stays aligned
     // in analysis math.
+    offsetNm?: [number, number, number];
+  }[];
+  // Precomputed mesh inputs — fetched per segment, parsed, and
+  // exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
+  // "faces": ndarray (M,3)}}. Currently supports legacy single-LOD
+  // unsharded mesh format only; multilod_draco / sharded variants
+  // throw with a clear error so the agent knows the limitation.
+  meshLayers?: {
+    varName: string;
+    source: string;
+    segmentIds: string[];
     offsetNm?: [number, number, number];
   }[];
   // DataFrames already in the sql.js DB that should be exposed to Python as
@@ -960,6 +975,46 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
     if (misses.length > 0) skeletonMisses[skel.varName] = misses;
   }
 
+  // Fetch any requested meshes (parallel to the skeleton loop above).
+  // Currently only legacy single-LOD unsharded format. Multi-LOD draco
+  // / sharded variants throw — caught here, recorded in misses with a
+  // clear error so the Python side can surface it.
+  const meshes: Record<string, Map<string, ParsedMesh>> = {};
+  const meshMisses: Record<string, string[]> = {};
+  for (const meshLayer of msg.meshLayers ?? []) {
+    const got = new Map<string, ParsedMesh>();
+    const misses: string[] = [];
+    for (const segId of meshLayer.segmentIds) {
+      try {
+        progress(
+          `Reading mesh ${meshLayer.varName}[${segId}] (${got.size + 1}/${meshLayer.segmentIds.length}) …`,
+          "mesh",
+        );
+        const parsed = await fetchLegacyMesh(meshLayer.source, segId);
+        // Apply NG-state per-source translation if any, mirroring
+        // the skeleton path. Mutates a fresh copy.
+        if (meshLayer.offsetNm && (meshLayer.offsetNm[0] || meshLayer.offsetNm[1] || meshLayer.offsetNm[2])) {
+          const v = new Float32Array(parsed.vertices);
+          const [dx, dy, dz] = meshLayer.offsetNm;
+          for (let i = 0; i < v.length; i += 3) {
+            v[i] += dx;
+            v[i + 1] += dy;
+            v[i + 2] += dz;
+          }
+          got.set(segId, { ...parsed, vertices: v });
+        } else {
+          got.set(segId, parsed);
+        }
+      } catch (err) {
+        misses.push(segId);
+        console.warn(`[worker] mesh ${meshLayer.varName}[${segId}] failed: ${(err as Error).message}`);
+      }
+      if (cancelled) return;
+    }
+    meshes[meshLayer.varName] = got;
+    if (misses.length > 0) meshMisses[meshLayer.varName] = misses;
+  }
+
   progress("Loading Python runtime …", "python");
   const py = await ensurePyodide();
   // Custom mode needs pandas + matplotlib in addition to the regionprops set.
@@ -997,6 +1052,19 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
       py.globals.set(`__tg_skel_${layerName}_${segId}_e`, parsed.edges);
     }
     py.globals.set(`__tg_skel_${layerName}_seg_ids`, segIds);
+  }
+  // Mesh binding: same per-segment pattern as skeletons. vertices
+  // (N*3 float32) and faces (M*3 uint32) get reshaped in SETUP_PY.
+  py.globals.set("_tg_mesh_layer_names", Object.keys(meshes));
+  py.globals.set("_tg_mesh_misses_json", JSON.stringify(meshMisses));
+  for (const [layerName, perSeg] of Object.entries(meshes)) {
+    const segIds: string[] = [];
+    for (const [segId, parsed] of perSeg.entries()) {
+      segIds.push(segId);
+      py.globals.set(`__tg_mesh_${layerName}_${segId}_v`, parsed.vertices);
+      py.globals.set(`__tg_mesh_${layerName}_${segId}_f`, parsed.faces);
+    }
+    py.globals.set(`__tg_mesh_${layerName}_seg_ids`, segIds);
   }
   py.globals.set("_tg_user_code", msg.code);
   py.globals.set("_tg_timeout_ms", msg.timeoutMs);
@@ -1063,6 +1131,27 @@ for _name in list(_tg_skel_layer_names):
     if _miss:
         # Surface missing IDs as a sibling so user code / the agent can
         # check what wasn't loaded without a separate round-trip.
+        globals()[f"{_name}_missing_ids"] = list(_miss)
+
+# Reconstruct meshes. Same per-segment dict shape as skeletons, with
+# "vertices" (N,3 float32) + "faces" (M,3 uint32). Bound under the
+# bare varName (e.g. mito_mesh) and also collected under 'meshes'.
+meshes = {}
+_tg_mesh_misses = json.loads(_tg_mesh_misses_json)
+for _name in list(_tg_mesh_layer_names):
+    _per_seg = {}
+    for _seg in list(globals()[f'__tg_mesh_{_name}_seg_ids']):
+        _v = np.asarray(globals()[f'__tg_mesh_{_name}_{_seg}_v'], dtype=np.float32).reshape(-1, 3)
+        _f = np.asarray(globals()[f'__tg_mesh_{_name}_{_seg}_f'], dtype=np.uint32).reshape(-1, 3)
+        try:
+            _key = int(_seg)
+        except (TypeError, ValueError):
+            _key = str(_seg)
+        _per_seg[_key] = {"vertices": _v, "faces": _f}
+    meshes[_name] = _per_seg
+    globals()[_name] = _per_seg
+    _miss = _tg_mesh_misses.get(_name) or []
+    if _miss:
         globals()[f"{_name}_missing_ids"] = list(_miss)
 
 # Build DataFrames from sql.js tables sent across the wire.

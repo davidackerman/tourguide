@@ -133,3 +133,48 @@ export async function resolveBundledSubpath(
   const trimmed = base.replace(/\/$/, "");
   return `${trimmed}/${sub}`;
 }
+
+// Mesh-specific info file (one level down from the segmentation, at
+// <base>/<info.mesh>/info). Different shape from the segmentation
+// info: declares the on-disk format the mesh chunks use.
+//   @type: "neuroglancer_legacy_mesh"        — single fragment per
+//          segment, simple binary (num_v u32 + vertices f32 +
+//          indices u32). Easy to parse.
+//   @type: "neuroglancer_multilod_draco"     — multi-LOD draco-
+//          compressed fragments per segment, with manifests. Needs
+//          a draco decoder.
+//   sharding: { ... }                        — when present, all of
+//          the above is packed into shard files for efficiency
+//          (used by big datasets like hemibrain). Sharded readers
+//          are even more complex.
+export interface MeshInfo {
+  atType: string;
+  // For multilod_draco: vertex quantization bits, transform, etc.
+  // Stored opaquely; the mesh loader reads what it needs.
+  raw: Record<string, unknown>;
+  isSharded: boolean;
+}
+
+const MESH_INFO_CACHE = new Map<string, Promise<MeshInfo | null>>();
+
+export async function probeMeshInfo(meshBase: string): Promise<MeshInfo | null> {
+  if (!meshBase) return null;
+  const httpsBase = precomputedToHttps(meshBase).replace(/\/$/, "");
+  if (!/^https?:\/\//i.test(httpsBase)) return null;
+  const cached = MESH_INFO_CACHE.get(httpsBase);
+  if (cached) return cached;
+  const promise = (async (): Promise<MeshInfo | null> => {
+    try {
+      const res = await fetch(`${httpsBase}/info`);
+      if (!res.ok) return null;
+      const raw = (await res.json()) as Record<string, unknown>;
+      const atType = String(raw["@type"] ?? "");
+      const isSharded = raw["sharding"] !== undefined && raw["sharding"] !== null;
+      return { atType, raw, isSharded };
+    } catch {
+      return null;
+    }
+  })();
+  MESH_INFO_CACHE.set(httpsBase, promise);
+  return promise;
+}

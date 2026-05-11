@@ -12,7 +12,11 @@ import {
   SAFE_INPUT_BYTES,
   type CustomAnalysisResult,
 } from "./analysis.js";
-import { probePrecomputedInfo, resolveBundledSubpath } from "./precomputed_info.js";
+import {
+  probePrecomputedInfo,
+  resolveBundledSubpath,
+  probeMeshInfo,
+} from "./precomputed_info.js";
 import { loadSettings } from "./llm.js";
 import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
@@ -344,7 +348,7 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
       2) python_on_layers (using the resolved radius)
       3) done
 
-  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
+  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], meshes?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
     HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
     precomputed skeletons) loaded as numpy arrays — use this when the
     user asks you to OPERATE ON LAYERS (erode, dilate, threshold,
@@ -380,6 +384,20 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
                     '<layer>_skel_missing_ids' lists IDs without files.
                     Always provide segment_ids explicitly — usually
                     from a prior run_sql ORDER BY <metric> LIMIT N.
+      'meshes'    — array of {"layer": str, "segment_ids": [...]} for
+                    layers with a precomputed-mesh source. Use when
+                    the layer has no zarr volume (so regionprops on
+                    voxels isn't available) but does have meshes —
+                    THIS is how you compute volume / surface area
+                    on precomputed-only datasets. Binds
+                    '<layer>_mesh = {seg_id: {"vertices": (N,3) f32 nm,
+                    "faces": (M,3) u32}}'. CURRENTLY supports only
+                    the 'neuroglancer_legacy_mesh' on-disk format,
+                    non-sharded — describe_dataset reports
+                    mesh_format + mesh_analysis_supported so check
+                    before requesting. Multi-LOD draco + sharded
+                    variants aren't supported yet; the resolver
+                    errors clearly if you try them.
       'runtime'   — "auto" (default; harness picks). Use "backend" only
                     when the user explicitly asks for full resolution
                     or you know the dataset is huge. Use "local" only
@@ -387,7 +405,7 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
 
     RUNTIME AUTO-SELECTION (you don't usually need to think about this,
     but it shapes what code to write):
-      - 'skeletons' present                       → forced LOCAL
+      - 'skeletons' or 'meshes' present           → forced LOCAL
       - code imports cc3d / fastmorph / fastremap
         / edt / kimimaro / zmesh, OR sets
         _TG_NEW_MESH_LAYER                        → forced BACKEND
@@ -544,6 +562,52 @@ top = df.iloc[0]
 _TG_NARRATION = f"Longest mito by skeleton length: {int(top.object_id)} ({top.length_nm/1000:.1f} um)"
 _TG_FLY = {"layer": "mito", "segment_id": str(int(top.object_id)),
            "pos": [float(top.com_x_nm), float(top.com_y_nm), float(top.com_z_nm)]}
+"""
+
+      "volume of these segments" on a precomputed-mesh-only layer
+      (no zarr volume, no skeletons — describe_dataset reports
+      has_mesh=true, mesh_analysis_supported=true) ->
+        meshes=[{"layer":"segmentation","segment_ids":[...]}]
+        # NO 'layers' field — that would try to read precomputed
+        # volume voxels which isn't supported.
+        python="""
+# seg_mesh = {seg_id: {"vertices": (N,3) f32 nm, "faces": (M,3) u32}}
+# Compute volume + surface area + centroid from the triangle mesh:
+#   Volume via signed-tet integration: V = (1/6) * sum |v0 · (v1×v2)|
+#     for each triangle (works for closed meshes; absolute value
+#     handles non-CCW windings).
+#   Surface area: sum of 0.5 * |(v1-v0) × (v2-v0)|.
+#   Centroid: area-weighted triangle centroid.
+import numpy as np, pandas as pd
+rows = []
+for sid, m in seg_mesh.items():
+    v = m["vertices"]; f = m["faces"]
+    if len(f) == 0:
+        rows.append({"object_id": int(sid), "volume_nm_3": 0.0,
+                     "surface_area_nm_2": 0.0,
+                     "com_x_nm": 0.0, "com_y_nm": 0.0, "com_z_nm": 0.0})
+        continue
+    v0 = v[f[:, 0]]; v1 = v[f[:, 1]]; v2 = v[f[:, 2]]
+    cross = np.cross(v1 - v0, v2 - v0)
+    tri_area = 0.5 * np.linalg.norm(cross, axis=1)
+    surf_area = float(tri_area.sum())
+    tet_vol = np.einsum("ij,ij->i", v0, cross) / 6.0
+    vol = float(abs(tet_vol.sum()))
+    tri_cent = (v0 + v1 + v2) / 3.0
+    com = (tri_cent * tri_area[:, None]).sum(axis=0) / max(surf_area, 1e-12)
+    rows.append({
+        "object_id": int(sid),
+        "volume_nm_3": vol,
+        "surface_area_nm_2": surf_area,
+        "com_x_nm": float(com[0]),
+        "com_y_nm": float(com[1]),
+        "com_z_nm": float(com[2]),
+    })
+df = pd.DataFrame(rows).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
+_TG_TABLE = df
+_TG_TABLE_NAME = "segmentation"   # merges into existing table by object_id
+top = df.iloc[0]
+_TG_NARRATION = f"Largest segment by mesh volume: {int(top.object_id)} ({top.volume_nm_3/1e9:.2f} um^3)"
 """
 
   answer(text: string)
@@ -899,11 +963,13 @@ async function execPythonOnLayers(
   if (!code) throw new Error("python_on_layers requires 'python'");
   const layersArg = args.layers;
   const skeletonsArg = args.skeletons;
+  const meshesArgEarly = args.meshes;
   const hasLayers = Array.isArray(layersArg) && layersArg.length > 0;
   const hasSkeletons = Array.isArray(skeletonsArg) && skeletonsArg.length > 0;
-  if (!hasLayers && !hasSkeletons) {
+  const hasMeshesEarly = Array.isArray(meshesArgEarly) && meshesArgEarly.length > 0;
+  if (!hasLayers && !hasSkeletons && !hasMeshesEarly) {
     throw new Error(
-      "python_on_layers requires either 'layers' (zarr layer names) or 'skeletons' ([{layer, segment_ids}]).",
+      "python_on_layers requires at least one of: 'layers' (zarr layer names), 'skeletons' ([{layer, segment_ids}]), or 'meshes' ([{layer, segment_ids}]).",
     );
   }
   const layerNames = hasLayers ? (layersArg as unknown[]).map((v) => String(v)) : [];
@@ -937,9 +1003,11 @@ async function execPythonOnLayers(
         skelHint = ` This layer DOES have a skeleton source — try skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / connectivity / branching metrics.`;
       } else if (isPrecomputed) {
         // Probe the precomputed info file (cached) to see if
-        // skeletons / meshes are bundled. Tells the agent yes/no
-        // up front so it doesn't have to call describe_dataset
-        // separately just to discover this.
+        // skeletons / meshes are bundled. For meshes, also check
+        // the format — only legacy non-sharded is currently
+        // analyzable. Tells the agent yes/no up front so it
+        // doesn't have to call describe_dataset separately just
+        // to discover this.
         let bundledSkel: string | null = null;
         let bundledMesh: string | null = null;
         for (const s of sources) {
@@ -948,10 +1016,21 @@ async function execPythonOnLayers(
           if (!bundledMesh) bundledMesh = await resolveBundledSubpath(s, "mesh");
           if (bundledSkel && bundledMesh) break;
         }
-        if (bundledSkel) {
+        let meshAnalyzable = false;
+        if (bundledMesh) {
+          const minfo = await probeMeshInfo(bundledMesh);
+          if (minfo) {
+            meshAnalyzable = minfo.atType === "neuroglancer_legacy_mesh" && !minfo.isSharded;
+          }
+        }
+        if (bundledSkel && meshAnalyzable) {
+          skelHint = ` This precomputed dir bundles BOTH skeletons and (legacy-format) meshes. Pass skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / branching, OR meshes=[{"layer":"${name}","segment_ids":[...]}] for volume / surface area.`;
+        } else if (bundledSkel) {
           skelHint = ` This precomputed dir bundles skeletons (per its info file) — pass skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / branching metrics.`;
+        } else if (meshAnalyzable) {
+          skelHint = ` This precomputed dir bundles (legacy-format) meshes — pass meshes=[{"layer":"${name}","segment_ids":[...]}] for volume / surface area.`;
         } else if (bundledMesh) {
-          skelHint = ` This precomputed dir bundles meshes (per its info file) but no skeletons; mesh-based volume / surface area isn't supported yet.`;
+          skelHint = ` This precomputed dir bundles meshes, but the on-disk format isn't 'neuroglancer_legacy_mesh' or is sharded — Tourguide can't analyze it yet (no draco / shard reader).`;
         } else {
           skelHint = ` Probed the precomputed info file — no bundled meshes or skeletons.`;
         }
@@ -1034,6 +1113,78 @@ async function execPythonOnLayers(
     }
   }
 
+  // Resolve mesh entries — parallel to the skeleton loop above. Only
+  // legacy single-LOD unsharded meshes are readable right now; format
+  // probe gates this so the agent gets a clear error for multilod_draco
+  // / sharded variants instead of fetching binary that won't parse.
+  const meshesArg = args.meshes;
+  const hasMeshes = Array.isArray(meshesArg) && meshesArg.length > 0;
+  interface MeshResolved {
+    varName: string;
+    source: string;
+    segmentIds: string[];
+    offsetNm?: [number, number, number];
+  }
+  const resolvedMeshes: MeshResolved[] = [];
+  if (hasMeshes) {
+    for (const raw of meshesArg as unknown[]) {
+      if (!raw || typeof raw !== "object") {
+        throw new Error("Each entry in 'meshes' must be an object with 'layer' and 'segment_ids'.");
+      }
+      const r = raw as Record<string, unknown>;
+      const layerName = String(r.layer ?? r.name ?? "").trim();
+      if (!layerName) throw new Error("meshes[].layer is required");
+      const idsRaw = r.segment_ids ?? r.ids;
+      if (!Array.isArray(idsRaw) || idsRaw.length === 0) {
+        throw new Error(`meshes['${layerName}'].segment_ids is required (non-empty list).`);
+      }
+      const segmentIds = (idsRaw as unknown[]).map((v) => String(v));
+      const layer = ctx.descriptor.layers.find((l) => l.name === layerName);
+      if (!layer) {
+        throw new Error(`No layer named '${layerName}' for mesh input.`);
+      }
+      const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+      // 1. Path-based mesh source
+      let meshSource: string | null =
+        sources.find((s) => /\/mesh\b|\/meshes?\//i.test(s)) ?? null;
+      // 2. Bundled-in-precomputed (hemibrain pattern)
+      if (!meshSource) {
+        for (const s of sources) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const resolved = await resolveBundledSubpath(s, "mesh");
+          if (resolved) {
+            meshSource = resolved;
+            break;
+          }
+        }
+      }
+      if (!meshSource) {
+        throw new Error(
+          `Layer '${layerName}' has no mesh source. Call describe_dataset; mesh_format will be null when no mesh is available.`,
+        );
+      }
+      // 3. Probe the mesh info to confirm format is supported.
+      const minfo = await probeMeshInfo(meshSource);
+      if (!minfo) {
+        throw new Error(
+          `Couldn't read mesh info for '${layerName}' at ${meshSource}. Network error or unsupported format.`,
+        );
+      }
+      if (minfo.atType !== "neuroglancer_legacy_mesh" || minfo.isSharded) {
+        throw new Error(
+          `Mesh format '${minfo.atType || "(unknown)"}'${minfo.isSharded ? " (sharded)" : ""} on '${layerName}' isn't supported yet. Only 'neuroglancer_legacy_mesh' (unsharded) can be loaded; multi-LOD draco + sharded variants need a draco decoder + shard reader (not yet implemented). Skeletons or zarr volumes are the alternatives.`,
+        );
+      }
+      const safeVar = layerName.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+      resolvedMeshes.push({
+        varName: `${safeVar}_mesh`,
+        source: meshSource,
+        segmentIds,
+        offsetNm: layer.transform_offset_nm,
+      });
+    }
+  }
+
   // Decide which runtime (local Pyodide worker vs HF backend) to use.
   // 'auto' is the default, but a few signals force one or the other:
   //   - skeletons present → must run local (HF backend doesn't accept
@@ -1049,7 +1200,7 @@ async function execPythonOnLayers(
   const backendUrl = settings.analysisBackendUrl.trim();
   const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
   const codeNeedsMeshLayer = /\b_TG_NEW_MESH_LAYER\s*=/.test(code);
-  const mustBeLocal = resolvedSkeletons.length > 0;
+  const mustBeLocal = resolvedSkeletons.length > 0 || resolvedMeshes.length > 0;
   const mustBeBackend = codeImportsSeungLab || codeNeedsMeshLayer;
   if (mustBeLocal && mustBeBackend) {
     throw new Error(
@@ -1244,6 +1395,7 @@ async function execPythonOnLayers(
           kind: "custom",
           layers: requestLayers,
           skeletonLayers: resolvedSkeletons.length > 0 ? resolvedSkeletons : undefined,
+          meshLayers: resolvedMeshes.length > 0 ? resolvedMeshes : undefined,
           tables,
           code,
           timeoutMs: 60000,
@@ -1417,6 +1569,25 @@ async function execDescribeDataset(
             if (hasMesh && hasSkeleton) break;
           }
         }
+        // For any discovered mesh source (path-based OR bundled),
+        // probe its info file to learn the on-disk format. Surfaces
+        // whether mesh-based analysis is currently supported (legacy
+        // single-fragment = yes; multilod_draco / sharded = not yet).
+        let meshFormat: string | null = null;
+        let meshSharded = false;
+        let meshSupported = false;
+        const meshUrl =
+          bundled.mesh ??
+          sourceList.find((s) => /\/mesh\b|\/meshes?\//i.test(s));
+        if (meshUrl) {
+          const minfo = await probeMeshInfo(meshUrl);
+          if (minfo) {
+            meshFormat = minfo.atType || null;
+            meshSharded = minfo.isSharded;
+            meshSupported =
+              minfo.atType === "neuroglancer_legacy_mesh" && !minfo.isSharded;
+          }
+        }
         return {
           name: l.name,
           type: l.type,
@@ -1432,6 +1603,16 @@ async function execDescribeDataset(
           // already found the source.
           bundled_mesh_url: bundled.mesh ?? null,
           bundled_skeleton_url: bundled.skeletons ?? null,
+          // Mesh on-disk format (when a mesh source is present).
+          // "neuroglancer_legacy_mesh" + non-sharded = volume / surface
+          // area integration is supported via meshes=[...] on
+          // python_on_layers. multilod_draco / sharded variants need
+          // a draco decoder + shard reader (not yet implemented);
+          // those still let click-to-fly + visualization work, just
+          // not Python mesh analysis.
+          mesh_format: meshFormat,
+          mesh_sharded: meshSharded,
+          mesh_analysis_supported: meshSupported,
           inspectable: isZarrSource(l.source),
           // User-applied translation from the pasted NG state, if any.
           // Tourguide folds this into per-object positions
