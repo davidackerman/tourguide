@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "datasets": [
+    {
+      "name": "demo_synthetic",
+      "url": "datasets/demo.yaml"
+    },
+    {
+      "name": "jrc_hela-2",
+      "url": "datasets/jrc_hela-2.yaml"
+    }
+  ]
+}

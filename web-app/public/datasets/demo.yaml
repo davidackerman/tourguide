@@ -1,0 +1,30 @@
+name: demo_synthetic
+display_name: Demo (synthetic organelle data)
+description: |
+  Small synthetic dataset that reuses HeLa-2's image + segmentation layers
+  from the public janelia-cosem-datasets bucket, paired with locally-hosted
+  synthetic CSVs. Useful for verifying the structured browser and query
+  features without real organelle metadata.
+voxel_size_nm: [4, 4, 4]
+initial_position: [12000, 1600, 8342]
+projection_orientation: [0, 0, 0, 1]
+
+layers:
+  - name: fibsem-uint8
+    type: image
+    source: zarr://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.zarr/recon-1/em/fibsem-uint8/
+  - name: mito_seg
+    type: segmentation
+    organelle_class: mitochondria
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/mito_seg
+    csv: datasets/demo/mitochondria.csv
+  - name: nucleus_seg
+    type: segmentation
+    organelle_class: nucleus
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/nucleus_seg
+    csv: datasets/demo/nucleus.csv
+  - name: er_seg
+    type: segmentation
+    organelle_class: endoplasmic_reticulum
+    source: n5://s3://janelia-cosem-datasets/jrc_hela-2/jrc_hela-2.n5/labels/er_seg
+    csv: datasets/demo/endoplasmic_reticulum.csv

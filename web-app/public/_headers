@@ -1,0 +1,6 @@
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+
+/assets/*.wasm
+  Cross-Origin-Resource-Policy: cross-origin

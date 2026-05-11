@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tourguide</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand">tourguide</div>
+        <div class="topbar-group">
+          <label for="dataset-select" class="topbar-label">Dataset</label>
+          <select id="dataset-select" disabled>
+            <option>Loading…</option>
+          </select>
+          <button id="load-data-btn" class="btn-secondary" title="Load a different dataset (URL, folder, YAML, or NG state)">+ Load</button>
+        </div>
+        <!-- Analyze + Custom buttons are kept in the DOM so the agent's
+             🐍 Edit handoff can programmatically click #custom-btn, but
+             hidden from the toolbar — the agent is the unified entry
+             point for measure / morphology / Python now. -->
+        <div class="topbar-group" hidden>
+          <button id="analyze-btn" class="btn-secondary" title="(deprecated) Use the agent — say e.g. 'measure properties of mito'">∑ Analyze</button>
+          <button id="custom-btn" class="btn-secondary" title="(deprecated) Opened via per-step 🐍 Edit on agent traces">🐍 Custom</button>
+        </div>
+        <div class="topbar-group">
+          <button id="download-btn" class="btn-secondary" title="Download zarr layers as .zip">⬇ Save zarr</button>
+          <button id="share-btn" class="btn-secondary" title="Copy a shareable link with the current view + computed tables">🔗 Share</button>
+        </div>
+        <div class="topbar-group topbar-right">
+          <button id="settings-btn" class="btn-secondary" title="AI backend, analysis backend, and other settings">⚙ Settings</button>
+          <button id="backend-indicator" class="backend-indicator" title="Click to configure">No AI</button>
+        </div>
+      </header>
+      <main>
+        <section id="viewer">
+          <div id="ng-host" class="ng-host"></div>
+        </section>
+        <aside id="sidebar">
+          <div id="query-host"></div>
+          <div id="sidebar-divider" data-divider role="separator" aria-orientation="horizontal"></div>
+          <div id="browser-host"></div>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

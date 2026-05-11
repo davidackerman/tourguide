@@ -1,0 +1,1952 @@
+:root {
+  color-scheme: dark;
+  --bg: #15171a;
+  --bg-elev: #1d2025;
+  --border: #2a2e35;
+  --fg: #e6e8ec;
+  --fg-dim: #8a8f99;
+  --accent: #5fa8ff;
+  --accent-hover: #7ab8ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-right: 0.4rem;
+}
+
+/* Each topbar-group is a logical cluster of related controls
+ * (dataset / compute / save+share / settings). Visual separators
+ * between groups make scanning easier than 6 buttons in a row. */
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-right: 0.6rem;
+  border-right: 1px solid var(--border);
+}
+.topbar-group:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+.topbar-group.topbar-right {
+  margin-left: auto; /* push Settings + AI indicator to the right edge */
+}
+.topbar-label {
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+}
+
+#dataset-select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  min-width: 200px;
+}
+
+main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+#viewer {
+  flex: 1;
+  min-width: 0;
+  background: #000;
+  position: relative;
+}
+
+.ng-host {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+#sidebar {
+  /* Two-pane layout: structured browser on top, agent on the bottom,
+     with a draggable divider between them. The pane heights are set
+     in JS (main.ts splitter logic) using inline pixel values; clamp
+     here is for the user-resize-the-sidebar-width case. */
+  width: 520px;
+  flex-shrink: 0;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
+  /* The sidebar itself doesn't scroll — each pane handles its own
+     overflow. This is what lets the chat input stay pinned to the
+     bottom of the agent pane without overlaying the browser above. */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* User-resizable horizontally: drag the left edge to make the
+     panel wider when a plot or trace needs more room. */
+  resize: horizontal;
+  min-width: 360px;
+  max-width: 80vw;
+}
+
+#browser-host {
+  overflow: auto;
+  padding: 0.6rem 1rem;
+  flex-shrink: 0;
+}
+#browser-host:empty {
+  /* Collapse to a thin strip when no DB is loaded yet — avoids dead
+     vertical space. */
+  display: none;
+}
+
+#sidebar-divider {
+  flex-shrink: 0;
+  height: 4px;
+  background: var(--border);
+  cursor: row-resize;
+  transition: background 0.15s;
+}
+#sidebar-divider:hover,
+#sidebar-divider:active {
+  background: var(--accent, #4a7);
+}
+
+#query-host {
+  overflow: auto;
+  padding: 0.6rem 1rem;
+  flex-shrink: 0;
+  /* Make this the nearest scrolling ancestor for the sticky form
+     inside .query-box — sticky bottom now pins to this pane's
+     viewport, not the whole sidebar's. */
+}
+
+.placeholder {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn-primary,
+.btn-secondary {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #0d1116;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary:hover {
+  background: var(--border);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: min(720px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.modal-close {
+  background: none;
+  border: 0;
+  color: var(--fg-dim);
+  font-size: 1.4rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+}
+
+.modal-close:hover {
+  color: var(--fg);
+}
+
+.modal-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-tab {
+  background: none;
+  border: 0;
+  color: var(--fg-dim);
+  padding: 0.5rem 0.85rem;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.modal-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+.modal-body {
+  padding: 1rem;
+  overflow: auto;
+  flex: 1;
+  /* Scroll-shadow trick: a sticky gradient at top + bottom that
+     fades in only when the user can scroll further in that direction.
+     Uses background-attachment: local (the white "cover" patches
+     hide the shadows when scrolled to the edges) on top of fixed
+     shadows. Result: a subtle dark band appears at top/bottom when
+     content is cut off, telling the user there's more to see. */
+  background:
+    linear-gradient(var(--bg) 30%, rgba(0, 0, 0, 0)) center top,
+    linear-gradient(rgba(0, 0, 0, 0), var(--bg) 70%) center bottom,
+    radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0)) center top,
+    radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0)) center bottom;
+  background-repeat: no-repeat;
+  background-size: 100% 24px, 100% 24px, 100% 12px, 100% 12px;
+  background-attachment: local, local, scroll, scroll;
+  /* Keep the scrollbar visible so it's obvious the box is scrollable
+     even before the user touches it. */
+  scrollbar-gutter: stable;
+}
+.modal-body::-webkit-scrollbar {
+  width: 10px;
+}
+.modal-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+}
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-dim);
+}
+
+.modal-pane {
+  display: none;
+}
+
+.modal-pane.active {
+  display: block;
+}
+
+.modal-pane h3 {
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 1rem 0 0.5rem;
+}
+
+.hint {
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
+
+.hint.warn {
+  color: #d4a02e;
+}
+
+.code-block {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  overflow-x: auto;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.modal-pane label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+
+.modal-pane input,
+.modal-pane select,
+.modal-pane textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+}
+
+.modal-pane textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.voxel-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.35rem;
+}
+
+.layers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.layer-row {
+  display: grid;
+  grid-template-columns: 1fr 110px 2.5fr 1fr 1fr auto;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.btn-remove {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  border-radius: 4px;
+  padding: 0.3rem 0.55rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.btn-remove:hover {
+  color: #ff7a7a;
+  border-color: #ff7a7a;
+}
+
+.form-actions {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.modal-error {
+  color: #ff7a7a;
+  font-size: 0.85rem;
+  padding: 0 1rem 0.75rem;
+  min-height: 1.1rem;
+}
+
+/* (Old #sidebar / #browser-host stacking rules — superseded by the
+   two-pane layout earlier in this file. The browser pane is sized in
+   pixels by the splitter JS; the inner .browser flex still applies.) */
+#browser-host {
+  display: flex;
+  flex-direction: column;
+}
+
+.browser {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.browser-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.browser-class-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+}
+
+.browser-class-picker select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  min-width: 200px;
+}
+
+.browser-count {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+
+.browser-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.browser-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.browser-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  font-weight: 500;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.browser-table th:hover {
+  color: var(--fg);
+}
+
+.browser-table th.sorted {
+  color: var(--accent);
+}
+
+.browser-table td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.browser-table td.num {
+  text-align: right;
+}
+
+.browser-table tr.row-clickable {
+  cursor: pointer;
+}
+
+.browser-table tr.row-clickable:hover td {
+  background: var(--border);
+}
+
+.browser-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.browser-pager {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.browser-pager .btn-secondary {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.browser-pager .btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Callout in Settings that nudges users toward forking the analysis
+ * Space rather than relying on the default shared one. */
+.analysis-backend-fork-callout {
+  background: rgba(110, 167, 255, 0.07);
+  border-left: 3px solid #6ea7ff;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.82rem;
+  color: var(--fg);
+  margin: 0.5rem 0;
+  border-radius: 4px;
+  line-height: 1.5;
+}
+.analysis-backend-fork-callout code {
+  font-size: 0.78rem;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.05rem 0.25rem;
+  border-radius: 3px;
+}
+
+/* Empty-state placeholder for the viewer when no dataset is loaded.
+ * Centered card with the next-step actions. Replaces the auto-loaded
+ * demo that used to greet users. */
+.empty-viewer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  padding: 2rem;
+}
+.empty-viewer-card {
+  max-width: 540px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2rem;
+  background: var(--bg-elev);
+}
+.empty-viewer-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.2rem;
+  color: var(--fg);
+}
+.empty-viewer-card p {
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+}
+.empty-viewer-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 1.2rem 0;
+  flex-wrap: wrap;
+}
+
+/* Welcome modal — first-run onboarding. Wider than other modals to
+ * accommodate the side-by-side radio layout for AI / analysis choices. */
+.modal-welcome {
+  max-width: 720px;
+}
+.welcome-blurb {
+  margin: 0 0 1rem;
+  color: var(--fg);
+  font-size: 0.92rem;
+}
+.welcome-step {
+  margin: 1.2rem 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.welcome-step:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.welcome-step h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.welcome-step-tag {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-weight: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.welcome-radio-group,
+.welcome-backend-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* Welcome dialog's Cloud LLM section mirrors the Settings dialog
+   look — provider dropdown at the top, then a per-provider input
+   block (key + model + base URL where relevant). */
+.welcome-provider-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.7rem 0 0;
+}
+.welcome-provider-label > select {
+  flex: 1;
+}
+.welcome-provider-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+}
+.welcome-provider-section[hidden] { display: none; }
+.welcome-provider-section label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+.welcome-provider-section input,
+.welcome-provider-section select {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+.welcome-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  background: var(--bg);
+  transition: border-color 0.1s;
+}
+.welcome-radio:hover {
+  border-color: var(--fg-dim);
+}
+.welcome-radio input[type="radio"] {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+.welcome-radio.welcome-disabled {
+  opacity: 0.5;
+}
+.welcome-radio > div {
+  flex: 1;
+  min-width: 0;
+}
+.welcome-radio strong {
+  font-size: 0.9rem;
+}
+.welcome-radio p.hint {
+  margin: 0.2rem 0 0.3rem;
+}
+.welcome-getstarted-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+.welcome-getstarted-row > button {
+  flex: 1 1 240px;
+  min-height: 2.4rem;
+}
+
+.welcome-radio input[type="text"],
+.welcome-radio input[type="password"],
+.welcome-radio select {
+  width: 100%;
+  margin-top: 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+/* Persistent hint above the Ask box: shown when no AI backend is
+ * configured. Clicking the inline link opens Settings. Calmer than a
+ * hard error since the rest of the app still works without AI. */
+.query-ai-hint {
+  background: rgba(247, 201, 72, 0.08);
+  border-left: 3px solid #f7c948;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.78rem;
+  color: var(--fg);
+  margin-bottom: 0.5rem;
+  border-radius: 3px;
+  line-height: 1.4;
+}
+.btn-link {
+  background: none;
+  border: none;
+  color: #6ea7ff;
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+  padding: 0;
+}
+.btn-link:hover {
+  color: #9bc4ff;
+}
+
+/* The backend-indicator is now a button that opens Settings on click —
+ * a fast path when AI isn't configured yet. Default state nudges the
+ * user (red-ish, says 'No AI') so they know what's missing; .ok state
+ * is calm (green) once a backend is reachable. */
+.backend-indicator {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  cursor: pointer;
+  font-family: inherit;
+}
+.backend-indicator:hover {
+  border-color: var(--fg-dim);
+  color: var(--fg);
+}
+.backend-indicator:not(.ok) {
+  color: #f7c948;
+  border-color: #6e5a1f;
+}
+.backend-indicator:not(.ok)::before {
+  content: "⚙ ";
+  margin-right: 0.1rem;
+}
+.backend-indicator.ok {
+  color: #7fd3a4;
+  border-color: #4d8a65;
+  cursor: default; /* still clickable, but nothing critical to do */
+}
+.backend-indicator.ok::before {
+  content: "● ";
+}
+
+.query-box {
+  margin-bottom: 0.75rem;
+}
+
+/* Chat-thread layout: each turn becomes a self-contained card with its
+   own status / answer / plots / tables / trace. Cards stack newest-
+   first directly below the toolbar so the user sees the in-flight
+   turn without scrolling, while older turns persist below for
+   scroll-back. The whole #sidebar is the natural scroll container. */
+.session-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+  padding: 0.3rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.session-toolbar .btn-link {
+  margin-left: auto;
+}
+
+.session-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.turn-card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 0.55rem 0.6rem;
+}
+.turn-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px dashed var(--border);
+}
+.turn-num {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.turn-q {
+  font-weight: 500;
+  word-break: break-word;
+}
+.turn-status {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  margin-bottom: 0.3rem;
+  min-height: 1em;
+}
+.turn-status.err { color: var(--err, #e57373); }
+.turn-status.ok  { color: var(--ok, #81c784); }
+.turn-status.pending { color: var(--fg-dim); }
+.turn-answer {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  margin-bottom: 0.4rem;
+}
+.turn-answer:empty { margin: 0; }
+.turn-plots > * + * { margin-top: 0.6rem; }
+.turn-tables { display: flex; flex-direction: column; gap: 0.3rem; }
+.turn-table-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.4rem;
+  background: var(--bg-elev);
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+.turn-table-label code {
+  background: var(--bg);
+  padding: 0 0.25rem;
+  border-radius: 3px;
+}
+.turn-details {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+}
+.turn-details summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+}
+
+.query-form {
+  display: flex;
+  gap: 0.4rem;
+  /* Pin to the BOTTOM of the agent pane — chat-app convention. New
+     cards append above it (newest right above the input); older
+     turns scroll off the top of the pane. Backed with a solid color
+     so cards don't bleed through. */
+  position: sticky;
+  bottom: 0;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0;
+  background: var(--bg-elev);
+  z-index: 10;
+}
+
+.trace-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+  user-select: none;
+  cursor: pointer;
+}
+.trace-toggle input { margin: 0; }
+
+.turn-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.4rem;
+}
+.turn-meta-line {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg-elev);
+  padding: 0.2rem 0.4rem;
+  border-radius: 3px;
+  /* python_on_layers fires a multi-line meta (header + per-layer
+     shape / voxel-size detail). Preserve embedded newlines without
+     making horizontal whitespace literal. */
+  white-space: pre-line;
+}
+
+/* ask_user inline form — rendered between the turn-meta strip and the
+   agent's answer when the agent calls ask_user. The user fills it in
+   and the agent continues from the resolved values. After submit, the
+   form stays visible (disabled) so users can scroll back and see the
+   choices alongside the agent's continuation. */
+.ask-form {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.7rem;
+  border: 2px solid var(--accent, #4a7);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 0.85rem;
+  /* Pulse on initial render so the user notices the form even if
+     they were watching the chat input. Brief, no animation while
+     idle (the keyframes only fire once per element on add). */
+  animation: ask-form-pulse 0.9s ease-out 1;
+}
+@keyframes ask-form-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent, #4a7); }
+  100% { box-shadow: 0 0 0 12px transparent; }
+}
+.ask-form-header {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent, #4a7);
+  margin-bottom: 0.4rem;
+}
+.ask-form-prompt {
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+}
+.ask-form-field {
+  margin-bottom: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.ask-form-label {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.ask-form-radio-group,
+.ask-form-checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+}
+.ask-form-radio,
+.ask-form-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+  user-select: none;
+}
+.ask-form-text,
+.ask-form select {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.3rem 0.45rem;
+  font: inherit;
+  font-size: 0.85rem;
+  width: 100%;
+}
+.ask-form-buttons {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+.ask-form-submitted {
+  border-color: var(--border);
+  opacity: 0.85;
+}
+.ask-form-submitted .ask-form-buttons {
+  display: none;
+}
+
+.query-input {
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+}
+
+.query-status {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  min-height: 1em;
+  color: var(--fg-dim);
+}
+
+.query-status.err {
+  color: #ff7a7a;
+}
+
+.query-status.ok {
+  color: #7fd3a4;
+}
+
+.query-answer {
+  margin-top: 0.35rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.query-details {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.query-details summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+}
+
+.query-details .code-block {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.radio-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-direction: row;
+}
+
+.radio-row input {
+  margin: 0;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+/* Per-provider input block, swapped in/out by the Cloud LLM provider
+   dropdown. Same styling as .settings-section so the form looks
+   consistent regardless of which provider is selected. */
+.provider-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  margin-top: 0.5rem;
+}
+.provider-section[hidden] { display: none; }
+
+.storage-note {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+.welcome-other-providers {
+  margin-top: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.welcome-other-providers .btn-link {
+  font-size: inherit;
+}
+
+.test-result {
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+}
+
+.test-result.ok {
+  color: #7fd3a4;
+}
+
+.test-result.err {
+  color: #ff7a7a;
+}
+
+.test-result.pending {
+  color: var(--fg-dim);
+}
+
+.plot-output {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  background: #fff;
+}
+
+.plot-title {
+  font-size: 0.85rem;
+  margin: 0 0 0.4rem;
+  color: #15171a;
+}
+
+.plot-image {
+  max-width: 100%;
+  display: block;
+  cursor: zoom-in;
+}
+
+.plot-explanation {
+  font-size: 0.78rem;
+  color: #555;
+  margin: 0.4rem 0 0;
+}
+
+.plot-toolbar {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.plot-code {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+}
+.plot-code summary {
+  cursor: pointer;
+  color: #555;
+}
+.plot-code pre {
+  margin: 0.3rem 0 0;
+  padding: 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plot-fullscreen {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.plot-fullscreen img {
+  max-width: 95vw;
+  max-height: 95vh;
+  display: block;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+.plot-fullscreen-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: rgba(255, 255, 255, 0.9);
+  color: #111;
+  border: 0;
+  border-radius: 4px;
+  padding: 0.35rem 0.7rem;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.webllm-progress {
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+
+.webllm-progress-text {
+  margin-bottom: 0.3rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-trace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.3rem;
+}
+.agent-trace-question {
+  font-size: 0.78rem;
+  color: var(--fg);
+  background: var(--bg-elev, rgba(255,255,255,0.04));
+  border-left: 2px solid var(--accent);
+  padding: 0.35rem 0.55rem;
+  margin: 0.3rem 0;
+  border-radius: 3px;
+  font-style: italic;
+}
+.agent-trace-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.15rem;
+}
+.agent-trace-copy-step {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.25rem;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  opacity: 0.5;
+}
+.agent-trace-item:hover .agent-trace-copy-step {
+  opacity: 1;
+}
+.agent-trace-copy-step:hover {
+  background: var(--border);
+}
+.agent-trace-step-status {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+}
+.agent-trace-step-status.ok {
+  color: #7fd3a4;
+}
+.btn-tiny {
+  font-size: 0.72rem;
+  padding: 0.18rem 0.45rem;
+}
+.agent-trace-copy-status {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+}
+.agent-trace-copy-status.ok {
+  color: #7fd3a4;
+}
+
+.gemini-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.3rem 0;
+}
+
+.analysis-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.analysis-layers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+.analysis-layer-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+.analysis-layers-host {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 360px; /* tall enough for ~10 single-row layers without scroll */
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+/* Single-row per-layer layout — name on the left, scale + labeled
+ * dropdowns on the right. The wider modal (1200px) gives each cell
+ * enough room without wrapping. Below ~900px the controls wrap under
+ * the name (graceful degradation on narrow windows). */
+.analysis-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.1rem;
+  flex-wrap: wrap;
+}
+.analysis-layer-row + .analysis-layer-row {
+  border-top: 1px dashed var(--border);
+}
+.analysis-layer-check {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  cursor: pointer;
+  flex: 0 0 200px; /* fixed left column for name+type */
+  min-width: 0;
+}
+.analysis-layer-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.analysis-layer-type {
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+/* CSS grid for the per-layer controls: scale (wider, longer text)
+ * + labeled + meshes checkbox, side-by-side regardless of option-
+ * text length. minmax(0, 1fr) lets the tracks shrink past their
+ * content's intrinsic min-width. mesh column is auto-width since
+ * it's just a checkbox + short label. */
+.analysis-layer-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.analysis-layer-mesh-toggle {
+  cursor: pointer;
+  white-space: nowrap;
+}
+.analysis-layer-mesh-toggle input[disabled] + span {
+  opacity: 0.5;
+}
+.analysis-layer-control {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+  min-width: 0; /* let the select shrink past its content width */
+}
+.analysis-layer-control > select {
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0.25rem 0.4rem;
+  flex: 1;
+  min-width: 0; /* same — required for shrinking */
+  text-overflow: ellipsis;
+}
+.analysis-layer-labeled {
+  font-family: inherit;
+}
+
+/* Below ~900px viewport (or modal width capped to 96vw on mobile)
+ * the three-column grid gets cramped — fall back to one column so
+ * each select keeps full width and labels stay readable. */
+@media (max-width: 900px) {
+  .analysis-layer-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .analysis-layer-row {
+    align-items: flex-start;
+  }
+}
+.analysis-layer-status {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+}
+.analysis-layer-status.err {
+  color: #ff9d9d;
+}
+.gemini-model-status {
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+.gemini-model-status.ok {
+  color: #7fd3a4;
+}
+.gemini-model-status.err {
+  color: #ff9d9d;
+}
+.gemini-model-status.pending {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.webllm-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.webllm-progress-bar > div {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.15s linear;
+}
+
+.agent-trace {
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  max-height: 420px;
+  overflow: auto;
+}
+
+.download-menu {
+  position: relative;
+  display: inline-block;
+}
+.download-popover {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  z-index: 8000;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  font-size: 0.78rem;
+  min-width: 180px;
+}
+.download-popover label {
+  display: block;
+  margin-bottom: 0.25rem;
+  cursor: pointer;
+  user-select: none;
+}
+.download-popover button {
+  margin-top: 0.4rem;
+  width: 100%;
+}
+
+.agent-trace-item {
+  padding: 0.3rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.agent-trace-item:last-child {
+  border-bottom: 0;
+}
+
+.agent-trace-tool {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.agent-trace-args,
+.agent-trace-result {
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0.2rem 0 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  max-height: none;
+}
+
+.agent-trace-block {
+  margin-top: 0.2rem;
+}
+
+.agent-trace-block > summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  font-size: 0.72rem;
+  user-select: none;
+}
+
+.agent-trace-error {
+  color: #ff7a7a;
+}
+
+.webgpu-diagnosis {
+  font-size: 0.8rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  line-height: 1.4;
+}
+
+.webgpu-diagnosis.ok {
+  color: #7fd3a4;
+  border-color: #4d8a65;
+}
+
+.webgpu-diagnosis.err {
+  color: #ff9d9d;
+  border-color: #7a3a3a;
+}
+
+.webgpu-diagnosis div + div {
+  margin-top: 0.25rem;
+  color: var(--fg-dim);
+}
+
+.detect-status {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  margin: 0.4rem 0;
+  min-height: 1.1em;
+}
+
+.detect-status.ok {
+  color: #7fd3a4;
+}
+
+.detect-status.err {
+  color: #ff9d9d;
+}
+
+.detect-status.pending {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.ngstate-status {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  min-height: 1.1em;
+}
+.ngstate-status.ok {
+  color: #7fd3a4;
+}
+.ngstate-status.err {
+  color: #ff9d9d;
+}
+
+.folder-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.folder-pick-status {
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+
+.folder-pick-status.ok {
+  color: #7fd3a4;
+}
+
+.folder-pick-status.err {
+  color: #ff9d9d;
+}
+
+.folder-pick-status.pending {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.folder-detected {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+/* Analyze modal goes wide so per-layer controls (scale + labeled
+ * dropdowns) sit side-by-side instead of wrapping under the layer
+ * name. Capped to 96vw so it doesn't overflow on narrow viewports;
+ * 1200px is enough for the longest scale-option text plus the labeled
+ * dropdown plus the layer-name column without any wrapping. */
+.modal-analysis {
+  width: min(1200px, 96vw);
+}
+
+.analysis-scales-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-top: 0.5rem;
+}
+
+.analysis-scales-table th,
+.analysis-scales-table td {
+  padding: 0.3rem 0.45rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.analysis-scales-table th {
+  font-weight: 500;
+  color: var(--fg-dim);
+}
+
+.analysis-scales-table code {
+  font-size: 0.78rem;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.chip-warn {
+  color: #d4a02e;
+  border-color: #6f5418;
+}
+
+.chip-bad {
+  color: #ff7a7a;
+  border-color: #7a3a3a;
+}
+
+.analysis-progress {
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+}
+
+.progress-line {
+  margin-bottom: 0.3rem;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.2s linear;
+}
+
+.progress-bar-fill.indeterminate {
+  background: linear-gradient(
+    90deg,
+    var(--accent) 0%,
+    var(--accent-hover) 50%,
+    var(--accent) 100%
+  );
+  background-size: 200% 100%;
+  animation: progress-indeterminate 1.4s linear infinite;
+}
+
+.modal-custom {
+  width: min(900px, 96vw);
+}
+
+.custom-layer-row {
+  display: grid;
+  grid-template-columns: 1.5fr auto 2.5fr auto;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+.slot-var-label {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.slot-var-label code {
+  color: var(--fg);
+  background: var(--bg);
+  padding: 0 0.25rem;
+  border-radius: 3px;
+}
+.hint-inline {
+  font-weight: normal;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+}
+.skel-ids-wrap {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.skel-ids-wrap input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-advanced {
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+.settings-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--fg-dim);
+  padding: 0.25rem 0;
+}
+.settings-advanced h4 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.95rem;
+}
+.gemini-default-row {
+  margin-bottom: 0.6rem;
+}
+
+.custom-layer-row select,
+.custom-layer-row input {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.45rem;
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.custom-code {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  resize: vertical;
+}
+
+.custom-ai-row {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.custom-ai-prompt {
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.custom-error {
+  color: #ff9d9d;
+  background: #2a1a1a;
+  border: 1px solid #7a3a3a;
+  border-radius: 4px;
+  padding: 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  margin-top: 0.5rem;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.custom-output {
+  margin-top: 0.75rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.custom-output .custom-narration {
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+}
+
+.custom-output .custom-stdout {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  border-radius: 4px;
+  padding: 0.4rem 0.55rem;
+  max-height: 150px;
+  overflow: auto;
+  margin: 0 0 0.5rem;
+  white-space: pre-wrap;
+}
+
+.custom-output .custom-plot {
+  max-width: 100%;
+  display: block;
+  margin: 0 0 0.5rem;
+  background: #fff;
+}
+
+.custom-download-row {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0;
+}
+
+.custom-remote-toggle {
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+}
+
+.custom-remote-toggle input {
+  margin: 0;
+}
+
+.custom-remote-toggle code {
+  color: var(--fg);
+  font-size: 0.76rem;
+}
+
+.remote-muted {
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+
+.remote-ok {
+  color: #7fd3a4;
+  font-size: 0.78rem;
+}
+
+.remote-warn {
+  color: #d4a02e;
+  font-size: 0.78rem;
+}
+
+.analysis-backend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.btn-download {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.55rem;
+}
+
+.btn-fix-ai {
+  margin-top: 0.45rem;
+  font-size: 0.82rem;
+}
+
+.modal-download {
+  width: min(640px, 92vw);
+}
+
+.download-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+}
+
+.download-layer-row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.download-layer-row:hover {
+  background: var(--bg-elev);
+}
+
+.download-layer-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.download-layer-meta {
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
