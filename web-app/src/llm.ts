@@ -14,6 +14,13 @@ export interface LLMCompleteOptions {
   // interruptGenerate() method we call. The throw is what unwinds the
   // agent loop's `await` so it can stop instead of running another step.
   signal?: AbortSignal;
+  // Mark the system prompt as cacheable for the call's lifetime (~5 min
+  // on Anthropic). Only honored by AnthropicBackend; other backends
+  // ignore it. Worth setting for callers that resend the same large
+  // system prompt several times in quick succession — namely the agent
+  // loop, which pays full input price on a ~20k-token system block
+  // every iteration.
+  cacheSystem?: boolean;
 }
 
 export interface LLMBackend {
@@ -646,6 +653,13 @@ export class OpenAICompatibleBackend implements LLMBackend {
   }
 }
 
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Anthropic Claude (native API)
 // ---------------------------------------------------------------------------
@@ -675,6 +689,26 @@ export class AnthropicBackend implements LLMBackend {
 
   static requestCount = 0;
 
+  // Running totals across this page session. Cache stats let us verify
+  // that the cache_control tag is actually taking effect; without this
+  // it's hard to tell from outside whether the second iteration of an
+  // agent loop hit the cached prefix or paid full input price.
+  static totals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+  };
+
+  static recordUsage(u: AnthropicUsage): void {
+    if (typeof u.input_tokens === "number") AnthropicBackend.totals.inputTokens += u.input_tokens;
+    if (typeof u.output_tokens === "number") AnthropicBackend.totals.outputTokens += u.output_tokens;
+    if (typeof u.cache_creation_input_tokens === "number")
+      AnthropicBackend.totals.cacheCreationTokens += u.cache_creation_input_tokens;
+    if (typeof u.cache_read_input_tokens === "number")
+      AnthropicBackend.totals.cacheReadTokens += u.cache_read_input_tokens;
+  }
+
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
     const useStream = !!options.onToken;
     const url = `https://api.anthropic.com/v1/messages`;
@@ -697,7 +731,23 @@ export class AnthropicBackend implements LLMBackend {
       stream: useStream,
       temperature: options.temperature ?? 0.1,
     };
-    if (systemParts.length > 0) body.system = systemParts.join("\n\n");
+    if (systemParts.length > 0) {
+      // When cacheSystem is set, send the system prompt as a single
+      // content block tagged cache_control:ephemeral. Anthropic caches
+      // the prefix for ~5 minutes; subsequent calls with the same
+      // system text hit the cache at $0.30/M instead of $3/M. The
+      // minimum cacheable size is 1024 tokens (Sonnet/Opus) — smaller
+      // prompts get the tag ignored, no error. Last-message block also
+      // gets tagged so the user turn extends the cached prefix on
+      // repeated calls within the same agent loop.
+      if (options.cacheSystem) {
+        body.system = [
+          { type: "text", text: systemParts.join("\n\n"), cache_control: { type: "ephemeral" } },
+        ];
+      } else {
+        body.system = systemParts.join("\n\n");
+      }
+    }
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -737,7 +787,9 @@ export class AnthropicBackend implements LLMBackend {
     if (!useStream) {
       const data = (await res.json()) as {
         content?: Array<{ type?: string; text?: string }>;
+        usage?: AnthropicUsage;
       };
+      if (data.usage) AnthropicBackend.recordUsage(data.usage);
       const text = (data.content ?? [])
         .filter((c) => c.type === "text")
         .map((c) => c.text ?? "")
@@ -769,6 +821,8 @@ export class AnthropicBackend implements LLMBackend {
           const chunk = JSON.parse(json) as {
             type?: string;
             delta?: { type?: string; text?: string };
+            message?: { usage?: AnthropicUsage };
+            usage?: AnthropicUsage;
           };
           if (chunk.type === "content_block_delta" && chunk.delta?.type === "text_delta") {
             const t = chunk.delta.text ?? "";
@@ -776,6 +830,12 @@ export class AnthropicBackend implements LLMBackend {
               accumulated += t;
               options.onToken?.(t, accumulated);
             }
+          } else if (chunk.type === "message_start" && chunk.message?.usage) {
+            // message_start carries input + cache token counts; output
+            // count arrives later in message_delta.
+            AnthropicBackend.recordUsage(chunk.message.usage);
+          } else if (chunk.type === "message_delta" && chunk.usage) {
+            AnthropicBackend.recordUsage(chunk.usage);
           }
         } catch {
           // partial / malformed line — keep streaming
