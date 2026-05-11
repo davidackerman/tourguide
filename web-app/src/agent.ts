@@ -229,7 +229,29 @@ const LAYER_GUIDE = (d: DatasetDescriptor): string => {
         : "";
     return `  "${l.name}"  type=${l.type}  sources=${kinds.join("+")}${cls}${xform}`;
   });
-  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info). 'sources=zarr+precomputed-mesh+precomputed-skeleton' means the layer has all three views (volume, 3D meshes, skeletons) — segmentation analyses can use whichever is appropriate. 'ng_offset_nm' is the user-applied translation from the pasted NG state; tourguide adds it to per-object positions automatically so fly_to and click-to-fly land where the user sees the layer, not where the raw zarr would put it:\n${lines.join("\n")}`;
+  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info).
+
+  sources= conventions:
+    zarr / zarr2 / zarr3 / n5 — multiscale array on a per-axis voxel grid.
+        python_on_layers loads the voxels as a numpy array.
+    precomputed — Neuroglancer precomputed segmentation. The volume
+        VOXELS are NOT readable by python_on_layers (no in-browser
+        reader for that format). Skeletons + meshes bundled inside
+        the precomputed dir often ARE accessible; check describe_dataset.
+    precomputed-mesh — 3D mesh per segment, not loadable as an array.
+    precomputed-skeleton — pass via 'skeletons' to python_on_layers
+        for length / branching / geodesic metrics.
+
+  For precomputed-volume layers, volume / regionprops on raw voxels
+  is unavailable. Skeletons cover length-style queries. Mesh-based
+  volume estimation isn't supported yet — tell the user.
+
+  'ng_offset_nm' is the user-applied translation from the pasted NG
+  state; tourguide adds it to per-object positions automatically so
+  fly_to and click-to-fly land where the user sees the layer, not
+  where the raw zarr would put it.
+
+${lines.join("\n")}`;
 };
 
 const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): string => `
@@ -898,6 +920,24 @@ async function execPythonOnLayers(
       );
     }
     if (!isZarrSource(layer.source)) {
+      // Differentiate precomputed-volume from other non-zarr sources
+      // so the error tells the model what's actually possible, not
+      // just what failed. Precomputed segmentations (e.g. hemibrain
+      // at precomputed://gs://...) host volume + mesh + skeleton
+      // inside the same dir — the volume voxels aren't readable by
+      // python_on_layers (no precomputed-volume browser reader yet),
+      // but bundled meshes / skeletons may still be accessible.
+      const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+      const isPrecomputed = sources.some((s) => /^precomputed:\/\//.test(s));
+      const skelSource = sources.find((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+      if (isPrecomputed) {
+        const skelHint = skelSource
+          ? ` This layer DOES have a skeleton source — try skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / connectivity / branching metrics.`
+          : ` Many precomputed segmentation dirs also host skeletons (Neuroglancer's segmentation/info file lists them as a 'skeletons' subkey). Call describe_dataset to check.`;
+        throw new Error(
+          `Layer '${name}' is a precomputed segmentation, not a zarr volume. python_on_layers can't read precomputed-volume voxels directly (no in-browser reader for that format), so volume / regionprops on the voxels isn't available here.${skelHint} For volume / surface area without voxel access, no tool exists yet (mesh-based geometric integration would need a precomputed mesh reader).`,
+        );
+      }
       throw new Error(
         `Layer '${name}' is not a zarr source — pass skeleton sources via 'skeletons' instead of 'layers'.`,
       );
