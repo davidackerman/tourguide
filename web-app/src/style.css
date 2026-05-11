@@ -724,6 +724,19 @@ button {
   font: inherit;
 }
 
+/* API-key inputs use type="text" instead of type="password" so Chrome's
+ * password manager doesn't pop up "save password?" prompts on every
+ * edit. Masking is done in CSS via text-security so the field still
+ * looks like a hidden password to the user. text-security is non-
+ * standard but supported in WebKit / Blink (Chrome / Edge / Safari)
+ * with the -webkit- prefix; Firefox falls back to plain text, which
+ * is fine for an API key the user just pasted in. */
+input.api-key {
+  -webkit-text-security: disc;
+  -moz-text-security: disc;
+  text-security: disc;
+}
+
 /* Persistent hint above the Ask box: shown when no AI backend is
  * configured. Clicking the inline link opens Settings. Calmer than a
  * hard error since the rest of the app still works without AI. */

@@ -112,7 +112,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           <div class="welcome-provider-section" data-welcome-provider-section="gemini" ${initialAi === "gemini" ? "" : "hidden"}>
             <label>
               Gemini API key
-              <input type="password" data-welcome-gemini-key value="${escapeAttr(settings.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/apikey" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-gemini-key value="${escapeAttr(settings.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/apikey" autocomplete="off" />
             </label>
             <p class="hint">~500 req/day on Flash Lite. Stored in browser localStorage only.</p>
           </div>
@@ -120,7 +120,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           <div class="welcome-provider-section" data-welcome-provider-section="anthropic" ${initialAi === "anthropic" ? "" : "hidden"}>
             <label>
               Anthropic API key
-              <input type="password" data-welcome-anthropic-key value="${escapeAttr(settings.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-anthropic-key value="${escapeAttr(settings.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
             </label>
             <label>
               Model
@@ -131,7 +131,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           <div class="welcome-provider-section" data-welcome-provider-section="openai" ${initialAi === "openai" ? "" : "hidden"}>
             <label>
               OpenAI API key
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
             </label>
             <label>
               Model
@@ -142,7 +142,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           <div class="welcome-provider-section" data-welcome-provider-section="openrouter" ${initialAi === "openrouter" ? "" : "hidden"}>
             <label>
               OpenRouter API key
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
             </label>
             <label>
               Model
@@ -154,7 +154,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           <div class="welcome-provider-section" data-welcome-provider-section="xai" ${initialAi === "xai" ? "" : "hidden"}>
             <label>
               xAI API key
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
             </label>
             <label>
               Model
@@ -169,7 +169,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
             </label>
             <label>
               API key (optional for local servers)
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" autocomplete="off" />
             </label>
             <label>
               Model
@@ -283,7 +283,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
   // surface an "API key didn't validate, save anyway?" confirm; if
   // the user cancels there, we leave the modal open.
   const saveAndClose = async (): Promise<void> => {
-    if (!(await persistSettings())) return;
+    if (!(await persistSettings({ validate: false }))) return;
     markWelcomeSeen();
     close(true);
   };
@@ -315,7 +315,13 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
   // Save settings (extracted so both 'Load demo' and 'Load my data'
   // commit the user's AI / analysis-backend choices before navigating).
   // Returns false if the user cancelled an invalid-Gemini-key warning.
-  const persistSettings = async (): Promise<boolean> => {
+  //
+  // `validate` controls whether to round-trip the API to check the key.
+  // We do this for Load Demo / Load My Data (so the user gets a warning
+  // before navigating with a typo'd key) but skip it for plain dismiss —
+  // the validation call can take 5–10s on a cold network and the user
+  // is already closing the dialog, so blocking them is wrong.
+  const persistSettings = async ({ validate = true }: { validate?: boolean } = {}): Promise<boolean> => {
     const aiChoice = (providerSelect.value as LLMProvider);
     const geminiKey = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? settings.geminiApiKey;
     const anthropicKey = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? settings.anthropicApiKey;
@@ -358,23 +364,25 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     // skip those). A failed validate still lets the user save
     // anyway (typo'd key + click anyway is faster than retyping
     // when the user knows the key is right).
-    try {
-      if (aiChoice === "gemini" && geminiKey) {
-        await new GeminiBackend(geminiKey, next.geminiModel).validate();
-      } else if (aiChoice === "anthropic" && anthropicKey) {
-        await new AnthropicBackend(anthropicKey, anthropicModel).validate();
-      } else if (
-        (aiChoice === "openai" || aiChoice === "openrouter" || aiChoice === "xai") &&
-        oaiKey
-      ) {
-        const url = OPENAI_COMPATIBLE_PRESETS[aiChoice].url;
-        await new OpenAICompatibleBackend(url, oaiKey, oaiModel).validate();
+    if (validate) {
+      try {
+        if (aiChoice === "gemini" && geminiKey) {
+          await new GeminiBackend(geminiKey, next.geminiModel).validate();
+        } else if (aiChoice === "anthropic" && anthropicKey) {
+          await new AnthropicBackend(anthropicKey, anthropicModel).validate();
+        } else if (
+          (aiChoice === "openai" || aiChoice === "openrouter" || aiChoice === "xai") &&
+          oaiKey
+        ) {
+          const url = OPENAI_COMPATIBLE_PRESETS[aiChoice].url;
+          await new OpenAICompatibleBackend(url, oaiKey, oaiModel).validate();
+        }
+      } catch (err) {
+        const ok = confirm(
+          `API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
+        );
+        if (!ok) return false;
       }
-    } catch (err) {
-      const ok = confirm(
-        `API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
-      );
-      if (!ok) return false;
     }
     opts.onSettingsChanged();
     return true;

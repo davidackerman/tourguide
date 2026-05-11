@@ -131,7 +131,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="gemini" ${current.backend === "gemini" ? "" : "hidden"}>
           <label>
             Gemini API key
-            <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/app/apikey" autocomplete="off" />
+            <input type="text" class="api-key" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/app/apikey" autocomplete="off" />
           </label>
           <label>
             Gemini model
@@ -145,7 +145,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="anthropic" ${current.backend === "anthropic" ? "" : "hidden"}>
           <label>
             Anthropic API key
-            <input type="password" data-field="anthropicApiKey" value="${escapeAttr(current.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
+            <input type="text" class="api-key" data-field="anthropicApiKey" value="${escapeAttr(current.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
           </label>
           <label>
             Claude model
@@ -159,7 +159,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="openai" ${current.backend === "openai" ? "" : "hidden"}>
           <label>
             OpenAI API key
-            <input type="password" data-field="openaiApiKey-openai" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-openai" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
           </label>
           <label>
             Model
@@ -173,7 +173,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="openrouter" ${current.backend === "openrouter" ? "" : "hidden"}>
           <label>
             OpenRouter API key
-            <input type="password" data-field="openaiApiKey-openrouter" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-openrouter" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
           </label>
           <label>
             Model
@@ -187,7 +187,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="xai" ${current.backend === "xai" ? "" : "hidden"}>
           <label>
             xAI API key
-            <input type="password" data-field="openaiApiKey-xai" value="${escapeAttr(current.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-xai" value="${escapeAttr(current.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
           </label>
           <label>
             Model
@@ -205,7 +205,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           </label>
           <label>
             API key (optional for local servers)
-            <input type="password" data-field="openaiApiKey-custom" value="${escapeAttr(current.openaiApiKey)}" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-custom" value="${escapeAttr(current.openaiApiKey)}" autocomplete="off" />
           </label>
           <label>
             Model
