@@ -30,13 +30,13 @@ export function openLoaderDialog(onLoad: LoaderResult): void {
         <button class="modal-close" aria-label="Close">×</button>
       </header>
       <div class="modal-tabs" role="tablist">
-        <button class="modal-tab active" data-tab="form" role="tab">Paste URLs</button>
-        <button class="modal-tab" data-tab="folder" role="tab">Local folder</button>
+        <button class="modal-tab active" data-tab="ngstate" role="tab">NG state</button>
         <button class="modal-tab" data-tab="yaml" role="tab">YAML</button>
-        <button class="modal-tab" data-tab="ngstate" role="tab">NG state</button>
+        <button class="modal-tab" data-tab="form" role="tab">Paste URLs</button>
+        <button class="modal-tab" data-tab="folder" role="tab">Local folder</button>
       </div>
       <div class="modal-body">
-        <section class="modal-pane active" data-pane="form">
+        <section class="modal-pane" data-pane="form">
           <p class="hint">Paste a source URL — tourguide auto-detects voxel size and dataset center from its OME-Zarr / N5 / precomputed metadata. Works for public S3, your lab server, or <code>localhost</code> via <code>npx http-server --cors -p 8080</code> in your data dir.</p>
           <div class="form-row">
             <label>Name <input data-field="name" placeholder="my_dataset" /></label>
@@ -94,7 +94,7 @@ layers:
             <button class="btn-primary" data-action="load-yaml">Load</button>
           </div>
         </section>
-        <section class="modal-pane" data-pane="ngstate">
+        <section class="modal-pane active" data-pane="ngstate">
           <p class="hint">Paste any of:
             <strong>(a)</strong> a full Neuroglancer URL like <code>https://neuroglancer-demo.appspot.com/#!{...}</code> — the prefix gets stripped automatically;
             <strong>(b)</strong> just the <code>#!{...}</code> hash fragment;
