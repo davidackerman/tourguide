@@ -87,9 +87,10 @@ export interface CustomRequest {
   }[];
   // Precomputed mesh inputs — fetched per segment, parsed, and
   // exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
-  // "faces": ndarray (M,3)}}. Supports both `neuroglancer_legacy_mesh`
-  // and `neuroglancer_multilod_draco` (unsharded). The agent gates
-  // sharded variants out — those throw if they slip through.
+  // "faces": ndarray (M,3)}}. Supports `neuroglancer_legacy_mesh`
+  // (unsharded) and `neuroglancer_multilod_draco` (unsharded OR
+  // sharded — sharding is opaque to the worker; the loader handles
+  // shard/minishard lookup when a sharding spec is attached).
   meshLayers?: {
     varName: string;
     source: string;
@@ -101,6 +102,16 @@ export interface CustomRequest {
     vertexQuantizationBits?: number;
     // multilod_draco only: optional 3x4 row-major transform native→nm.
     transform?: number[];
+    // multilod_draco only: when present, manifests + fragments are
+    // packed into shard files instead of per-segment paths.
+    sharding?: {
+      hash: "identity" | "murmurhash3_x86_128";
+      preshiftBits: number;
+      shardBits: number;
+      minishardBits: number;
+      minishardIndexEncoding: "raw" | "gzip";
+      dataEncoding: "raw" | "gzip";
+    };
   }[];
   // DataFrames already in the sql.js DB that should be exposed to Python as
   // df_<organelle_class> (already the make_plot convention).
@@ -1007,6 +1018,7 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
           parsed = await fetchMultilodMesh(meshLayer.source, segId, {
             vertexQuantizationBits: meshLayer.vertexQuantizationBits,
             transform: meshLayer.transform,
+            sharding: meshLayer.sharding,
           });
         } else {
           parsed = await fetchLegacyMesh(meshLayer.source, segId);

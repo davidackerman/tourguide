@@ -26,6 +26,10 @@ export interface PrecomputedSegmentationInfo {
   // Subpath for skeletons — typically "skeletons". Absent / empty
   // when no skeletons are bundled.
   skeletons?: string;
+  // Subpath for segment_properties — typically "segment_properties".
+  // When present, that subdir's info JSON enumerates all segment IDs
+  // (cheaply, since it's just a JSON list — no shard decode required).
+  segmentProperties?: string;
   // Raw info JSON for callers that need more (data_type, scales, ...).
   raw: Record<string, unknown>;
 }
@@ -102,9 +106,12 @@ export async function probePrecomputedInfo(
       }
       const meshRaw = raw["mesh"];
       const skelRaw = raw["skeletons"];
+      const propsRaw = raw["segment_properties"];
       return {
         mesh: typeof meshRaw === "string" && meshRaw ? meshRaw : undefined,
         skeletons: typeof skelRaw === "string" && skelRaw ? skelRaw : undefined,
+        segmentProperties:
+          typeof propsRaw === "string" && propsRaw ? propsRaw : undefined,
         raw,
       };
     } catch {
@@ -156,6 +163,68 @@ export interface MeshInfo {
 }
 
 const MESH_INFO_CACHE = new Map<string, Promise<MeshInfo | null>>();
+
+// Cached probe of a precomputed segment_properties/info file. When the
+// info is "inline" form (the usual case for hand-curated catalogs like
+// hemibrain), the response includes an explicit `ids` list — perfect
+// for cheap "how many neurons" / "what's segment X's body type" queries
+// WITHOUT having to read any shard files. Returns null on miss or any
+// network / parse failure.
+export interface SegmentProperties {
+  numSegments: number;       // total declared IDs
+  ids: string[];             // full list when inline; capped at 50k to bound memory
+  truncated: boolean;        // true when ids[] was truncated
+  // Property labels declared in the info — useful for the agent to
+  // know what attributes are queryable (e.g. ["status", "type"]).
+  propertyLabels: string[];
+}
+
+const SEGMENT_PROPS_CACHE = new Map<string, Promise<SegmentProperties | null>>();
+
+export function clearPrecomputedSegmentPropertiesCache(): void {
+  SEGMENT_PROPS_CACHE.clear();
+}
+
+export async function fetchSegmentProperties(
+  propsBase: string,
+): Promise<SegmentProperties | null> {
+  if (!propsBase) return null;
+  const httpsBase = precomputedToHttps(propsBase).replace(/\/$/, "");
+  if (!/^https?:\/\//i.test(httpsBase)) return null;
+  const cached = SEGMENT_PROPS_CACHE.get(httpsBase);
+  if (cached) return cached;
+  const promise = (async (): Promise<SegmentProperties | null> => {
+    try {
+      const res = await fetch(`${httpsBase}/info`);
+      if (!res.ok) return null;
+      const raw = (await res.json()) as Record<string, unknown>;
+      const inline = raw["inline"] as Record<string, unknown> | undefined;
+      if (!inline || typeof inline !== "object") return null;
+      const idsRaw = inline["ids"];
+      if (!Array.isArray(idsRaw)) return null;
+      const numSegments = idsRaw.length;
+      const ID_CAP = 50_000;
+      const truncated = numSegments > ID_CAP;
+      const ids: string[] = (truncated ? idsRaw.slice(0, ID_CAP) : idsRaw)
+        .map((v) => String(v));
+      const propsRaw = inline["properties"];
+      const propertyLabels: string[] = [];
+      if (Array.isArray(propsRaw)) {
+        for (const p of propsRaw as unknown[]) {
+          if (p && typeof p === "object") {
+            const id = (p as Record<string, unknown>)["id"];
+            if (typeof id === "string") propertyLabels.push(id);
+          }
+        }
+      }
+      return { numSegments, ids, truncated, propertyLabels };
+    } catch {
+      return null;
+    }
+  })();
+  SEGMENT_PROPS_CACHE.set(httpsBase, promise);
+  return promise;
+}
 
 export async function probeMeshInfo(meshBase: string): Promise<MeshInfo | null> {
   if (!meshBase) return null;

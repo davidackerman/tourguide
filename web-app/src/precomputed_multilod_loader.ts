@@ -60,6 +60,11 @@ import { decodeDracoPartitioned } from "neuroglancer/unstable/mesh/draco/index.j
 import type { ParsedMesh } from "./precomputed_mesh_loader.js";
 import { concatMeshes } from "./precomputed_mesh_loader.js";
 import { precomputedToHttps } from "./precomputed_info.js";
+import {
+  fetchShardedChunk,
+  fetchRawShardBytes,
+  type ShardingSpec,
+} from "./precomputed_sharded.js";
 
 export interface MultilodFragment {
   // Grid-cell position of this fragment at its LOD.
@@ -176,26 +181,71 @@ export interface MultilodOptions {
   vertexQuantizationBits: number;
   // Optional 3x4 row-major transform from native coords → nm.
   transform?: number[];
+  // When present, the segment's manifest + fragments live inside
+  // packed shard files rather than per-segment <id> / <id>.index
+  // files. The loader will route through the sharded reader.
+  sharding?: ShardingSpec;
 }
 
 // Fetch + decode one segment's multilod_draco mesh. Returns a single
 // ParsedMesh in nm world coords, faces rebased across concatenated
 // fragments. Picks the finest non-empty LOD.
+//
+// Two on-disk layouts:
+//
+//   Unsharded:
+//     <base>/<seg_id>.index — manifest (raw bytes)
+//     <base>/<seg_id>       — concatenated fragment data
+//   Sharded:
+//     <base>/<hex>.shard    — packs many segments' manifests + fragments
+//     The minishard index points at the segment's manifest blob
+//     (gzip-decoded). The fragment data sits immediately BEFORE the
+//     manifest in the same shard file (raw, NOT gzipped), at addresses
+//     given by manifest offsets. We range-fetch from the shard file.
 export async function fetchMultilodMesh(
   base: string,
   segmentId: string,
   opts: MultilodOptions,
 ): Promise<ParsedMesh> {
   const httpsBase = precomputedToHttps(base).replace(/\/$/, "");
-  const indexUrl = `${httpsBase}/${segmentId}.index`;
-  const dataUrl = `${httpsBase}/${segmentId}`;
 
-  const indexRes = await fetch(indexUrl);
-  if (!indexRes.ok) {
-    throw new Error(`multilod .index ${indexRes.status} at ${indexUrl}`);
+  // Variables that differ between sharded / unsharded paths:
+  //   manifest      — parsed .index contents
+  //   fragmentSrc   — { kind: "file", url } | { kind: "shard", url, manifestRawEnd }
+  //                   For "shard", manifestRawEnd is the absolute byte
+  //                   offset in the shard file where the manifest begins
+  //                   (equivalently, where the fragment data ends).
+  let manifestBuf: ArrayBuffer;
+  let fragmentSrc:
+    | { kind: "file"; url: string }
+    | { kind: "shard"; url: string; manifestRawEnd: number };
+
+  if (opts.sharding) {
+    const key = BigInt(segmentId);
+    const got = await fetchShardedChunk(httpsBase, key, opts.sharding);
+    if (!got) {
+      throw new Error(
+        `Sharded multilod segment ${segmentId} not present in any minishard at ${httpsBase}.`,
+      );
+    }
+    manifestBuf = got.data;
+    fragmentSrc = {
+      kind: "shard",
+      url: got.location.shardUrl,
+      manifestRawEnd: got.location.rawOffset,
+    };
+  } else {
+    const indexUrl = `${httpsBase}/${segmentId}.index`;
+    const dataUrl = `${httpsBase}/${segmentId}`;
+    const indexRes = await fetch(indexUrl);
+    if (!indexRes.ok) {
+      throw new Error(`multilod .index ${indexRes.status} at ${indexUrl}`);
+    }
+    manifestBuf = await indexRes.arrayBuffer();
+    fragmentSrc = { kind: "file", url: dataUrl };
   }
-  const indexBuf = await indexRes.arrayBuffer();
-  const manifest = parseMultilodManifest(indexBuf);
+
+  const manifest = parseMultilodManifest(manifestBuf);
 
   const lod = pickFinestLod(manifest);
   if (lod < 0) {
@@ -209,19 +259,42 @@ export async function fetchMultilodMesh(
   // Range-fetch covers all chosen-LOD fragments in one request — fragment
   // offsets within the file are cumulative across all LODs, so we use the
   // first fragment's offset and the last fragment's end.
-  const rangeStart = fragments[0].offset;
+  //
+  // Manifest offsets are RELATIVE to the start of the fragment data:
+  //   - unsharded: that's start of <seg_id>, so absolute = offset
+  //   - sharded:   that's manifestRawEnd - fullDataSize in the shard
+  //     file. We compute fullDataSize as the cumulative length across
+  //     ALL LODs (matches neuroglancer's downloadFragment math), then
+  //     adjust each fragment's offset/length by that base.
+  const fullDataSize = manifest.fragmentsByLod
+    .flat()
+    .reduce((s, f) => s + f.length, 0);
+  const baseInSource =
+    fragmentSrc.kind === "shard" ? fragmentSrc.manifestRawEnd - fullDataSize : 0;
+  const rangeStart = baseInSource + fragments[0].offset;
   const rangeEnd =
-    fragments[fragments.length - 1].offset + fragments[fragments.length - 1].length;
-  const dataRes = await fetch(dataUrl, {
-    headers: { Range: `bytes=${rangeStart}-${rangeEnd - 1}` },
-  });
-  if (!dataRes.ok && dataRes.status !== 206) {
-    throw new Error(`multilod data ${dataRes.status} at ${dataUrl}`);
+    baseInSource +
+    fragments[fragments.length - 1].offset +
+    fragments[fragments.length - 1].length;
+  let allBuf: ArrayBuffer;
+  if (fragmentSrc.kind === "shard") {
+    allBuf = await fetchRawShardBytes(fragmentSrc.url, rangeStart, rangeEnd);
+  } else {
+    const dataRes = await fetch(fragmentSrc.url, {
+      headers: { Range: `bytes=${rangeStart}-${rangeEnd - 1}` },
+    });
+    if (!dataRes.ok && dataRes.status !== 206) {
+      throw new Error(`multilod data ${dataRes.status} at ${fragmentSrc.url}`);
+    }
+    allBuf = await dataRes.arrayBuffer();
+    if (dataRes.status === 200 && allBuf.byteLength > rangeEnd - rangeStart) {
+      allBuf = allBuf.slice(rangeStart, rangeEnd);
+    }
   }
-  const allBuf = await dataRes.arrayBuffer();
-  // If the server ignored the Range header and returned the full file,
-  // we need to slice from the absolute offset; otherwise slice from 0.
-  const baseOffset = dataRes.status === 206 ? rangeStart : 0;
+  // After this point, slices are taken from allBuf starting at offset
+  // `(frag.offset + baseInSource) - rangeStart` — i.e. each fragment's
+  // absolute source position MINUS where we started the fetch.
+  const sourceFetchStart = rangeStart;
 
   const scale = 1 << lod;
   const [cx, cy, cz] = manifest.chunkShape;
@@ -236,7 +309,7 @@ export async function fetchMultilodMesh(
   // module-level decodeResult slot, so concurrent decodes would race.
   const parts: ParsedMesh[] = [];
   for (const frag of fragments) {
-    const sliceStart = frag.offset - baseOffset;
+    const sliceStart = baseInSource + frag.offset - sourceFetchStart;
     const sliceEnd = sliceStart + frag.length;
     if (sliceEnd > allBuf.byteLength) {
       throw new Error(

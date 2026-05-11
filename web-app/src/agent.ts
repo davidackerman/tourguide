@@ -16,7 +16,9 @@ import {
   probePrecomputedInfo,
   resolveBundledSubpath,
   probeMeshInfo,
+  fetchSegmentProperties,
 } from "./precomputed_info.js";
+import { parseSharding, type ShardingSpec } from "./precomputed_sharded.js";
 import { loadSettings } from "./llm.js";
 import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
@@ -271,6 +273,8 @@ ${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — run_sql / run_pyt
 
 NEVER GUESS DATASET PROPERTIES. If the user asks about a layer's resolution / scale / shape / dtype / available downsamplings, call describe_dataset(layer_name) and answer from its return value. Never invent numbers like "1 × 1 × 1 nm" — when uncertain, say so or call describe_dataset.
 
+ANSWER COUNT QUESTIONS FROM DATASET METADATA, NOT VOXEL READS. If the user asks "how many <objects> are in this layer" (e.g. "how many neurons / bodies / cells"), call describe_dataset() and use the layer's 'num_segments' field — that's the precomputed segment_properties count, returned for free. Do NOT call python_on_layers to count objects in a precomputed segmentation; that path can't read precomputed voxels and is the wrong tool. Use num_segments + answer + done.
+
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
   {"tool": "<name>", "args": { ... }}
@@ -391,13 +395,14 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
                     THIS is how you compute volume / surface area
                     on precomputed-only datasets. Binds
                     '<layer>_mesh = {seg_id: {"vertices": (N,3) f32 nm,
-                    "faces": (M,3) u32}}'. Supports both
-                    'neuroglancer_legacy_mesh' and
-                    'neuroglancer_multilod_draco' (both unsharded);
-                    describe_dataset reports mesh_format +
-                    mesh_analysis_supported so check before requesting.
-                    Sharded variants aren't supported yet; the
-                    resolver errors clearly if you try them.
+                    "faces": (M,3) u32}}'. Supports
+                    'neuroglancer_legacy_mesh' (unsharded only) and
+                    'neuroglancer_multilod_draco' (unsharded OR
+                    sharded — works for hemibrain / FAFB / MICrONS).
+                    describe_dataset reports mesh_format /
+                    mesh_sharded / mesh_analysis_supported so you can
+                    check before requesting. Sharded LEGACY format
+                    is the one variant that still isn't supported.
       'runtime'   — "auto" (default; harness picks). Use "backend" only
                     when the user explicitly asks for full resolution
                     or you know the dataset is huge. Use "local" only
@@ -1021,9 +1026,8 @@ async function execPythonOnLayers(
           const minfo = await probeMeshInfo(bundledMesh);
           if (minfo) {
             meshAnalyzable =
-              (minfo.atType === "neuroglancer_legacy_mesh" ||
-                minfo.atType === "neuroglancer_multilod_draco") &&
-              !minfo.isSharded;
+              (minfo.atType === "neuroglancer_legacy_mesh" && !minfo.isSharded) ||
+              minfo.atType === "neuroglancer_multilod_draco";
           }
         }
         if (bundledSkel && meshAnalyzable) {
@@ -1033,7 +1037,7 @@ async function execPythonOnLayers(
         } else if (meshAnalyzable) {
           skelHint = ` This precomputed dir bundles meshes — pass meshes=[{"layer":"${name}","segment_ids":[...]}] for volume / surface area.`;
         } else if (bundledMesh) {
-          skelHint = ` This precomputed dir bundles meshes, but they're sharded — Tourguide can't analyze sharded meshes yet (no shard reader).`;
+          skelHint = ` This precomputed dir bundles meshes, but they're sharded LEGACY format — Tourguide doesn't support that variant (multilod_draco sharded does work).`;
         } else {
           skelHint = ` Probed the precomputed info file — no bundled meshes or skeletons.`;
         }
@@ -1117,9 +1121,9 @@ async function execPythonOnLayers(
   }
 
   // Resolve mesh entries — parallel to the skeleton loop above. We
-  // support `neuroglancer_legacy_mesh` (single-LOD, unsharded) and
-  // `neuroglancer_multilod_draco` (multi-LOD draco, unsharded). The
-  // format probe gates sharded variants out — no shard reader yet.
+  // support `neuroglancer_legacy_mesh` (unsharded) and
+  // `neuroglancer_multilod_draco` (unsharded or sharded). Sharded
+  // legacy is still rejected (no shard reader for that variant yet).
   const meshesArg = args.meshes;
   const hasMeshes = Array.isArray(meshesArg) && meshesArg.length > 0;
   interface MeshResolved {
@@ -1130,6 +1134,7 @@ async function execPythonOnLayers(
     format: "neuroglancer_legacy_mesh" | "neuroglancer_multilod_draco";
     vertexQuantizationBits?: number;
     transform?: number[];
+    sharding?: ShardingSpec;
   }
   const resolvedMeshes: MeshResolved[] = [];
   if (hasMeshes) {
@@ -1176,15 +1181,16 @@ async function execPythonOnLayers(
           `Couldn't read mesh info for '${layerName}' at ${meshSource}. Network error or unsupported format.`,
         );
       }
-      if (minfo.isSharded) {
-        throw new Error(
-          `Mesh on '${layerName}' is sharded ('${minfo.atType || "(unknown)"}'); the shard reader isn't implemented yet. Skeletons or zarr volumes are the alternatives.`,
-        );
-      }
       let format: "neuroglancer_legacy_mesh" | "neuroglancer_multilod_draco";
       let vertexQuantizationBits: number | undefined;
       let transform: number[] | undefined;
+      let sharding: MeshResolved["sharding"] | undefined;
       if (minfo.atType === "neuroglancer_legacy_mesh") {
+        if (minfo.isSharded) {
+          throw new Error(
+            `Mesh on '${layerName}' is sharded legacy mesh — that variant isn't supported (sharded multilod_draco is). Skeletons or zarr volumes are the alternatives.`,
+          );
+        }
         format = "neuroglancer_legacy_mesh";
       } else if (minfo.atType === "neuroglancer_multilod_draco") {
         format = "neuroglancer_multilod_draco";
@@ -1199,9 +1205,18 @@ async function execPythonOnLayers(
         if (Array.isArray(xformRaw) && xformRaw.length === 12) {
           transform = xformRaw.map(Number);
         }
+        if (minfo.isSharded) {
+          const parsed = parseSharding(minfo.raw["sharding"]);
+          if (!parsed) {
+            throw new Error(
+              `Mesh on '${layerName}' has a sharding field but it's not a recognized neuroglancer_uint64_sharded_v1 spec.`,
+            );
+          }
+          sharding = parsed;
+        }
       } else {
         throw new Error(
-          `Mesh format '${minfo.atType || "(unknown)"}' on '${layerName}' isn't supported. Recognized formats: 'neuroglancer_legacy_mesh', 'neuroglancer_multilod_draco' (both unsharded).`,
+          `Mesh format '${minfo.atType || "(unknown)"}' on '${layerName}' isn't supported. Recognized: 'neuroglancer_legacy_mesh' (unsharded), 'neuroglancer_multilod_draco' (unsharded or sharded).`,
         );
       }
       const safeVar = layerName.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
@@ -1213,6 +1228,7 @@ async function execPythonOnLayers(
         format,
         vertexQuantizationBits,
         transform,
+        sharding,
       });
     }
   }
@@ -1603,8 +1619,9 @@ async function execDescribeDataset(
         }
         // For any discovered mesh source (path-based OR bundled),
         // probe its info file to learn the on-disk format. Surfaces
-        // whether mesh-based analysis is currently supported (legacy
-        // single-fragment = yes; multilod_draco / sharded = not yet).
+        // whether mesh-based analysis is currently supported.
+        // Supported: legacy unsharded, multilod_draco (sharded or not).
+        // Unsupported: sharded legacy.
         let meshFormat: string | null = null;
         let meshSharded = false;
         let meshSupported = false;
@@ -1617,10 +1634,27 @@ async function execDescribeDataset(
             meshFormat = minfo.atType || null;
             meshSharded = minfo.isSharded;
             meshSupported =
-              (minfo.atType === "neuroglancer_legacy_mesh" ||
-                minfo.atType === "neuroglancer_multilod_draco") &&
-              !minfo.isSharded;
+              (minfo.atType === "neuroglancer_legacy_mesh" && !minfo.isSharded) ||
+              minfo.atType === "neuroglancer_multilod_draco";
           }
+        }
+        // Probe segment_properties for a cheap object count. For
+        // hemibrain-style segmentations this gives the agent an
+        // immediate answer to "how many neurons" without needing
+        // any mesh / volume reads.
+        let segmentCount: number | null = null;
+        let segmentPropertyLabels: string[] | null = null;
+        for (const s of sourceList) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const info = await probePrecomputedInfo(s);
+          if (!info?.segmentProperties) continue;
+          const propsUrl = `${s.replace(/\/$/, "")}/${info.segmentProperties}`;
+          const props = await fetchSegmentProperties(propsUrl);
+          if (props) {
+            segmentCount = props.numSegments;
+            segmentPropertyLabels = props.propertyLabels.length > 0 ? props.propertyLabels : null;
+          }
+          break;
         }
         return {
           name: l.name,
@@ -1638,15 +1672,20 @@ async function execDescribeDataset(
           bundled_mesh_url: bundled.mesh ?? null,
           bundled_skeleton_url: bundled.skeletons ?? null,
           // Mesh on-disk format (when a mesh source is present).
-          // "neuroglancer_legacy_mesh" or "neuroglancer_multilod_draco"
-          // (both unsharded) = volume / surface area integration is
-          // supported via meshes=[...] on python_on_layers. Sharded
-          // variants still need a shard reader (not yet implemented);
-          // those still let click-to-fly + visualization work, just
-          // not Python mesh analysis.
+          // Currently supported: legacy_mesh (unsharded only) and
+          // multilod_draco (unsharded or sharded). Sharded legacy
+          // still falls through to "not supported".
           mesh_format: meshFormat,
           mesh_sharded: meshSharded,
           mesh_analysis_supported: meshSupported,
+          // From precomputed segment_properties/info — total declared
+          // segment count and (for sites that use them) attribute
+          // labels like ["status", "type", "instance"]. Null when no
+          // segment_properties subdir was found. THE ANSWER to "how
+          // many neurons" lives here — answer this directly without
+          // calling python_on_layers.
+          num_segments: segmentCount,
+          segment_property_labels: segmentPropertyLabels,
           inspectable: isZarrSource(l.source),
           // User-applied translation from the pasted NG state, if any.
           // Tourguide folds this into per-object positions
