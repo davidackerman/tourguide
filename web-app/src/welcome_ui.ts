@@ -267,7 +267,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
         </section>
       </div>
       <div class="modal-footer">
-        <button class="btn-secondary" data-welcome-skip>Skip — I'll set up later</button>
+        <button class="btn-secondary" data-welcome-skip>Save &amp; close (no data load)</button>
       </div>
     </div>
   `;
@@ -277,18 +277,25 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     if (saved) markWelcomeSeen();
     overlay.remove();
   };
-  overlay.querySelector(".modal-close")!.addEventListener("click", () => {
+  // Closing the modal always tries to persist whatever's typed —
+  // otherwise a user who enters an API key but doesn't click a "Load"
+  // button loses it on dismiss. persistSettings's validate step may
+  // surface an "API key didn't validate, save anyway?" confirm; if
+  // the user cancels there, we leave the modal open.
+  const saveAndClose = async (): Promise<void> => {
+    if (!(await persistSettings())) return;
     markWelcomeSeen();
     close(true);
+  };
+  overlay.querySelector(".modal-close")!.addEventListener("click", () => {
+    void saveAndClose();
   });
   overlay.querySelector("[data-welcome-skip]")!.addEventListener("click", () => {
-    markWelcomeSeen();
-    close(true);
+    void saveAndClose();
   });
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) {
-      markWelcomeSeen();
-      close(true);
+      void saveAndClose();
     }
   });
 
