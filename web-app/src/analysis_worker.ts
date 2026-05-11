@@ -26,6 +26,7 @@ import {
   type ParsedMesh,
 } from "./precomputed_mesh_loader.js";
 import { fetchMultilodMesh } from "./precomputed_multilod_loader.js";
+import { loadPrecomputedScale, type PrecomputedScale } from "./precomputed_volume_loader.js";
 
 // Pin to same Pyodide version as plot.ts so both features share a cache of
 // wheels when the browser revisits.
@@ -68,6 +69,40 @@ export interface CustomRequest {
     axesOrder: string[];
     voxelNm: [number, number, number];
     offsetNm: [number, number, number];
+  }[];
+  // Precomputed-segmentation VOLUME inputs (parallel to `layers`).
+  // The agent decides which scale to pull based on a memory budget and
+  // ships the scale spec verbatim — the worker doesn't re-probe the
+  // info file. Each entry produces the same Python globals shape as a
+  // zarr layer: <varName> as a numpy uint64 ndarray, plus the entry
+  // in the `layers` dict with spacing/offset/axes metadata.
+  precomputedVolumeLayers?: {
+    varName: string;
+    // The precomputed segmentation base (the URL whose `info` file
+    // declared the scales). Loader fetches `<base>/<scale.key>/*`.
+    baseUrl: string;
+    scale: {
+      key: string;
+      resolutionNm: [number, number, number];
+      size: [number, number, number];
+      chunkSize: [number, number, number];
+      voxelOffset: [number, number, number];
+      encoding: "compressed_segmentation" | "raw" | "jpeg";
+      compressedSegmentationBlockSize?: [number, number, number];
+      sharding?: {
+        hash: "identity" | "murmurhash3_x86_128";
+        preshiftBits: number;
+        shardBits: number;
+        minishardBits: number;
+        minishardIndexEncoding: "raw" | "gzip";
+        dataEncoding: "raw" | "gzip";
+      };
+      approxBytes: number;
+    };
+    // Optional NG-state per-source translation, mirrored from the
+    // zarr-layer path. Folded into offsetNm before binding so Python
+    // sees the layer aligned with meshes/skeletons on the same NG layer.
+    offsetNm?: [number, number, number];
   }[];
   // Precomputed skeleton inputs — fetched per segment, parsed, transformed
   // to nm, and exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
@@ -944,6 +979,37 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
     if (cancelled) return;
   }
 
+  // Precomputed-segmentation VOLUME layers. The agent already picked a
+  // scale that fits the runtime budget; we just stream chunks from the
+  // shard files and stitch into a single BigUint64Array. Output shape
+  // is (z, y, x) to match the zarr convention so user code doesn't need
+  // to branch on source format.
+  for (const vlayer of msg.precomputedVolumeLayers ?? []) {
+    if (cancelled) return;
+    progress(
+      `Reading precomputed volume ${vlayer.varName} (scale ${vlayer.scale.key}) …`,
+      "read",
+    );
+    const result = await loadPrecomputedScale(
+      vlayer.baseUrl,
+      vlayer.scale as PrecomputedScale,
+      (m) => progress(`${vlayer.varName}: ${m}`, "read"),
+    );
+    const ngOffset = vlayer.offsetNm ?? [0, 0, 0];
+    loaded[vlayer.varName] = {
+      data: result.data,
+      shape: result.shape,
+      // result.spacingNm / offsetNm are already (z, y, x) ordered.
+      spacing: result.spacingNm,
+      offsets: [
+        result.offsetNm[0] + ngOffset[2],
+        result.offsetNm[1] + ngOffset[1],
+        result.offsetNm[2] + ngOffset[0],
+      ],
+      axes: ["z", "y", "x"],
+    };
+  }
+
   // Fetch any requested skeletons. Each (varName) loads the
   // precomputed info once + each segment file in series. Failed segments
   // are dropped with a warning so a missing skeleton doesn't sink the
@@ -1053,8 +1119,15 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
   await py.loadPackage(["pandas", "matplotlib"]);
   if (cancelled) return;
 
-  // Hand each array to Python with metadata.
-  py.globals.set("_tg_layer_names", msg.layers.map((l) => l.varName));
+  // Hand each array to Python with metadata. Both zarr layers and
+  // precomputed-volume layers go into the same `loaded` dict and the
+  // same `_tg_layer_names` list — the Python side reconstructs them
+  // identically regardless of source format.
+  const allLayerVarNames = [
+    ...msg.layers.map((l) => l.varName),
+    ...(msg.precomputedVolumeLayers ?? []).map((l) => l.varName),
+  ];
+  py.globals.set("_tg_layer_names", allLayerVarNames);
   py.globals.set("_tg_tables_json", JSON.stringify(msg.tables));
   for (const [name, info] of Object.entries(loaded)) {
     py.globals.set(`__tg_${name}_data`, info.data);

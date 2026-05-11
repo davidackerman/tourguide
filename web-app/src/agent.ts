@@ -19,6 +19,12 @@ import {
   fetchSegmentProperties,
 } from "./precomputed_info.js";
 import { parseSharding, type ShardingSpec } from "./precomputed_sharded.js";
+import {
+  parsePrecomputedVolumeInfo,
+  pickScaleForBudget,
+  type PrecomputedScale,
+  type PrecomputedVolumeInfo,
+} from "./precomputed_volume_loader.js";
 import { loadSettings } from "./llm.js";
 import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
@@ -241,17 +247,16 @@ const LAYER_GUIDE = (d: DatasetDescriptor): string => {
   sources= conventions:
     zarr / zarr2 / zarr3 / n5 — multiscale array on a per-axis voxel grid.
         python_on_layers loads the voxels as a numpy array.
-    precomputed — Neuroglancer precomputed segmentation. The volume
-        VOXELS are NOT readable by python_on_layers (no in-browser
-        reader for that format). Skeletons + meshes bundled inside
-        the precomputed dir often ARE accessible; check describe_dataset.
-    precomputed-mesh — 3D mesh per segment, not loadable as an array.
-    precomputed-skeleton — pass via 'skeletons' to python_on_layers
-        for length / branching / geodesic metrics.
-
-  For precomputed-volume layers, volume / regionprops on raw voxels
-  is unavailable. Skeletons cover length-style queries. Mesh-based
-  volume estimation isn't supported yet — tell the user.
+    precomputed — Neuroglancer precomputed segmentation. Tourguide
+        can read voxels (uint64 compressed_segmentation, sharded or
+        not), meshes (legacy unsharded + multilod_draco sharded or
+        unsharded), AND skeletons. describe_dataset returns
+        precomputed_volume_scales so you can see what's available.
+        Pass the layer's name in 'layers' to load voxels as numpy;
+        the agent auto-picks a scale that fits the local memory
+        budget. Skeletons go in 'skeletons', meshes in 'meshes'.
+    precomputed-mesh — standalone mesh source (not inside a seg dir).
+    precomputed-skeleton — standalone skeleton source.
 
   'ng_offset_nm' is the user-applied translation from the pasted NG
   state; tourguide adds it to per-object positions automatically so
@@ -709,10 +714,11 @@ WHEN TO USE meshes= VS layers= IN python_on_layers:
     - "make a new layer that is eroded / thresholded / ..."
     - "regionprops on EVERY object" with no prior id list
     - anything where you'd want a per-voxel mask
-  When the layer is precomputed-only (no zarr volume), the voxel
-  path isn't available — meshes are the only option, and a
-  per-object id list MUST come from the user, the structured
-  browser, or num_segments / segment_property_labels.
+  When the layer is precomputed-segmentation (e.g. hemibrain),
+  both paths work now: pass the layer in 'layers' for voxels (auto
+  scale-picked to fit local memory — be aware finest scales are
+  too big for whole-volume regionprops; coarse scales are usually
+  what you want) OR in 'meshes' with a per-object id list.
   - Never reach for run_sql when the question implies geometric
     reasoning over position columns — SQL can't compute density
     or pairwise distances. ORDER BY <size> DESC LIMIT 1 is NOT
@@ -1003,6 +1009,13 @@ async function execPythonOnLayers(
   // letting the worker fail on a bad URL — the model will recover faster
   // from a clear "no such layer" than from a worker error.
   const resolved: { name: string; layer: DatasetLayer }[] = [];
+  interface PrecomputedVolumeResolved {
+    varName: string;
+    baseUrl: string;
+    scale: PrecomputedScale;
+    offsetNm?: [number, number, number];
+  }
+  const resolvedPrecomputedVolumes: PrecomputedVolumeResolved[] = [];
   for (const name of layerNames) {
     const layer = ctx.descriptor.layers.find((l) => l.name === name);
     if (!layer) {
@@ -1012,14 +1025,38 @@ async function execPythonOnLayers(
       );
     }
     if (!isZarrSource(layer.source)) {
-      // Differentiate precomputed-volume from other non-zarr sources
-      // so the error tells the model what's actually possible, not
-      // just what failed. Precomputed segmentations (e.g. hemibrain
-      // at precomputed://gs://...) host volume + mesh + skeleton
-      // inside the same dir — the volume voxels aren't readable by
-      // python_on_layers (no precomputed-volume browser reader yet),
-      // but bundled meshes / skeletons may still be accessible.
+      // Non-zarr: try precomputed-segmentation VOLUME before falling
+      // through to the mesh / skeleton hint path. Hemibrain / FAFB /
+      // MICrONS etc. host their voxels here. We probe the info file,
+      // pick the finest scale that fits Pyodide's WASM budget, and
+      // route the layer to the worker's precomputedVolumeLayers slot.
       const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+      const precomputedSrc = sources.find((s) => /^precomputed:\/\//.test(s));
+      if (precomputedSrc) {
+        const info = await probePrecomputedInfo(precomputedSrc);
+        let volumeInfo: PrecomputedVolumeInfo | null = null;
+        if (info) volumeInfo = parsePrecomputedVolumeInfo(info.raw);
+        if (volumeInfo && volumeInfo.scales.length > 0) {
+          // Match the existing zarr path's local-runtime budget. The
+          // worker can't go bigger than Pyodide's heap.
+          const scale = pickScaleForBudget(volumeInfo, SAFE_INPUT_BYTES);
+          if (!scale) {
+            const finest = volumeInfo.scales[0];
+            const coarsest = volumeInfo.scales[volumeInfo.scales.length - 1];
+            throw new Error(
+              `Layer '${name}' precomputed volume has no scale ≤ ${(SAFE_INPUT_BYTES / 1e9).toFixed(2)} GB. Finest: ${(finest.approxBytes / 1e9).toFixed(2)} GB, coarsest: ${(coarsest.approxBytes / 1e9).toFixed(3)} GB. Probably an unsupported dtype/encoding — describe_dataset will say which.`,
+            );
+          }
+          const safeVar = name.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+          resolvedPrecomputedVolumes.push({
+            varName: safeVar,
+            baseUrl: precomputedSrc,
+            scale,
+            offsetNm: layer.transform_offset_nm,
+          });
+          continue;
+        }
+      }
       const isPrecomputed = sources.some((s) => /^precomputed:\/\//.test(s));
       // Path-based skeleton detection first.
       let skelHint = "";
@@ -1268,7 +1305,12 @@ async function execPythonOnLayers(
   const backendUrl = settings.analysisBackendUrl.trim();
   const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
   const codeNeedsMeshLayer = /\b_TG_NEW_MESH_LAYER\s*=/.test(code);
-  const mustBeLocal = resolvedSkeletons.length > 0 || resolvedMeshes.length > 0;
+  // Precomputed-volume layers also force local: the worker is the only
+  // reader for them today (HF backend doesn't handle precomputed yet).
+  const mustBeLocal =
+    resolvedSkeletons.length > 0 ||
+    resolvedMeshes.length > 0 ||
+    resolvedPrecomputedVolumes.length > 0;
   const mustBeBackend = codeImportsSeungLab || codeNeedsMeshLayer;
   if (mustBeLocal && mustBeBackend) {
     throw new Error(
@@ -1464,9 +1506,11 @@ async function execPythonOnLayers(
           layers: requestLayers,
           skeletonLayers: resolvedSkeletons.length > 0 ? resolvedSkeletons : undefined,
           meshLayers: resolvedMeshes.length > 0 ? resolvedMeshes : undefined,
+          precomputedVolumeLayers:
+            resolvedPrecomputedVolumes.length > 0 ? resolvedPrecomputedVolumes : undefined,
           tables,
           code,
-          timeoutMs: 60000,
+          timeoutMs: 120000,
         },
         (m) => ctx.callbacks.onProgress?.(m),
       );
@@ -1676,6 +1720,32 @@ async function execDescribeDataset(
           }
           break;
         }
+        // Precomputed-VOLUME readability: probe the info file to see
+        // whether tourguide can load voxels into python_on_layers. We
+        // surface the full scale list (sizes + approxBytes) so the
+        // agent knows what fits in the local budget without guessing.
+        let precomputedVolumeReadable = false;
+        let precomputedVolumeScales: Array<{
+          key: string;
+          resolution_nm: [number, number, number];
+          size: [number, number, number];
+          approx_bytes: number;
+        }> | null = null;
+        for (const s of sourceList) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const info = await probePrecomputedInfo(s);
+          if (!info) continue;
+          const vol = parsePrecomputedVolumeInfo(info.raw);
+          if (!vol) continue;
+          precomputedVolumeReadable = true;
+          precomputedVolumeScales = vol.scales.map((sc) => ({
+            key: sc.key,
+            resolution_nm: sc.resolutionNm,
+            size: sc.size,
+            approx_bytes: sc.approxBytes,
+          }));
+          break;
+        }
         return {
           name: l.name,
           type: l.type,
@@ -1706,7 +1776,14 @@ async function execDescribeDataset(
           // calling python_on_layers.
           num_segments: segmentCount,
           segment_property_labels: segmentPropertyLabels,
-          inspectable: isZarrSource(l.source),
+          // True when python_on_layers can load this layer's voxels
+          // (works for both zarr/n5 AND precomputed-segmentation
+          // uint64 compressed_segmentation). When true, you can pass
+          // this layer's name in `layers: [...]` to python_on_layers
+          // and it'll show up as a numpy ndarray. precomputed_volume_scales
+          // lists every scale you can choose from.
+          inspectable: isZarrSource(l.source) || precomputedVolumeReadable,
+          precomputed_volume_scales: precomputedVolumeScales,
           // User-applied translation from the pasted NG state, if any.
           // Tourguide folds this into per-object positions
           // automatically — no need to apply it in your code.
@@ -2182,6 +2259,11 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       jsonMode: true,
       maxTokens: 1500,
       signal: ctx.signal,
+      // The ~20k-token SYSTEM_PROMPT is resent on every step of this
+      // loop, so caching the prefix turns iterations 2..N into cache
+      // reads ($0.30/M) instead of full input ($3/M). Only honored by
+      // AnthropicBackend.
+      cacheSystem: true,
       onToken: (_t, accumulated) => {
         tokenCount += 1;
         // Pull the tool name out of the streamed JSON as soon as it's
