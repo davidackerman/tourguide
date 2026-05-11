@@ -693,6 +693,26 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     skeletonize, mesh, contact area between two label volumes)
     OR persist a NEW LAYER ("add an eroded mito layer",
     "show me the boundaries of X")                              -> python_on_layers
+
+WHEN TO USE meshes= VS layers= IN python_on_layers:
+  Mesh path (cheap, per-object, closed-surface assumption):
+    - "what's the volume of body 1234"
+    - "top N segments by volume / surface area" — but ONLY if you
+      already know which IDs to load (max ~100 — fetching meshes
+      for thousands of segments is slow). For "top N over the
+      whole dataset", fall through to voxels OR rely on the
+      precomputed segment_properties metadata if it lists size.
+    - "centroid of body 1234"
+  Voxel path (use a zarr 'layers' input):
+    - "find ALL connected components" — meshes can't enumerate
+    - "what does layer A touch in layer B" — needs label volumes
+    - "make a new layer that is eroded / thresholded / ..."
+    - "regionprops on EVERY object" with no prior id list
+    - anything where you'd want a per-voxel mask
+  When the layer is precomputed-only (no zarr volume), the voxel
+  path isn't available — meshes are the only option, and a
+  per-object id list MUST come from the user, the structured
+  browser, or num_segments / segment_property_labels.
   - Never reach for run_sql when the question implies geometric
     reasoning over position columns — SQL can't compute density
     or pairwise distances. ORDER BY <size> DESC LIMIT 1 is NOT
