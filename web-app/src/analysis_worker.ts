@@ -25,6 +25,7 @@ import {
   fetchLegacyMesh,
   type ParsedMesh,
 } from "./precomputed_mesh_loader.js";
+import { fetchMultilodMesh } from "./precomputed_multilod_loader.js";
 
 // Pin to same Pyodide version as plot.ts so both features share a cache of
 // wheels when the browser revisits.
@@ -86,14 +87,20 @@ export interface CustomRequest {
   }[];
   // Precomputed mesh inputs — fetched per segment, parsed, and
   // exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
-  // "faces": ndarray (M,3)}}. Currently supports legacy single-LOD
-  // unsharded mesh format only; multilod_draco / sharded variants
-  // throw with a clear error so the agent knows the limitation.
+  // "faces": ndarray (M,3)}}. Supports both `neuroglancer_legacy_mesh`
+  // and `neuroglancer_multilod_draco` (unsharded). The agent gates
+  // sharded variants out — those throw if they slip through.
   meshLayers?: {
     varName: string;
     source: string;
     segmentIds: string[];
     offsetNm?: [number, number, number];
+    // On-disk format from the mesh info file. Selects the parser.
+    format: "neuroglancer_legacy_mesh" | "neuroglancer_multilod_draco";
+    // multilod_draco only: vertex quantization bits from mesh info.
+    vertexQuantizationBits?: number;
+    // multilod_draco only: optional 3x4 row-major transform native→nm.
+    transform?: number[];
   }[];
   // DataFrames already in the sql.js DB that should be exposed to Python as
   // df_<organelle_class> (already the make_plot convention).
@@ -976,9 +983,9 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
   }
 
   // Fetch any requested meshes (parallel to the skeleton loop above).
-  // Currently only legacy single-LOD unsharded format. Multi-LOD draco
-  // / sharded variants throw — caught here, recorded in misses with a
-  // clear error so the Python side can surface it.
+  // Dispatch by format: legacy single-LOD unsharded vs multilod_draco
+  // unsharded. Failures are recorded in misses with a clear log line so
+  // the Python side can surface them.
   const meshes: Record<string, Map<string, ParsedMesh>> = {};
   const meshMisses: Record<string, string[]> = {};
   for (const meshLayer of msg.meshLayers ?? []) {
@@ -990,7 +997,20 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
           `Reading mesh ${meshLayer.varName}[${segId}] (${got.size + 1}/${meshLayer.segmentIds.length}) …`,
           "mesh",
         );
-        const parsed = await fetchLegacyMesh(meshLayer.source, segId);
+        let parsed: ParsedMesh;
+        if (meshLayer.format === "neuroglancer_multilod_draco") {
+          if (typeof meshLayer.vertexQuantizationBits !== "number") {
+            throw new Error(
+              "multilod_draco mesh layer missing vertexQuantizationBits (worker bug)",
+            );
+          }
+          parsed = await fetchMultilodMesh(meshLayer.source, segId, {
+            vertexQuantizationBits: meshLayer.vertexQuantizationBits,
+            transform: meshLayer.transform,
+          });
+        } else {
+          parsed = await fetchLegacyMesh(meshLayer.source, segId);
+        }
         // Apply NG-state per-source translation if any, mirroring
         // the skeleton path. Mutates a fresh copy.
         if (meshLayer.offsetNm && (meshLayer.offsetNm[0] || meshLayer.offsetNm[1] || meshLayer.offsetNm[2])) {
