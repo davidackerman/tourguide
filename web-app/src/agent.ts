@@ -12,6 +12,7 @@ import {
   SAFE_INPUT_BYTES,
   type CustomAnalysisResult,
 } from "./analysis.js";
+import { probePrecomputedInfo, resolveBundledSubpath } from "./precomputed_info.js";
 import { loadSettings } from "./llm.js";
 import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
@@ -929,13 +930,35 @@ async function execPythonOnLayers(
       // but bundled meshes / skeletons may still be accessible.
       const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
       const isPrecomputed = sources.some((s) => /^precomputed:\/\//.test(s));
-      const skelSource = sources.find((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+      // Path-based skeleton detection first.
+      let skelHint = "";
+      const pathSkel = sources.find((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+      if (pathSkel) {
+        skelHint = ` This layer DOES have a skeleton source — try skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / connectivity / branching metrics.`;
+      } else if (isPrecomputed) {
+        // Probe the precomputed info file (cached) to see if
+        // skeletons / meshes are bundled. Tells the agent yes/no
+        // up front so it doesn't have to call describe_dataset
+        // separately just to discover this.
+        let bundledSkel: string | null = null;
+        let bundledMesh: string | null = null;
+        for (const s of sources) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          if (!bundledSkel) bundledSkel = await resolveBundledSubpath(s, "skeletons");
+          if (!bundledMesh) bundledMesh = await resolveBundledSubpath(s, "mesh");
+          if (bundledSkel && bundledMesh) break;
+        }
+        if (bundledSkel) {
+          skelHint = ` This precomputed dir bundles skeletons (per its info file) — pass skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / branching metrics.`;
+        } else if (bundledMesh) {
+          skelHint = ` This precomputed dir bundles meshes (per its info file) but no skeletons; mesh-based volume / surface area isn't supported yet.`;
+        } else {
+          skelHint = ` Probed the precomputed info file — no bundled meshes or skeletons.`;
+        }
+      }
       if (isPrecomputed) {
-        const skelHint = skelSource
-          ? ` This layer DOES have a skeleton source — try skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / connectivity / branching metrics.`
-          : ` Many precomputed segmentation dirs also host skeletons (Neuroglancer's segmentation/info file lists them as a 'skeletons' subkey). Call describe_dataset to check.`;
         throw new Error(
-          `Layer '${name}' is a precomputed segmentation, not a zarr volume. python_on_layers can't read precomputed-volume voxels directly (no in-browser reader for that format), so volume / regionprops on the voxels isn't available here.${skelHint} For volume / surface area without voxel access, no tool exists yet (mesh-based geometric integration would need a precomputed mesh reader).`,
+          `Layer '${name}' is a precomputed segmentation, not a zarr volume. python_on_layers can't read precomputed-volume voxels directly (no in-browser reader for that format), so volume / regionprops on the voxels isn't available here.${skelHint}`,
         );
       }
       throw new Error(
@@ -974,12 +997,28 @@ async function execPythonOnLayers(
         throw new Error(`No layer named '${layerName}' for skeleton input.`);
       }
       const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
-      const skelSource = sources.find(
+      // 1. Path-based: a separate source URL whose path contains
+      //    /skeleton/ or /skeletons/ (Janelia / cellmap convention).
+      let skelSource = sources.find(
         (s) => /\/skeleton\b|\/skeletons?\//i.test(s) || /^precomputed:\/\/.*skeleton/i.test(s),
       );
+      // 2. Bundled-in-precomputed: hemibrain-style segmentations
+      //    declare a `skeletons` subkey inside their info file. Probe
+      //    each precomputed source's info — first one that reports a
+      //    skeletons subpath wins. Cached per session.
+      if (!skelSource) {
+        for (const s of sources) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const resolved = await resolveBundledSubpath(s, "skeletons");
+          if (resolved) {
+            skelSource = resolved;
+            break;
+          }
+        }
+      }
       if (!skelSource) {
         throw new Error(
-          `Layer '${layerName}' has no precomputed-skeleton source (call describe_dataset to see what sources it has).`,
+          `Layer '${layerName}' has no skeleton source — no source URL contains /skeleton/, and no precomputed source declared a 'skeletons' subkey in its info file. Call describe_dataset to confirm.`,
         );
       }
       const safeVar = layerName.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
@@ -1344,19 +1383,55 @@ async function execDescribeDataset(
     // Summary: enough for the model to pick a layer and call back with
     // a name for scale detail. Keep it terse — this returns into the
     // agent context on every describe_dataset() call.
-    return {
-      dataset: ctx.descriptor.display_name,
-      default_voxel_size_nm: ctx.descriptor.voxel_size_nm,
-      layers: ctx.descriptor.layers.map((l) => {
+    //
+    // For layers whose ONLY source is a precomputed segmentation (e.g.
+    // hemibrain at precomputed://gs://.../segmentation), the URL alone
+    // doesn't reveal whether bundled meshes / skeletons exist —
+    // they're declared inside the info file's `mesh` / `skeletons`
+    // subkeys. Probe each precomputed source once (cached) so
+    // has_mesh / has_skeleton + bundled URLs reflect reality.
+    const probedLayers = await Promise.all(
+      ctx.descriptor.layers.map(async (l) => {
         const sourceList = Array.isArray(l.source) ? l.source : [l.source];
+        // Path-based detection (auxiliary sources whose URL itself
+        // contains /mesh/ or /skeleton/) is still the primary signal.
+        let hasMesh = sourceList.some((s) => /\/mesh\b|\/meshes?\//i.test(s));
+        let hasSkeleton = sourceList.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+        const bundled: { mesh?: string; skeletons?: string } = {};
+        // Bundled-in-precomputed detection: only run when neither
+        // mesh nor skeleton is path-detected yet, to avoid the
+        // extra HTTP for layers that already declared them.
+        if (!hasMesh || !hasSkeleton) {
+          for (const s of sourceList) {
+            if (!/^precomputed:\/\//i.test(s)) continue;
+            const info = await probePrecomputedInfo(s);
+            if (!info) continue;
+            if (info.mesh && !hasMesh) {
+              hasMesh = true;
+              bundled.mesh = `${s.replace(/\/$/, "")}/${info.mesh}`;
+            }
+            if (info.skeletons && !hasSkeleton) {
+              hasSkeleton = true;
+              bundled.skeletons = `${s.replace(/\/$/, "")}/${info.skeletons}`;
+            }
+            if (hasMesh && hasSkeleton) break;
+          }
+        }
         return {
           name: l.name,
           type: l.type,
           organelle_class: l.organelle_class ?? null,
           source_kinds: sourceList.map(sourceKind),
           has_volume: sourceList.some((s) => /^(zarr2?|zarr3|n5|graphene)/.test(s) || /\.zarr(\/|$)/i.test(s) || /precomputed:\/\//.test(s)),
-          has_mesh: sourceList.some((s) => /\/mesh\b|\/meshes?\//i.test(s)),
-          has_skeleton: sourceList.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s)),
+          has_mesh: hasMesh,
+          has_skeleton: hasSkeleton,
+          // When mesh / skeleton was discovered inside a precomputed
+          // segmentation's info file (rather than as a separate
+          // source URL), surface the resolved URL so the agent knows
+          // where to fetch from. Absent when the path-based detection
+          // already found the source.
+          bundled_mesh_url: bundled.mesh ?? null,
+          bundled_skeleton_url: bundled.skeletons ?? null,
           inspectable: isZarrSource(l.source),
           // User-applied translation from the pasted NG state, if any.
           // Tourguide folds this into per-object positions
@@ -1364,6 +1439,11 @@ async function execDescribeDataset(
           ng_offset_nm: l.transform_offset_nm ?? null,
         };
       }),
+    );
+    return {
+      dataset: ctx.descriptor.display_name,
+      default_voxel_size_nm: ctx.descriptor.voxel_size_nm,
+      layers: probedLayers,
     };
   }
 
