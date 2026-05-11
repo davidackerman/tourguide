@@ -218,9 +218,18 @@ const LAYER_GUIDE = (d: DatasetDescriptor): string => {
     const sourceList = Array.isArray(l.source) ? l.source : [l.source];
     const kinds = sourceList.map(sourceKind).filter((k, i, a) => a.indexOf(k) === i);
     const cls = l.organelle_class ? ` class=${l.organelle_class}` : "";
-    return `  "${l.name}"  type=${l.type}  sources=${kinds.join("+")}${cls}`;
+    // Surface the NG-state translation if any was applied — the
+    // analysis pipeline silently folds it into the layer offset, but
+    // it's worth flagging so the model doesn't claim "positions are
+    // in raw zarr coords" when they're not.
+    const tx = l.transform_offset_nm;
+    const xform =
+      tx && (tx[0] !== 0 || tx[1] !== 0 || tx[2] !== 0)
+        ? `  ng_offset_nm=${tx.map((n) => n.toFixed(0)).join(",")}`
+        : "";
+    return `  "${l.name}"  type=${l.type}  sources=${kinds.join("+")}${cls}${xform}`;
   });
-  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info). 'sources=zarr+precomputed-mesh+precomputed-skeleton' means the layer has all three views (volume, 3D meshes, skeletons) — segmentation analyses can use whichever is appropriate:\n${lines.join("\n")}`;
+  return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info). 'sources=zarr+precomputed-mesh+precomputed-skeleton' means the layer has all three views (volume, 3D meshes, skeletons) — segmentation analyses can use whichever is appropriate. 'ng_offset_nm' is the user-applied translation from the pasted NG state; tourguide adds it to per-object positions automatically so fly_to and click-to-fly land where the user sees the layer, not where the raw zarr would put it:\n${lines.join("\n")}`;
 };
 
 const SYSTEM_PROMPT = (db: DatasetDB | null, d: DatasetDescriptor | null): string => `
@@ -904,6 +913,7 @@ async function execPythonOnLayers(
     varName: string;
     source: string;
     segmentIds: string[];
+    offsetNm?: [number, number, number];
   }
   const resolvedSkeletons: SkelResolved[] = [];
   if (hasSkeletons) {
@@ -937,6 +947,10 @@ async function execPythonOnLayers(
         varName: `${safeVar}_skel`,
         source: skelSource,
         segmentIds,
+        // Same NG-state translation we apply to the volume offset.
+        // The worker shifts every skeleton vertex by this so the
+        // skeleton stays aligned with the volume in analysis math.
+        offsetNm: layer.transform_offset_nm,
       });
     }
   }
@@ -1052,13 +1066,24 @@ async function execPythonOnLayers(
       }
       const scale = insp.scales[idx];
       const varName = (layer.organelle_class ?? layer.name).replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+      // Add the user-applied NG-state translation on top of the
+      // zarr's intrinsic offset. Without this, per-object positions
+      // come back in the raw zarr frame and fly_to lands in the
+      // wrong place visually when the user has moved the layer in
+      // NG. transform_offset_nm is xyz; scale.offsetNm is also xyz.
+      const tx = layer.transform_offset_nm ?? [0, 0, 0];
+      const effectiveOffset: [number, number, number] = [
+        scale.offsetNm[0] + tx[0],
+        scale.offsetNm[1] + tx[1],
+        scale.offsetNm[2] + tx[2],
+      ];
       layersForRequest.push({
         varName,
         url,
         scalePath: scale.path,
         axesOrder: insp.axes.map((a) => a.name),
         voxelNm: scale.voxelNm,
-        offsetNm: scale.offsetNm,
+        offsetNm: effectiveOffset,
         _scalePath: scale.path,
         _approxBytes: scale.approxBytes,
         _layerName: layer.name,
@@ -1293,6 +1318,10 @@ async function execDescribeDataset(
           has_mesh: sourceList.some((s) => /\/mesh\b|\/meshes?\//i.test(s)),
           has_skeleton: sourceList.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s)),
           inspectable: isZarrSource(l.source),
+          // User-applied translation from the pasted NG state, if any.
+          // Tourguide folds this into per-object positions
+          // automatically — no need to apply it in your code.
+          ng_offset_nm: l.transform_offset_nm ?? null,
         };
       }),
     };
@@ -1317,12 +1346,18 @@ async function execDescribeDataset(
   try {
     const url = normalizeZarrUrl(layer.source);
     const insp = await client.inspect(url, ctx.descriptor.voxel_size_nm);
+    const tx = layer.transform_offset_nm;
     return {
       name: layer.name,
       type: layer.type,
       source_url: url,
       axes: insp.axes.map((a) => a.name),
       is_multiscale: insp.isMultiscale,
+      // offset_nm is the zarr's intrinsic offset. If the user has
+      // applied an NG-state translation, ng_offset_nm shows it; the
+      // analysis pipeline auto-applies it on top of the scale's
+      // offset before running, so user code should NOT add it again.
+      ng_offset_nm: tx ?? null,
       scales: insp.scales.map((s) => ({
         path: s.path,
         shape: s.shape,

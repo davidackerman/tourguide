@@ -545,6 +545,88 @@ layers:
       }
       return one(s);
     };
+    // Pull the user-applied translation out of an NG-state source
+    // spec's `transform` matrix. NG's transform shape:
+    //   { matrix: [[a,b,c,Tz],[d,e,f,Ty],[g,h,i,Tx]],
+    //     outputDimensions: { z:[s,"m"], y:[s,"m"], x:[s,"m"] } }
+    // The last column is translation in OUTPUT-dim voxels; multiply
+    // by each output dim's scale + unit → world nm. Returns
+    // undefined if there's no transform (bare URL or matrix is
+    // missing). Doesn't try to recover from non-identity rotation /
+    // scale in the principal 3x3 — those are rare and we warn so
+    // the user knows we ignored them.
+    const parseSourceTransformNm = (
+      x: unknown,
+    ): [number, number, number] | undefined => {
+      if (!x || typeof x !== "object") return undefined;
+      const xform = (x as { transform?: unknown }).transform;
+      if (!xform || typeof xform !== "object") return undefined;
+      const t = xform as {
+        matrix?: number[][];
+        outputDimensions?: Record<string, unknown>;
+      };
+      if (!Array.isArray(t.matrix) || !t.outputDimensions) return undefined;
+      const matrix = t.matrix;
+      const lastCol = (matrix[0]?.length ?? 0) - 1;
+      if (lastCol < 0) return undefined;
+      const axisNames = Object.keys(t.outputDimensions);
+      // Sanity-check the principal block: warn loudly if it's not
+      // near-identity so the user knows rotation/scale is ignored.
+      let nonIdentity = false;
+      for (let r = 0; r < axisNames.length && r < matrix.length; r++) {
+        for (let c = 0; c < lastCol; c++) {
+          const expected = r === c ? 1 : 0;
+          if (Math.abs((matrix[r]?.[c] ?? 0) - expected) > 1e-6) nonIdentity = true;
+        }
+      }
+      if (nonIdentity) {
+        console.warn(
+          "NG source transform has non-identity rotation/scale; tourguide only honors translation. Per-object positions may be slightly off if you've also rotated/scaled the layer.",
+        );
+      }
+      const unitToNm = (unit: unknown): number => {
+        if (unit === "m") return 1e9;
+        if (unit === "mm") return 1e6;
+        if (unit === "µm" || unit === "um") return 1e3;
+        if (unit === "nm") return 1;
+        return 1; // dimensionless or unknown — assume nm
+      };
+      const tx: Record<string, number> = {};
+      for (let i = 0; i < axisNames.length && i < matrix.length; i++) {
+        const name = axisNames[i];
+        const dim = (t.outputDimensions as Record<string, unknown>)[name];
+        let scale = 1;
+        let unit: unknown = "";
+        if (Array.isArray(dim) && dim.length >= 2) {
+          scale = Number(dim[0]) || 0;
+          unit = dim[1];
+        }
+        const tVox = Number(matrix[i]?.[lastCol] ?? 0);
+        if (!Number.isFinite(tVox)) continue;
+        tx[name] = tVox * scale * unitToNm(unit);
+      }
+      const dx = tx["x"] ?? 0;
+      const dy = tx["y"] ?? 0;
+      const dz = tx["z"] ?? 0;
+      if (dx === 0 && dy === 0 && dz === 0) return undefined;
+      return [dx, dy, dz];
+    };
+    // Walk a source spec (string | obj | array of either) and return
+    // the first translation found. For multi-source layers (zarr
+    // volume + precomputed mesh + skeleton on one layer), the
+    // volume's transform is the one that matters for per-object
+    // analysis math — the mesh/skeleton renderers apply their own
+    // shifts already.
+    const extractTransform = (s: unknown): [number, number, number] | undefined => {
+      if (Array.isArray(s)) {
+        for (const x of s) {
+          const found = parseSourceTransformNm(x);
+          if (found) return found;
+        }
+        return undefined;
+      }
+      return parseSourceTransformNm(s);
+    };
     const out: PastedLayerInput[] = [];
     for (const entry of entries) {
       const name = typeof entry.name === "string" ? entry.name : "";
@@ -556,10 +638,12 @@ layers:
       // Analysis tools that need ONE zarr URL pick the right one via
       // pickZarrEntry; the viewer renders all sources together.
       const nameSource = Array.isArray(src) ? src[0] : src;
+      const transformOffsetNm = extractTransform(entry.source);
       out.push({
         name: name || defaultLayerName(nameSource, type),
         type,
         source: src,
+        ...(transformOffsetNm ? { transform_offset_nm: transformOffsetNm } : {}),
       });
     }
     if (out.length === 0) {

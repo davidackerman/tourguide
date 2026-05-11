@@ -725,13 +725,23 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
 
     const layersForRequest = slots.map((s) => {
       const scale = s.inspection!.scales[s.scaleIdx!];
+      // Fold the NG-state per-source translation (if any) into the
+      // offset passed to the worker so per-object positions come
+      // back in the frame the user actually sees in NG — not the
+      // raw zarr frame. Same fix the agent's python_on_layers does.
+      const tx = s.layer.transform_offset_nm ?? [0, 0, 0];
+      const effectiveOffset: [number, number, number] = [
+        scale.offsetNm[0] + tx[0],
+        scale.offsetNm[1] + tx[1],
+        scale.offsetNm[2] + tx[2],
+      ];
       return {
         varName: s.varName,
         url: normalizeZarrUrl(s.layer.source),
         scalePath: scale.path,
         axesOrder: s.inspection!.axes.map((a) => a.name),
         voxelNm: scale.voxelNm,
-        offsetNm: scale.offsetNm,
+        offsetNm: effectiveOffset,
       };
     });
     // Skeleton slots → request entries. Reject empty IDs lists at run

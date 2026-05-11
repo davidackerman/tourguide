@@ -13,6 +13,13 @@ export interface DatasetLayer {
   source: string | string[];
   organelle_class?: string;
   csv?: string;
+  // World-nm translation (x, y, z) the user applied to this layer in
+  // Neuroglancer — i.e. the source's `transform` matrix from a pasted
+  // NG state, captured at load time. Added on top of the zarr's
+  // intrinsic offset so per-object positions land where the user
+  // actually sees them, not where the raw zarr would put them.
+  // Absent / zero when no NG transform was applied.
+  transform_offset_nm?: [number, number, number];
 }
 
 export interface DatasetDescriptor {

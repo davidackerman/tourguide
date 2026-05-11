@@ -16,6 +16,10 @@ export interface PastedLayerInput {
   source: string | string[];
   organelle_class?: string;
   csv?: string;
+  // Captured from the NG state's per-source `transform` (the user-
+  // applied translation matrix). World-nm xyz. Propagates to
+  // DatasetLayer.transform_offset_nm.
+  transform_offset_nm?: [number, number, number];
 }
 
 export interface PastedDatasetInput {
@@ -42,6 +46,7 @@ export function buildDescriptorFromInput(input: PastedDatasetInput): DatasetDesc
       };
       if (l.organelle_class?.trim()) layer.organelle_class = l.organelle_class.trim();
       if (l.csv?.trim()) layer.csv = l.csv.trim();
+      if (l.transform_offset_nm) layer.transform_offset_nm = l.transform_offset_nm;
       return layer;
     });
   // Resolve any layers that landed with a generic fallback name into a

@@ -72,6 +72,13 @@ export interface CustomRequest {
     varName: string;
     source: string; // precomputed:// URL (scheme prefix optional, will be stripped)
     segmentIds: string[];
+    // Optional world-nm translation to add to every vertex
+    // (skipping the precomputed info.transform, which is applied
+    // separately when parsing the binary). Used to fold an NG-state
+    // per-source transform into the skeleton's coords so the
+    // multi-source layer (volume + mesh + skeleton) stays aligned
+    // in analysis math.
+    offsetNm?: [number, number, number];
   }[];
   // DataFrames already in the sql.js DB that should be exposed to Python as
   // df_<organelle_class> (already the make_plot convention).
@@ -923,7 +930,24 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
           `Reading ${skel.varName}[${segId}] (${got.size + 1}/${skel.segmentIds.length}) …`,
           "skeleton",
         );
-        got.set(segId, await fetchSkeleton(base, segId, info));
+        const parsed = await fetchSkeleton(base, segId, info);
+        // Apply the NG-state per-source translation (if any) on top
+        // of the precomputed format's own info.transform. Keeps the
+        // skeleton aligned with the volume+mesh on the same NG layer
+        // when the user has dragged the layer around. Mutates a
+        // fresh Float32Array so we don't disturb anything cached.
+        if (skel.offsetNm && (skel.offsetNm[0] || skel.offsetNm[1] || skel.offsetNm[2])) {
+          const v = new Float32Array(parsed.vertices);
+          const [dx, dy, dz] = skel.offsetNm;
+          for (let i = 0; i < v.length; i += 3) {
+            v[i] += dx;
+            v[i + 1] += dy;
+            v[i + 2] += dz;
+          }
+          got.set(segId, { ...parsed, vertices: v });
+        } else {
+          got.set(segId, parsed);
+        }
       } catch (err) {
         // 404s are common — segments without a skeleton file. Don't
         // throw; just record the miss so the Python side knows.
