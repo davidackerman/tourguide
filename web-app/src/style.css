@@ -630,6 +630,45 @@ button {
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
+
+/* Welcome dialog's Cloud LLM section mirrors the Settings dialog
+   look — provider dropdown at the top, then a per-provider input
+   block (key + model + base URL where relevant). */
+.welcome-provider-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.7rem 0 0;
+}
+.welcome-provider-label > select {
+  flex: 1;
+}
+.welcome-provider-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+}
+.welcome-provider-section[hidden] { display: none; }
+.welcome-provider-section label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+.welcome-provider-section input,
+.welcome-provider-section select {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
 .welcome-radio {
   display: flex;
   align-items: flex-start;

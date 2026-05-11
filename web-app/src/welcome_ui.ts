@@ -8,10 +8,14 @@ import {
   loadSettings,
   saveSettings,
   GeminiBackend,
+  AnthropicBackend,
+  OpenAICompatibleBackend,
+  OPENAI_COMPATIBLE_PRESETS,
   WEBLLM_MODELS,
   webllmModelLabel,
   hasWebGPU,
   DEFAULT_ANALYSIS_BACKEND,
+  type LLMProvider,
 } from "./llm.js";
 
 const WELCOME_DISMISSED_KEY = "tourguide.welcomeDismissed.v1";
@@ -85,59 +89,115 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
         <section class="welcome-step">
           <h3>1. AI backend <span class="welcome-step-tag">optional</span></h3>
           <p class="hint">
-            Powers the <strong>Ask</strong> input (plain-English questions
-            over your data) and <strong>🐍 Custom</strong> (LLM-generated Python
-            on your layers). Without this, the structured browser, Σ Analyze,
-            and the viewer all still work — you just can't ask questions in
-            English.
+            Powers plain-English queries and auto-generated plot / analysis
+            code. Gemini's free tier is the easiest start, but any provider's
+            API key works. Without this, the structured browser and viewer
+            still work — you just can't ask questions in English.
           </p>
-          <div class="welcome-radio-group">
-            <label class="welcome-radio">
-              <input type="radio" name="welcome-ai" value="none" ${initialAi === "none" ? "checked" : ""} />
-              <div>
-                <strong>None</strong>
-                <p class="hint">Skip AI. Configure later from Settings.</p>
-              </div>
+
+          <label class="welcome-provider-label">
+            Provider
+            <select data-welcome-provider>
+              <option value="gemini" ${initialAi === "gemini" ? "selected" : ""}>Gemini (recommended free tier)</option>
+              <option value="anthropic" ${initialAi === "anthropic" ? "selected" : ""}>Anthropic Claude</option>
+              <option value="openai" ${initialAi === "openai" ? "selected" : ""}>OpenAI</option>
+              <option value="openrouter" ${initialAi === "openrouter" ? "selected" : ""}>OpenRouter (one key for Claude/Gemini/Llama/…)</option>
+              <option value="xai" ${initialAi === "xai" ? "selected" : ""}>xAI Grok</option>
+              <option value="openai_compatible" ${initialAi === "openai_compatible" ? "selected" : ""}>Local / custom (OpenAI-compatible)</option>
+              <option value="webllm" ${initialAi === "webllm" ? "selected" : ""} ${webgpu ? "" : "disabled"}>WebLLM (local, in-browser) ${webgpu ? "" : "— needs WebGPU"}</option>
+              <option value="none" ${initialAi === "none" ? "selected" : ""}>None — disables the agent</option>
+            </select>
+          </label>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="gemini" ${initialAi === "gemini" ? "" : "hidden"}>
+            <label>
+              Gemini API key
+              <input type="password" data-welcome-gemini-key value="${escapeAttr(settings.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/apikey" autocomplete="off" />
             </label>
-            <label class="welcome-radio">
-              <input type="radio" name="welcome-ai" value="gemini" ${initialAi === "gemini" ? "checked" : ""} />
-              <div>
-                <strong>Gemini (cloud)</strong>
-                <p class="hint">
-                  Free API key from
-                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>.
-                  Best quality; rate-limited (~500 req/day on Flash Lite).
-                  Stored in browser localStorage only.
-                </p>
-                <input type="password" data-welcome-gemini-key
-                       value="${escapeAttr(settings.geminiApiKey)}"
-                       placeholder="(paste key)" autocomplete="off" />
-              </div>
+            <p class="hint">~500 req/day on Flash Lite. Stored in browser localStorage only.</p>
+          </div>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="anthropic" ${initialAi === "anthropic" ? "" : "hidden"}>
+            <label>
+              Anthropic API key
+              <input type="password" data-welcome-anthropic-key value="${escapeAttr(settings.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
             </label>
-            <label class="welcome-radio ${webgpu ? "" : "welcome-disabled"}">
-              <input type="radio" name="welcome-ai" value="webllm" ${initialAi === "webllm" ? "checked" : ""} ${webgpu ? "" : "disabled"} />
-              <div>
-                <strong>WebLLM (local, in-browser)</strong>
-                <p class="hint">
-                  Runs on your GPU via WebGPU. ~2-4 GB one-time download per model;
-                  fully offline after that, no quotas. Slower per token.
-                  ${webgpu ? "" : "<em>(needs Chrome / Edge / Safari 18+)</em>"}
-                </p>
-                <select data-welcome-webllm-model ${webgpu ? "" : "disabled"}>
-                  ${webllmAll
-                    .map(
-                      (m) =>
-                        `<option value="${m.id}" ${settings.webllmModel === m.id ? "selected" : ""}>${webllmModelLabel(m)}</option>`,
-                    )
-                    .join("")}
-                </select>
-              </div>
+            <label>
+              Model
+              <input type="text" data-welcome-anthropic-model value="${escapeAttr(settings.anthropicModel || "claude-sonnet-4.6")}" placeholder="claude-sonnet-4.6" />
             </label>
           </div>
-          <p class="hint welcome-other-providers">
-            Have an Anthropic / OpenAI / OpenRouter / xAI key, or a local Ollama / vLLM endpoint?
-            <button class="btn-link" type="button" data-welcome-open-settings>Configure in Settings →</button>
-          </p>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="openai" ${initialAi === "openai" ? "" : "hidden"}>
+            <label>
+              OpenAI API key
+              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
+            </label>
+            <label>
+              Model
+              <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openai.placeholderModel}" />
+            </label>
+          </div>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="openrouter" ${initialAi === "openrouter" ? "" : "hidden"}>
+            <label>
+              OpenRouter API key
+              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
+            </label>
+            <label>
+              Model
+              <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openrouter.placeholderModel}" />
+            </label>
+            <p class="hint">One key for Claude / Gemini / Llama / etc — browse at <a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a>.</p>
+          </div>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="xai" ${initialAi === "xai" ? "" : "hidden"}>
+            <label>
+              xAI API key
+              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
+            </label>
+            <label>
+              Model
+              <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.xai.placeholderModel}" />
+            </label>
+          </div>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="openai_compatible" ${initialAi === "openai_compatible" ? "" : "hidden"}>
+            <label>
+              Base URL
+              <input type="text" data-welcome-oai-baseurl value="${escapeAttr(settings.openaiBaseUrl)}" placeholder="http://localhost:11434/v1" />
+            </label>
+            <label>
+              API key (optional for local servers)
+              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" autocomplete="off" />
+            </label>
+            <label>
+              Model
+              <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="llama3.2" />
+            </label>
+            <p class="hint">For Ollama / vLLM / LM Studio / llama.cpp server, or any other OpenAI-compatible endpoint. Local URLs skip auth.</p>
+          </div>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="webllm" ${initialAi === "webllm" ? "" : "hidden"}>
+            <label>
+              WebLLM model
+              <select data-welcome-webllm-model ${webgpu ? "" : "disabled"}>
+                ${webllmAll
+                  .map(
+                    (m) =>
+                      `<option value="${m.id}" ${settings.webllmModel === m.id ? "selected" : ""}>${webllmModelLabel(m)}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </label>
+            <p class="hint">Runs on your GPU via WebGPU. ~2-4 GB one-time download per model; fully offline after that, no quotas. Slower per token.${webgpu ? "" : " <em>(needs Chrome / Edge / Safari 18+)</em>"}</p>
+          </div>
+
+          <div class="welcome-provider-section" data-welcome-provider-section="none" ${initialAi === "none" ? "" : "hidden"}>
+            <p class="hint">Agent disabled. The structured browser still works for ingested CSVs. You can flip this on later from Settings.</p>
+          </div>
+
+          <p class="hint storage-note">🔒 Your API key is stored in your browser's localStorage only — Tourguide's frontend is static-hosted, it never touches a server we control. The key is sent directly to the provider you picked.</p>
         </section>
 
         <section class="welcome-step">
@@ -232,12 +292,38 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     }
   });
 
+  // Provider dropdown drives which provider section is visible.
+  // Same pattern Settings uses — each section's inputs persist on
+  // Save into its own slot of the Settings type, so swapping
+  // providers doesn't lose what you typed in the others.
+  const providerSelect = overlay.querySelector<HTMLSelectElement>("[data-welcome-provider]")!;
+  const providerSections = overlay.querySelectorAll<HTMLDivElement>("[data-welcome-provider-section]");
+  providerSelect.addEventListener("change", () => {
+    const v = providerSelect.value;
+    providerSections.forEach((s) => {
+      s.hidden = s.getAttribute("data-welcome-provider-section") !== v;
+    });
+  });
+
   // Save settings (extracted so both 'Load demo' and 'Load my data'
   // commit the user's AI / analysis-backend choices before navigating).
   // Returns false if the user cancelled an invalid-Gemini-key warning.
   const persistSettings = async (): Promise<boolean> => {
-    const aiChoice = (overlay.querySelector<HTMLInputElement>('input[name="welcome-ai"]:checked')?.value as "none" | "gemini" | "webllm") ?? "none";
+    const aiChoice = (providerSelect.value as LLMProvider);
     const geminiKey = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? settings.geminiApiKey;
+    const anthropicKey = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? settings.anthropicApiKey;
+    const anthropicModel = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-model]")?.value.trim() || settings.anthropicModel || "claude-sonnet-4.6";
+    // OpenAI-compatible group: only the visible section's inputs are
+    // populated in the DOM (others were never rendered for the
+    // un-shown providers, since the welcome dialog renders a fresh
+    // copy of each section). Read whichever pair is in the active
+    // section, fall back to stored settings.
+    const visibleOaiKey = overlay.querySelector<HTMLInputElement>(`[data-welcome-provider-section="${aiChoice}"] [data-welcome-oai-key]`);
+    const visibleOaiModel = overlay.querySelector<HTMLInputElement>(`[data-welcome-provider-section="${aiChoice}"] [data-welcome-oai-model]`);
+    const visibleOaiUrl = overlay.querySelector<HTMLInputElement>("[data-welcome-oai-baseurl]");
+    const oaiKey = visibleOaiKey?.value.trim() ?? settings.openaiApiKey;
+    const oaiModel = visibleOaiModel?.value.trim() ?? settings.openaiModel;
+    const oaiUrl = visibleOaiUrl?.value.trim() ?? settings.openaiBaseUrl;
     const webllmModel = overlay.querySelector<HTMLSelectElement>("[data-welcome-webllm-model]")?.value ?? settings.webllmModel;
     const analysisChoice = overlay.querySelector<HTMLInputElement>('input[name="welcome-analysis"]:checked')?.value ?? "default";
     let analysisUrl: string;
@@ -251,34 +337,41 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
       ...settings,
       backend: aiChoice,
       geminiApiKey: geminiKey,
+      anthropicApiKey: anthropicKey,
+      anthropicModel: anthropicModel,
+      openaiApiKey: oaiKey,
+      openaiModel: oaiModel,
+      openaiBaseUrl: oaiUrl,
       webllmModel,
       analysisBackendUrl: analysisUrl,
     };
     saveSettings(next);
-    if (aiChoice === "gemini" && geminiKey) {
-      try {
-        const backend = new GeminiBackend(geminiKey, next.geminiModel);
-        await backend.validate();
-      } catch (err) {
-        const ok = confirm(
-          `Gemini API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
-        );
-        if (!ok) return false;
+    // Validate the picked provider's key (where we can — local
+    // OAI-compatible endpoints might not even be running yet, so
+    // skip those). A failed validate still lets the user save
+    // anyway (typo'd key + click anyway is faster than retyping
+    // when the user knows the key is right).
+    try {
+      if (aiChoice === "gemini" && geminiKey) {
+        await new GeminiBackend(geminiKey, next.geminiModel).validate();
+      } else if (aiChoice === "anthropic" && anthropicKey) {
+        await new AnthropicBackend(anthropicKey, anthropicModel).validate();
+      } else if (
+        (aiChoice === "openai" || aiChoice === "openrouter" || aiChoice === "xai") &&
+        oaiKey
+      ) {
+        const url = OPENAI_COMPATIBLE_PRESETS[aiChoice].url;
+        await new OpenAICompatibleBackend(url, oaiKey, oaiModel).validate();
       }
+    } catch (err) {
+      const ok = confirm(
+        `API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
+      );
+      if (!ok) return false;
     }
     opts.onSettingsChanged();
     return true;
   };
-
-  // "Configure in Settings" — close the welcome dialog and open the
-  // full Settings modal so the user can pick from all providers
-  // (Anthropic / OpenAI / OpenRouter / xAI / Local / custom). The
-  // welcome dialog stays a simple "Gemini-or-WebLLM-or-skip" picker;
-  // anything more nuanced lives in Settings.
-  overlay.querySelector("[data-welcome-open-settings]")?.addEventListener("click", () => {
-    close(false);
-    document.getElementById("settings-btn")?.click();
-  });
 
   overlay.querySelector("[data-welcome-load-demo]")!.addEventListener("click", async () => {
     if (!(await persistSettings())) return;
