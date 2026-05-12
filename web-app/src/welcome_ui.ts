@@ -114,6 +114,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Gemini API key
               <input type="text" class="api-key" data-welcome-gemini-key value="${escapeAttr(settings.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/apikey" autocomplete="off" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="gemini" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="gemini"></span>
+            </div>
             <p class="hint">~500 req/day on Flash Lite. Stored in browser localStorage only.</p>
           </div>
 
@@ -126,6 +130,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Model
               <input type="text" data-welcome-anthropic-model value="${escapeAttr(settings.anthropicModel || "claude-sonnet-4.6")}" placeholder="claude-sonnet-4.6" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="anthropic" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="anthropic"></span>
+            </div>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="openai" ${initialAi === "openai" ? "" : "hidden"}>
@@ -137,6 +145,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openai.placeholderModel}" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="openrouter" ${initialAi === "openrouter" ? "" : "hidden"}>
@@ -148,6 +160,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openrouter.placeholderModel}" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
             <p class="hint">One key for Claude / Gemini / Llama / etc — browse at <a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a>.</p>
           </div>
 
@@ -160,6 +176,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.xai.placeholderModel}" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="openai_compatible" ${initialAi === "openai_compatible" ? "" : "hidden"}>
@@ -175,6 +195,10 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="llama3.2" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test connection</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
             <p class="hint">For Ollama / vLLM / LM Studio / llama.cpp server, or any other OpenAI-compatible endpoint. Local URLs skip auth.</p>
           </div>
 
@@ -309,6 +333,102 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     const v = providerSelect.value;
     providerSections.forEach((s) => {
       s.hidden = s.getAttribute("data-welcome-provider-section") !== v;
+    });
+  });
+
+  // Per-section Test buttons. Builds a fresh backend from whatever's
+  // currently in the inputs (NOT yet saved) and calls validate(). The
+  // OAI-compatible variants share a single handler keyed off the
+  // currently-selected provider, so openai / openrouter / xai pick the
+  // right preset URL and openai_compatible reads the typed base URL.
+  const runTest = async (
+    btn: HTMLButtonElement,
+    out: HTMLSpanElement,
+    factory: () => { backend: { validate(): Promise<void> } | null; emptyMsg: string },
+  ): Promise<void> => {
+    const { backend, emptyMsg } = factory();
+    if (!backend) {
+      out.textContent = emptyMsg;
+      out.className = "test-result err";
+      return;
+    }
+    out.textContent = "Testing…";
+    out.className = "test-result pending";
+    btn.disabled = true;
+    try {
+      await backend.validate();
+      out.textContent = "OK";
+      out.className = "test-result ok";
+    } catch (err) {
+      out.textContent = (err as Error).message.slice(0, 200);
+      out.className = "test-result err";
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  const findResultFor = (btn: HTMLButtonElement): HTMLSpanElement | null => {
+    const kind = btn.getAttribute("data-welcome-test");
+    if (!kind) return null;
+    return (
+      btn.parentElement?.querySelector<HTMLSpanElement>(`[data-welcome-test-result="${kind}"]`) ?? null
+    );
+  };
+
+  overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='gemini']").forEach((btn) => {
+    const out = findResultFor(btn);
+    if (!out) return;
+    btn.addEventListener("click", () => {
+      void runTest(btn, out, () => {
+        const key = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? "";
+        if (!key) return { backend: null, emptyMsg: "Paste a key first" };
+        return { backend: new GeminiBackend(key, settings.geminiModel), emptyMsg: "" };
+      });
+    });
+  });
+
+  overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='anthropic']").forEach((btn) => {
+    const out = findResultFor(btn);
+    if (!out) return;
+    btn.addEventListener("click", () => {
+      void runTest(btn, out, () => {
+        const key = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? "";
+        const model =
+          overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-model]")?.value.trim() ||
+          "claude-sonnet-4.6";
+        if (!key) return { backend: null, emptyMsg: "Paste a key first" };
+        return { backend: new AnthropicBackend(key, model), emptyMsg: "" };
+      });
+    });
+  });
+
+  overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='oai']").forEach((btn) => {
+    const out = findResultFor(btn);
+    if (!out) return;
+    btn.addEventListener("click", () => {
+      void runTest(btn, out, () => {
+        const provider = providerSelect.value as LLMProvider;
+        // Only the visible section's inputs exist in DOM — read from
+        // the currently-active section. openai_compatible additionally
+        // reads its typed base URL; the named presets use the table.
+        const section = overlay.querySelector<HTMLDivElement>(
+          `[data-welcome-provider-section="${provider}"]`,
+        );
+        const key = section?.querySelector<HTMLInputElement>("[data-welcome-oai-key]")?.value.trim() ?? "";
+        const model = section?.querySelector<HTMLInputElement>("[data-welcome-oai-model]")?.value.trim() ?? "";
+        const baseUrl =
+          provider === "openai_compatible"
+            ? section?.querySelector<HTMLInputElement>("[data-welcome-oai-baseurl]")?.value.trim() ?? ""
+            : OPENAI_COMPATIBLE_PRESETS[provider as keyof typeof OPENAI_COMPATIBLE_PRESETS]?.url ?? "";
+        if (!baseUrl) return { backend: null, emptyMsg: "Base URL is empty" };
+        if (!model) return { backend: null, emptyMsg: "Model is empty" };
+        // Local openai_compatible servers may not require a key, so
+        // empty key is allowed there but not for hosted presets.
+        if (provider !== "openai_compatible" && !key) {
+          return { backend: null, emptyMsg: "Paste a key first" };
+        }
+        return { backend: new OpenAICompatibleBackend(baseUrl, key, model), emptyMsg: "" };
+      });
     });
   });
 

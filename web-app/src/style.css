@@ -1142,6 +1142,13 @@ input.api-key {
   margin-left: 0.5rem;
 }
 
+.welcome-test-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.2rem;
+}
+
 .test-result.ok {
   color: #7fd3a4;
 }
