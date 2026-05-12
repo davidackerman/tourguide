@@ -1292,11 +1292,31 @@ async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
     log.info("inspect-source: root attrs keys=%s", list(root_attrs.keys()))
     scale_paths: List[str] = []
     probe_attempts: List[Dict[str, Any]] = []
-    if isinstance(root_attrs.get("scales"), list):
-        scale_paths = [str(s) for s in root_attrs["scales"]]
-        probe_attempts.append({"strategy": "root attrs scales[]", "found": len(scale_paths)})
-    else:
-        for prefix_style in ("s", ""):  # try "s0" first, then "0"
+    # 1) OME-NGFF style: multiscales[0].datasets[].path — this is the
+    #    most reliable convention; CellMap uses it. The 'scales' field
+    #    sitting next to it is a list of downsample factors (e.g.
+    #    [[1,1,1], [2,2,2], …]), NOT scale paths — the earlier code
+    #    confused these.
+    ms = root_attrs.get("multiscales")
+    if isinstance(ms, list) and ms:
+        first = ms[0] if isinstance(ms[0], dict) else None
+        if first:
+            datasets = first.get("datasets")
+            if isinstance(datasets, list):
+                for d in datasets:
+                    if isinstance(d, dict) and isinstance(d.get("path"), str):
+                        scale_paths.append(d["path"])
+                if scale_paths:
+                    probe_attempts.append({"strategy": "multiscales.datasets[].path", "found": len(scale_paths)})
+    # 2) Legacy: scales as a list of subdirectory NAMES (strings)
+    if not scale_paths and isinstance(root_attrs.get("scales"), list):
+        raw_scales = root_attrs["scales"]
+        if all(isinstance(s, str) for s in raw_scales):
+            scale_paths = list(raw_scales)
+            probe_attempts.append({"strategy": "root attrs scales[]", "found": len(scale_paths)})
+    # 3) Probe s0..sN or 0..N
+    if not scale_paths:
+        for prefix_style in ("s", ""):
             tried: List[str] = []
             for i in range(20):
                 sp = f"{prefix_style}{i}"
