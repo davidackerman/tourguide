@@ -845,11 +845,13 @@ export class AnthropicBackend implements LLMBackend {
               accumulated += t;
               options.onToken?.(t, accumulated);
             }
-          } else if (chunk.type === "message_start" && chunk.message?.usage) {
-            // message_start carries input + cache token counts; output
-            // count arrives later in message_delta.
-            AnthropicBackend.recordUsage(chunk.message.usage);
           } else if (chunk.type === "message_delta" && chunk.usage) {
+            // Anthropic's SSE includes the same input/cache stats in
+            // BOTH message_start and message_delta, with output_tokens
+            // updated to the final cumulative count in message_delta.
+            // Recording both events double-counted everything in the
+            // running totals, so we only record once per call, at
+            // message_delta (which has the complete picture).
             AnthropicBackend.recordUsage(chunk.usage);
           }
         } catch {
