@@ -145,6 +145,21 @@ class LayerSpec(BaseModel):
     offsetNm: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
+class PrecomputedVolumeLayerSpec(BaseModel):
+    """Neuroglancer precomputed segmentation volume input.
+
+    Slimmer than the worker's equivalent — tensorstore re-reads the info
+    file from `baseUrl` so we don't need to ship chunk size / encoding /
+    sharding from the client. scaleKey picks the multiscale level.
+    """
+    varName: str
+    baseUrl: str
+    scaleKey: str
+    axesOrder: List[str] = Field(default_factory=lambda: ["x", "y", "z"])
+    voxelNm: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    offsetNm: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
 class TableSpec(BaseModel):
     name: str
     columns: List[str]
@@ -153,6 +168,7 @@ class TableSpec(BaseModel):
 
 class CustomRequestBody(BaseModel):
     layers: List[LayerSpec] = Field(default_factory=list)
+    precomputedVolumeLayers: List[PrecomputedVolumeLayerSpec] = Field(default_factory=list)
     tables: List[TableSpec] = Field(default_factory=list)
     code: str
     timeoutMs: int = 60000
@@ -464,6 +480,100 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
             detail=f"tensorstore read failed ({url} path={layer.scalePath!r} shape={list(ts_arr.shape)}): {type(exc).__name__}: {exc}",
         )
     return np.asarray(data)
+
+
+async def _load_via_tensorstore_precomputed(layer: PrecomputedVolumeLayerSpec) -> np.ndarray:
+    """Open a Neuroglancer precomputed segmentation with tensorstore.
+
+    Mirrors what the browser worker's precomputed_volume_loader.ts does
+    (decode compressed_segmentation chunks, optionally sharded, into a
+    single ndarray) but uses tensorstore's native neuroglancer_precomputed
+    driver — which already handles every encoding/sharding variant, so
+    we don't need to maintain a parallel reader on this side.
+    """
+    import tensorstore as ts  # noqa: WPS433
+
+    # baseUrl looks like 'precomputed://gs://bucket/path' or
+    # 'precomputed://https://...'. Tensorstore's kvstore URL form
+    # expects the underlying scheme (gs://, http://, https://) so we
+    # strip the precomputed:// marker.
+    raw = layer.baseUrl
+    if raw.startswith("precomputed://"):
+        raw = raw[len("precomputed://"):]
+    raw = raw.rstrip("/")
+    scheme = raw.split("://", 1)[0] if "://" in raw else ""
+    if scheme not in ("http", "https", "gs", "s3"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported precomputed URL scheme: {scheme!r} (expected gs/s3/http/https)",
+        )
+
+    # Tensorstore is happy with a kvstore URL string for these schemes.
+    # The neuroglancer_precomputed driver reads the info file under that
+    # root; scale_metadata.key picks which downsampling level to open.
+    spec: Dict[str, Any] = {
+        "driver": "neuroglancer_precomputed",
+        "kvstore": raw + "/",
+        "scale_metadata": {"key": layer.scaleKey},
+    }
+    try:
+        ts_arr = await ts.open(spec)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"tensorstore open failed for precomputed {raw} "
+                f"scale={layer.scaleKey!r}: {type(exc).__name__}: {exc}"
+            ),
+        )
+
+    # Neuroglancer precomputed is laid out as (x, y, z, channel). For a
+    # single-channel segmentation that's (x, y, z, 1). We drop the
+    # channel axis and let downstream code see a 3D label volume.
+    try:
+        rank = ts_arr.rank
+        # Pick spatial axes per the layer's axesOrder; drop channel.
+        if rank == 4:
+            sliced = ts_arr[..., 0]
+        elif rank == 3:
+            sliced = ts_arr
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unexpected precomputed rank {rank} (expected 3 or 4)",
+            )
+        data = await sliced.read()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"tensorstore read failed for precomputed {raw} "
+                f"scale={layer.scaleKey!r} shape={list(ts_arr.shape)}: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+    return np.asarray(data)
+
+
+def _precomputed_layer_to_globals(
+    layer: PrecomputedVolumeLayerSpec,
+    arr: np.ndarray,
+) -> Dict[str, Any]:
+    """Same shape as _layer_to_globals — keeps user code agnostic to
+    whether the layer was zarr or precomputed."""
+    spatial_axes = [a for a in layer.axesOrder if a in ("x", "y", "z")]
+    if len(spatial_axes) != arr.ndim:
+        spatial_axes = ["z", "y", "x"][-arr.ndim:]
+    axis_scale = {"x": layer.voxelNm[0], "y": layer.voxelNm[1], "z": layer.voxelNm[2]}
+    axis_offset = {"x": layer.offsetNm[0], "y": layer.offsetNm[1], "z": layer.offsetNm[2]}
+    return {
+        "array": arr,
+        "spacing": tuple(axis_scale.get(a, 1.0) for a in spatial_axes),
+        "offsets": tuple(axis_offset.get(a, 0.0) for a in spatial_axes),
+        "axes": list(spatial_axes),
+    }
 
 
 def _join_url(base: str, rel: str) -> str:
@@ -897,12 +1007,19 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
     QUEUE_DEPTH += 1
     try:
         async with ANALYSIS_SEMAPHORE:
-            # Load each layer into a numpy array.
+            # Load each layer into a numpy array. Zarr/n5 go through the
+            # existing tensorstore+zarr-python path; precomputed-volume
+            # layers use tensorstore's neuroglancer_precomputed driver.
+            # Both produce the same per-layer globals shape so user code
+            # is agnostic.
             try:
                 layers_info: Dict[str, Dict[str, Any]] = {}
                 for layer in body.layers:
                     arr = await _load_layer(layer, tunnel)
                     layers_info[layer.varName] = _layer_to_globals(layer, arr)
+                for pvlayer in body.precomputedVolumeLayers:
+                    arr = await _load_via_tensorstore_precomputed(pvlayer)
+                    layers_info[pvlayer.varName] = _precomputed_layer_to_globals(pvlayer, arr)
             except HTTPException:
                 raise
             except Exception as exc:  # noqa: BLE001

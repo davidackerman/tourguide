@@ -186,6 +186,18 @@ export interface RemoteRunBody {
     voxelNm: [number, number, number];
     offsetNm: [number, number, number];
   }[];
+  // Precomputed segmentation volumes. Backend uses tensorstore's
+  // neuroglancer_precomputed driver to read these — no chunk size /
+  // encoding / sharding metadata needed on the wire (tensorstore
+  // re-reads the info file from baseUrl). Empty / omitted is fine.
+  precomputedVolumeLayers?: {
+    varName: string;
+    baseUrl: string;
+    scaleKey: string;
+    axesOrder: string[];
+    voxelNm: [number, number, number];
+    offsetNm: [number, number, number];
+  }[];
   tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
   code: string;
   timeoutMs: number;

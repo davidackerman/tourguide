@@ -282,16 +282,18 @@ ANSWER COUNT QUESTIONS FROM DATASET METADATA, NOT VOXEL READS. If the user asks 
 
 PRECOMPUTED SEGMENTATIONS ARE VOXEL-READABLE. Tourguide decodes compressed_segmentation chunks (sharded or unsharded) directly into a numpy ndarray — pass the layer's name in 'layers' to python_on_layers and you get an instance-label volume just like a zarr. The agent auto-picks a downsampled scale that fits the local memory budget; describe_dataset's precomputed_volume_scales shows what's available. NEVER refuse a regionprops / per-object-metric / connected-components question with "there is no zarr volume" — that reasoning is wrong for precomputed segmentations. The correct decision is: small known id list (≤~100) → meshes path; "every segment in the dataset" → voxels path at a coarse-enough scale.
 
-PRECOMPUTED-VOLUME CODE MUST BE PYODIDE-NATIVE. Reading a precomputed volume forces python_on_layers to run locally (the HF backend can't read precomputed yet). So when a precomputed-segmentation layer is in 'layers', you must NOT import cc3d / fastmorph / fastremap / edt / kimimaro / zmesh — those are HF-backend-only and will trigger a conflict error. Use the stdlib equivalents instead:
-  - fastremap.renumber(arr) for big uint64 ids that overflow regionprops/scipy:
+PRECOMPUTED-VOLUME LAYERS RUN ON EITHER RUNTIME. Both Pyodide (browser worker) and the HF backend can now read precomputed segmentation volumes — the backend uses tensorstore's neuroglancer_precomputed driver. So you can use Seung-lab packages (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh) WITH precomputed-volume layers — runtime will be forced to backend automatically. The only true conflict that remains is mesh / skeleton inputs (still browser-only) + Seung-lab packages — split those into two calls.
+
+The uint64 overflow in regionprops_table is the classic hemibrain trap (label IDs are ~10^15+). Two ways to handle it depending on runtime:
+  - Pyodide (small scales, no Seung-lab): np.searchsorted remap:
       unique = np.unique(arr)
       arr_compact = np.searchsorted(unique, arr).astype(np.int32)
       # arr_compact has labels 0..len(unique)-1; the i-th original id is unique[i].
       # After regionprops, map back: original_id = unique[row.label]
-  - cc3d.connected_components → scipy.ndimage.label
-  - fastmorph.erode / dilate / spherical_* → scipy.ndimage.binary_erosion / _dilation / _opening / _closing (per-label loops only if needed)
-  - edt → scipy.ndimage.distance_transform_edt
-The uint64 overflow in regionprops_table is the typical hemibrain trap — solve it with the searchsorted remap above, not with fastremap.
+  - Backend (large scales, Seung-lab available):
+      import fastremap
+      arr_compact, mapping = fastremap.renumber(arr, preserve_zero=True)
+      # mapping: dict[original_id, compact_id]; reverse with {v:k for k,v in mapping.items()}.
 
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
@@ -1320,28 +1322,24 @@ async function execPythonOnLayers(
   const backendUrl = settings.analysisBackendUrl.trim();
   const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
   const codeNeedsMeshLayer = /\b_TG_NEW_MESH_LAYER\s*=/.test(code);
-  // Precomputed-volume layers also force local: the worker is the only
-  // reader for them today (HF backend doesn't handle precomputed yet).
+  // Precomputed-VOLUME inputs work on EITHER runtime now: the browser
+  // worker has its own reader, and the HF backend reads via tensorstore's
+  // neuroglancer_precomputed driver. So they no longer force local.
+  // Mesh and skeleton inputs are still browser-only (the backend doesn't
+  // ship readers for those yet).
   const mustBeLocal =
     resolvedSkeletons.length > 0 ||
-    resolvedMeshes.length > 0 ||
-    resolvedPrecomputedVolumes.length > 0;
+    resolvedMeshes.length > 0;
   const mustBeBackend = codeImportsSeungLab || codeNeedsMeshLayer;
   if (mustBeLocal && mustBeBackend) {
-    // List the *actual* local-forcing reasons so the agent can fix the
-    // right thing. The old generic 'skeleton inputs' message was
-    // misleading when meshes or precomputed-volume layers triggered it.
     const localReasons: string[] = [];
     if (resolvedSkeletons.length > 0) localReasons.push("skeleton inputs");
     if (resolvedMeshes.length > 0) localReasons.push("mesh inputs");
-    if (resolvedPrecomputedVolumes.length > 0) {
-      localReasons.push("precomputed-volume inputs (HF backend can't read precomputed yet — only the Pyodide worker does)");
-    }
     const backendReasons: string[] = [];
     if (codeImportsSeungLab) backendReasons.push("imports a Seung-lab package (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh)");
     if (codeNeedsMeshLayer) backendReasons.push("sets _TG_NEW_MESH_LAYER");
     throw new Error(
-      `Conflict: this code must run on the HF backend because it ${backendReasons.join(" and ")}, but the inputs require the local Pyodide runtime (${localReasons.join(", ")}). For precomputed-volume layers, stay on Pyodide and use only numpy / scipy / skimage. Replace fastremap.renumber with np.searchsorted(np.unique(arr), arr) — same result, no Seung-lab dependency. cc3d.connected_components → scipy.ndimage.label. fastmorph → scipy.ndimage.binary_*.`,
+      `Conflict: this code must run on the HF backend because it ${backendReasons.join(" and ")}, but the inputs require the local Pyodide runtime (${localReasons.join(", ")}). Split into two python_on_layers calls — one for the local-only inputs, one for the heavy ops.`,
     );
   }
   // The size-vs-budget decision needs inspect results, so we run inspect
@@ -1519,6 +1517,21 @@ async function execPythonOnLayers(
         backendUrl,
         {
           layers: requestLayers,
+          // Backend reads precomputed via tensorstore's neuroglancer_precomputed
+          // driver. Slimmer shape than the worker uses (tensorstore re-reads
+          // the info file from baseUrl, so we don't ship chunk/encoding/
+          // sharding metadata). xyz axes are the precomputed convention.
+          precomputedVolumeLayers:
+            resolvedPrecomputedVolumes.length > 0
+              ? resolvedPrecomputedVolumes.map((pv) => ({
+                  varName: pv.varName,
+                  baseUrl: pv.baseUrl,
+                  scaleKey: pv.scale.key,
+                  axesOrder: ["x", "y", "z"],
+                  voxelNm: pv.scale.resolutionNm,
+                  offsetNm: pv.offsetNm ?? [0, 0, 0],
+                }))
+              : undefined,
           tables,
           code,
           timeoutMs: 300_000,
