@@ -531,8 +531,23 @@ async def _load_via_tensorstore_precomputed(layer: PrecomputedVolumeLayerSpec) -
     # single-channel segmentation that's (x, y, z, 1). We drop the
     # channel axis and let downstream code see a 3D label volume.
     try:
+        # Log the tensorstore-reported axes + shape so we can verify
+        # dimension order matches what user code expects (x, y, z) AND
+        # spot whether tensorstore opened the volume with the correct
+        # encoding (raw vs compressed_segmentation). The driver should
+        # pick the encoding up from the info file automatically.
+        try:
+            ts_domain = ts_arr.domain
+            ts_labels = list(ts_domain.labels)
+            ts_shape = list(ts_arr.shape)
+            ts_encoding = ts_arr.spec().to_json().get("scale_metadata", {}).get("encoding")
+        except Exception:  # noqa: BLE001
+            ts_labels, ts_shape, ts_encoding = None, None, None
+        log.info(
+            "precomputed open: scale=%s rank=%d labels=%s shape=%s encoding=%s dtype=%s",
+            layer.scaleKey, ts_arr.rank, ts_labels, ts_shape, ts_encoding, ts_arr.dtype,
+        )
         rank = ts_arr.rank
-        # Pick spatial axes per the layer's axesOrder; drop channel.
         if rank == 4:
             sliced = ts_arr[..., 0]
         elif rank == 3:
@@ -554,7 +569,31 @@ async def _load_via_tensorstore_precomputed(layer: PrecomputedVolumeLayerSpec) -
                 f"{type(exc).__name__}: {exc}"
             ),
         )
-    return np.asarray(data)
+    arr = np.asarray(data)
+    # Sanity-check the actual label values. Real hemibrain neuron IDs
+    # are ~10-12 digit uint64s (e.g. 1077906205). A bit-shift / stride
+    # decode bug typically produces powers-of-two or absurdly-large
+    # garbage; legitimately small fragment IDs would be in low 6-7
+    # digits. Sampling cheaply (no full np.unique) so this doesn't add
+    # noticeable latency to every load.
+    try:
+        flat = arr.reshape(-1)
+        nonzero_mask = flat != 0
+        nonzero_count = int(nonzero_mask.sum())
+        first_nonzero = flat[nonzero_mask][:8].tolist() if nonzero_count > 0 else []
+        sample_step = max(1, flat.size // 50_000)
+        sample = flat[::sample_step]
+        sample_unique = int(np.unique(sample).size)
+        log.info(
+            "precomputed loaded: shape=%s dtype=%s min=%s max=%s nonzero=%d/%d "
+            "first_nonzero=%s sample_unique=%d (of %d sampled)",
+            list(arr.shape), arr.dtype, int(arr.min()), int(arr.max()),
+            nonzero_count, flat.size,
+            first_nonzero, sample_unique, sample.size,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("precomputed diagnostic failed: %s", exc)
+    return arr
 
 
 def _precomputed_layer_to_globals(
