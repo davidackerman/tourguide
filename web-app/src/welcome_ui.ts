@@ -15,8 +15,11 @@ import {
   webllmModelLabel,
   hasWebGPU,
   DEFAULT_ANALYSIS_BACKEND,
+  DEFAULT_ANTHROPIC_MODEL,
+  listAnthropicModels,
   type LLMProvider,
 } from "./llm.js";
+import { renderAnthropicModelOptions } from "./settings_ui.js";
 
 const WELCOME_DISMISSED_KEY = "tourguide.welcomeDismissed.v1";
 
@@ -128,8 +131,12 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
             </label>
             <label>
               Model
-              <input type="text" data-welcome-anthropic-model value="${escapeAttr(settings.anthropicModel || "claude-sonnet-4.6")}" placeholder="claude-sonnet-4.6" />
+              <select data-welcome-anthropic-model>${renderAnthropicModelOptions(settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL)}</select>
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary btn-tiny" data-welcome-refresh-anthropic type="button">↻ Refresh models</button>
+              <span class="anthropic-model-status" data-welcome-anthropic-model-status></span>
+            </div>
             <div class="welcome-test-row">
               <button class="btn-secondary" data-welcome-test="anthropic" type="button">Test key</button>
               <span class="test-result" data-welcome-test-result="anthropic"></span>
@@ -387,6 +394,57 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     });
   });
 
+  // Refresh button: hits /v1/models with the typed key and repopulates
+  // the model dropdown. Same idea as settings_ui's gemini/anthropic
+  // refresh — protects users from typo'd IDs by replacing guesses with
+  // the real list.
+  const anthRefreshBtn = overlay.querySelector<HTMLButtonElement>("[data-welcome-refresh-anthropic]");
+  const anthRefreshStatus = overlay.querySelector<HTMLSpanElement>("[data-welcome-anthropic-model-status]");
+  const anthModelSel = overlay.querySelector<HTMLSelectElement>("[data-welcome-anthropic-model]");
+  if (anthRefreshBtn && anthRefreshStatus && anthModelSel) {
+    anthRefreshBtn.addEventListener("click", async () => {
+      const key = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? "";
+      if (!key) {
+        anthRefreshStatus.textContent = "Paste a key first";
+        anthRefreshStatus.className = "anthropic-model-status err";
+        return;
+      }
+      anthRefreshStatus.textContent = "Fetching…";
+      anthRefreshStatus.className = "anthropic-model-status pending";
+      anthRefreshBtn.disabled = true;
+      try {
+        const models = await listAnthropicModels(key);
+        if (models.length === 0) {
+          anthRefreshStatus.textContent = "0 models returned";
+          anthRefreshStatus.className = "anthropic-model-status err";
+          return;
+        }
+        // Cache for settings_ui to reuse on its next open. We can't
+        // call saveCachedAnthropicModels directly without re-exporting
+        // it from settings_ui — instead, just write the same key here.
+        try {
+          localStorage.setItem(
+            "tourguide.anthropicModels.v1",
+            JSON.stringify({ fetchedAt: Date.now(), models }),
+          );
+        } catch {
+          /* fine */
+        }
+        const previous = anthModelSel.value;
+        anthModelSel.innerHTML = renderAnthropicModelOptions(previous);
+        anthRefreshStatus.textContent = models.some((m) => m.id === previous)
+          ? `✓ ${models.length} models loaded`
+          : `✓ ${models.length} models · previous "${previous}" not in list`;
+        anthRefreshStatus.className = "anthropic-model-status ok";
+      } catch (err) {
+        anthRefreshStatus.textContent = (err as Error).message.slice(0, 200);
+        anthRefreshStatus.className = "anthropic-model-status err";
+      } finally {
+        anthRefreshBtn.disabled = false;
+      }
+    });
+  }
+
   overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='anthropic']").forEach((btn) => {
     const out = findResultFor(btn);
     if (!out) return;
@@ -394,8 +452,8 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
       void runTest(btn, out, () => {
         const key = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? "";
         const model =
-          overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-model]")?.value.trim() ||
-          "claude-sonnet-4.6";
+          overlay.querySelector<HTMLSelectElement>("[data-welcome-anthropic-model]")?.value.trim() ||
+          DEFAULT_ANTHROPIC_MODEL;
         if (!key) return { backend: null, emptyMsg: "Paste a key first" };
         return { backend: new AnthropicBackend(key, model), emptyMsg: "" };
       });
@@ -445,7 +503,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     const aiChoice = (providerSelect.value as LLMProvider);
     const geminiKey = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? settings.geminiApiKey;
     const anthropicKey = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? settings.anthropicApiKey;
-    const anthropicModel = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-model]")?.value.trim() || settings.anthropicModel || "claude-sonnet-4.6";
+    const anthropicModel = overlay.querySelector<HTMLSelectElement>("[data-welcome-anthropic-model]")?.value.trim() || settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL;
     // OpenAI-compatible group: only the visible section's inputs are
     // populated in the DOM (others were never rendered for the
     // un-shown providers, since the welcome dialog renders a fresh

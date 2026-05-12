@@ -1440,17 +1440,21 @@ input.api-key {
 .analysis-layer-status.err {
   color: #ff9d9d;
 }
-.gemini-model-status {
+.gemini-model-status,
+.anthropic-model-status {
   font-size: 0.75rem;
   color: var(--fg-dim);
 }
-.gemini-model-status.ok {
+.gemini-model-status.ok,
+.anthropic-model-status.ok {
   color: #7fd3a4;
 }
-.gemini-model-status.err {
+.gemini-model-status.err,
+.anthropic-model-status.err {
   color: #ff9d9d;
 }
-.gemini-model-status.pending {
+.gemini-model-status.pending,
+.anthropic-model-status.pending {
   color: var(--fg-dim);
   font-style: italic;
 }

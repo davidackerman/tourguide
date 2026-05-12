@@ -660,6 +660,14 @@ interface AnthropicUsage {
   cache_read_input_tokens?: number;
 }
 
+// Conservative default — Anthropic's model IDs use hyphens, not dots
+// ('claude-sonnet-4-5', not 'claude-sonnet-4.6'). 4-5 has been GA for
+// a while and is broadly available; users with access to newer models
+// can pick them via the dropdown after hitting Refresh. Centralized so
+// settings_ui / welcome_ui / the AnthropicBackend default all stay in
+// sync if/when this needs to move.
+export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5";
+
 // ---------------------------------------------------------------------------
 // Anthropic Claude (native API)
 // ---------------------------------------------------------------------------
@@ -678,7 +686,7 @@ export class AnthropicBackend implements LLMBackend {
   private apiKey: string;
   private model: string;
 
-  constructor(apiKey: string, model = "claude-sonnet-4.6") {
+  constructor(apiKey: string, model = DEFAULT_ANTHROPIC_MODEL) {
     this.apiKey = apiKey;
     this.model = model;
   }
@@ -955,6 +963,55 @@ export async function listGeminiModels(apiKey: string): Promise<GeminiModelInfo[
   return out;
 }
 
+export interface AnthropicModelInfo {
+  id: string;
+  displayName: string;
+  createdAt?: string;
+}
+
+// Fetch the list of Anthropic models the given key can access. Hits
+// /v1/models, which is paginated; we follow has_more until exhausted.
+// Sorted by created_at desc so the newest model lands at the top of
+// the dropdown.
+export async function listAnthropicModels(apiKey: string): Promise<AnthropicModelInfo[]> {
+  if (!apiKey) throw new Error("API key required to list models");
+  const out: AnthropicModelInfo[] = [];
+  let afterId: string | undefined;
+  for (let i = 0; i < 10; i++) {
+    const params = new URLSearchParams({ limit: "100" });
+    if (afterId) params.set("after_id", afterId);
+    const res = await fetch(`https://api.anthropic.com/v1/models?${params}`, {
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`models.list failed (${res.status}): ${text.slice(0, 300)}`);
+    }
+    const data = (await res.json()) as {
+      data?: Array<{ id?: string; display_name?: string; created_at?: string }>;
+      has_more?: boolean;
+      last_id?: string;
+    };
+    for (const m of data.data ?? []) {
+      if (!m.id) continue;
+      out.push({
+        id: m.id,
+        displayName: m.display_name ?? m.id,
+        createdAt: m.created_at,
+      });
+    }
+    if (!data.has_more || !data.last_id) break;
+    afterId = data.last_id;
+  }
+  // Newest first by created_at (string ISO sorts correctly); tie-break by id.
+  out.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "") || a.id.localeCompare(b.id));
+  return out;
+}
+
 // Pull retryDelay out of Gemini's structured 429 error body. Shape:
 //   { "error": { "details": [{ "@type": ".../RetryInfo", "retryDelay": "30s" }] } }
 // Returns undefined if the field isn't present.
@@ -1062,7 +1119,7 @@ export const OPENAI_COMPATIBLE_PRESETS: Record<string, { url: string; placeholde
   },
   openrouter: {
     url: "https://openrouter.ai/api/v1",
-    placeholderModel: "anthropic/claude-sonnet-4.6",
+    placeholderModel: "anthropic/claude-sonnet-4-5",
     label: "OpenRouter (one key for Claude/Gemini/Llama/...)",
   },
   xai: {
@@ -1091,7 +1148,7 @@ const DEFAULT_SETTINGS: Settings = {
   // generous limits elsewhere.
   geminiModel: "gemini-3.1-flash-lite-preview",
   anthropicApiKey: "",
-  anthropicModel: "claude-sonnet-4.6",
+  anthropicModel: DEFAULT_ANTHROPIC_MODEL,
   openaiApiKey: "",
   openaiModel: "",
   openaiBaseUrl: "",
