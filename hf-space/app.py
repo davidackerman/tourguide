@@ -1221,9 +1221,17 @@ async def _inspect_scale(
     finest_voxel_nm_xyz: Optional[Tuple[float, float, float]],
     default_voxel_nm: Tuple[float, float, float],
 ) -> Optional[Dict[str, Any]]:
-    """Open one scale with tensorstore, build a LayerScaleInfo dict."""
+    """Open one scale with tensorstore, build a LayerScaleInfo dict.
+
+    Tries tensorstore with two kvstore layouts:
+      1. path=<scale_path>, kvstore at the array's parent (e.g. mito_seg/)
+      2. path=<full_path_to_scale>, kvstore at the bucket root
+    Some tensorstore N5 versions are picky about where the 'root' lives.
+    """
     import tensorstore as ts  # noqa: WPS433
+    errors: List[str] = []
     arr = None
+    # Strategy 1: path=scale_path, kvstore at parent
     for driver in ("n5", "zarr", "zarr3"):
         try:
             arr = await ts.open({
@@ -1233,9 +1241,10 @@ async def _inspect_scale(
                 "open": True,
             })
             break
-        except Exception:  # noqa: BLE001
-            continue
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"strat1 driver={driver}: {type(exc).__name__}: {str(exc)[:200]}")
     if arr is None:
+        log.warning("inspect-source: scale %s strat1 all failed: %s", scale_path, errors)
         return None
     shape = [int(s) for s in arr.shape]
     itemsize = arr.dtype.numpy_dtype.itemsize
@@ -1321,7 +1330,13 @@ async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
         if info is not None:
             scales.append(info)
     if not scales:
-        raise HTTPException(status_code=500, detail=f"could open root attributes but no scale arrays at {raw}")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"could open root attributes but tensorstore failed to open every scale at {raw}. "
+                f"Tried paths: {scale_paths[:5]}. Check the Space logs for per-driver errors."
+            ),
+        )
     return {
         "isMultiscale": len(scales) > 1,
         # Assume ZYX storage order (CellMap convention). The frontend
