@@ -537,13 +537,9 @@ df = pd.DataFrame({
     "com_y_nm": cents[:, iy] * spacing[iy] + offsets[iy],
     "com_z_nm": cents[:, iz] * spacing[iz] + offsets[iz],
 }).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
-n_total = len(df)
-_TG_TABLE = df.head(5000)   # cap rows to keep copy/share-link payloads sane
+_TG_TABLE = df
 _TG_TABLE_NAME = "mito"
-_TG_NARRATION = (
-    f"Measured {n_total:,} mito components"
-    + (f"; returning top 5,000 by volume." if n_total > 5000 else ".")
-)
+_TG_NARRATION = f"Measured {len(df):,} mito components."
 """
 
       "erode mito by 50 nm" -> python_on_layers
@@ -785,18 +781,13 @@ WHEN TO USE meshes= VS layers= IN python_on_layers:
     If the user asked to "plot X", the natural flow is: compute the
     table once (set _TG_TABLE) AND set _TG_PLOT in the same call —
     don't compute and discard.
-  - CAP _TG_TABLE ROW COUNT to ~5,000. The table is JSON-serialized
-    over HTTP back to the browser AND embedded inline in copy-session /
-    share-link payloads. Returning 8M+ rows (e.g. every fragment in a
-    hemibrain-scale segmentation) bloats the response to hundreds of
-    MB and breaks both features. After computing the full DataFrame,
-    sort by the relevant metric (typically volume_nm_3 desc) and slice:
-        df = df.sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
-        n_total = len(df)
-        _TG_TABLE = df.head(5000)
-        _TG_NARRATION = f"Measured {n_total:,} segments; returning top 5,000 by volume."
-    The narration tells the user what was measured vs what was returned.
-    Skip the cap only when the user explicitly says "all rows".
+    Return the FULL DataFrame even when it's millions of rows — the
+    SQL DB and follow-up queries benefit from completeness. The
+    browser's Copy session / Share link buttons truncate large tables
+    at their boundary (top-N by metric, with a note), so returning
+    everything doesn't break sharing — but it does mean the recipient
+    of a share link gets a representative slice plus a CSV download
+    hint, not the whole table.
   - REQUIRED COLUMNS for any _TG_TABLE you save: at minimum
         object_id, com_x_nm, com_y_nm, com_z_nm
     on top of whatever metric you computed (volume_nm_3,

@@ -638,7 +638,26 @@ shareBtn.addEventListener("click", async () => {
   // it's a candidate for the permalink. Also confirm via the
   // descriptor — a table whose name matches a layer.csv-derived one
   // can be skipped (recipient re-fetches).
+  // Per-table row cap for embedding in the share link. Beyond this
+  // the URL balloons past what most browsers / chat apps accept AND
+  // the short-link backend rejects the upload size. The agent is free
+  // to compute and store millions of rows locally; we just don't ship
+  // that whole payload to a recipient via URL.
+  const SHARE_EMBED_ROW_CAP = 5000;
+  // Heuristic: when truncating, sort by the most-relevant numeric
+  // column descending — volume_nm_3 first, then area_nm_*, then
+  // anything else numeric. Stable across queries that follow the
+  // prompt's "REQUIRED COLUMNS" convention.
+  const pickSortColumn = (cols: string[]): string | null => {
+    const prefer = [
+      "volume_nm_3", "surface_area_nm_2", "length_nm", "area_nm_2",
+      "approx_bytes", "voxel_count",
+    ];
+    for (const p of prefer) if (cols.includes(p)) return p;
+    return null;
+  };
   const sharedTables: SharedTable[] = [];
+  const truncatedTableSummaries: string[] = [];
   if (currentDB) {
     const layerCsvOrganelles = new Set(
       descriptorForShare.layers
@@ -649,7 +668,27 @@ shareBtn.addEventListener("click", async () => {
       if (layerCsvOrganelles.has(t.organelle_class)) continue; // recipient gets this from layer.csv
       try {
         const colList = t.columns.map((c) => `"${c}"`).join(", ");
-        const result = runQuery(currentDB.db, `SELECT ${colList} FROM "${t.table_name}";`);
+        const sortCol = pickSortColumn(t.columns);
+        // Push the sort + LIMIT into SQL so we don't materialize all
+        // 8M rows in JS just to drop them. We still want to know the
+        // TOTAL row count so the share narration can be honest about
+        // what got embedded vs what exists.
+        const totalRes = runQuery(
+          currentDB.db,
+          `SELECT COUNT(*) AS n FROM "${t.table_name}";`,
+        );
+        const totalRows = Number(totalRes.rows[0]?.[0] ?? 0);
+        const orderClause = sortCol ? ` ORDER BY "${sortCol}" DESC` : "";
+        const limitClause = totalRows > SHARE_EMBED_ROW_CAP ? ` LIMIT ${SHARE_EMBED_ROW_CAP}` : "";
+        const result = runQuery(
+          currentDB.db,
+          `SELECT ${colList} FROM "${t.table_name}"${orderClause}${limitClause};`,
+        );
+        if (totalRows > SHARE_EMBED_ROW_CAP) {
+          truncatedTableSummaries.push(
+            `${t.table_name}: ${totalRows.toLocaleString()} rows → top ${SHARE_EMBED_ROW_CAP.toLocaleString()}${sortCol ? ` by ${sortCol}` : ""}`,
+          );
+        }
         sharedTables.push({
           organelle_class: t.organelle_class,
           layer_name: t.layer_name,
@@ -660,6 +699,9 @@ shareBtn.addEventListener("click", async () => {
         console.warn(`[share] couldn't dump table ${t.table_name}:`, err);
       }
     }
+  }
+  if (truncatedTableSummaries.length > 0) {
+    console.info("[share] truncated tables to fit URL:", truncatedTableSummaries);
   }
   const url = await buildPermalinkURL({
     catalogIndex: useCatalogIdx,
@@ -713,12 +755,21 @@ shareBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(finalUrl);
     const tablesHint = sharedTables.length > 0
-      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded)`
+      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded${truncatedTableSummaries.length > 0 ? `, ${truncatedTableSummaries.length} truncated` : ""})`
       : "";
     shareBtn.textContent = shortened
       ? `✓ Copied short link${tablesHint}`
       : `✓ Copied${tablesHint}`;
     setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2200);
+    if (truncatedTableSummaries.length > 0) {
+      // One-off info dialog so the user knows what got trimmed.
+      // Skipped silently if everything fit.
+      alert(
+        "Share link embedded a truncated view of some tables — recipients see only the top rows:\n\n  • " +
+          truncatedTableSummaries.join("\n  • ") +
+          "\n\nFor the full tables, send the CSV downloads (Custom → Download).",
+      );
+    }
   } catch {
     prompt("Copy this URL:", finalUrl);
   }

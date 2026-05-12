@@ -592,6 +592,30 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     card.tables.push(table);
   };
 
+  // Per-table row cap for Copy session. python_on_layers can return
+  // a customResult whose .table.rows is millions of entries (hemibrain
+  // segmentation has 8.7M unique ids). JSON.stringify-ing all of it
+  // hangs the clipboard API; truncate to a representative slice instead.
+  // Full table stays in the local DB; users wanting everything can use
+  // the per-step Download buttons or the CSV export.
+  const COPY_EMBED_ROW_CAP = 5000;
+  const truncateResultForCopy = (result: unknown): unknown => {
+    if (!result || typeof result !== "object") return result;
+    const r = result as Record<string, unknown>;
+    const table = r.table as { columns?: string[]; rows?: unknown[][]; name?: string } | undefined;
+    if (!table || !Array.isArray(table.rows) || table.rows.length <= COPY_EMBED_ROW_CAP) {
+      return result;
+    }
+    return {
+      ...r,
+      table: {
+        ...table,
+        rows: table.rows.slice(0, COPY_EMBED_ROW_CAP),
+        _truncated_note: `truncated: ${table.rows.length.toLocaleString()} total rows → first ${COPY_EMBED_ROW_CAP.toLocaleString()} embedded`,
+      },
+    };
+  };
+
   const formatStepForCopy = (item: AgentTraceItem, index: number): string => {
     const lines: string[] = [`## Step ${index + 1}: ${item.tool}`];
     if (item.args && Object.keys(item.args).length > 0) {
@@ -600,7 +624,8 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     if (item.error) {
       lines.push("error:\n```\n" + item.error + "\n```");
     } else if (item.result !== undefined) {
-      const r = typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2);
+      const trimmed = truncateResultForCopy(item.result);
+      const r = typeof trimmed === "string" ? trimmed : JSON.stringify(trimmed, null, 2);
       lines.push("result:\n```\n" + r + "\n```");
     }
     return lines.join("\n");
