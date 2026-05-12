@@ -7,6 +7,7 @@ import { loadPyodide } from "./plot.js";
 import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
 import {
   AnalysisClient,
+  isN5Source,
   isZarrSource,
   normalizeZarrUrl,
   SAFE_INPUT_BYTES,
@@ -26,7 +27,7 @@ import {
   type PrecomputedVolumeInfo,
 } from "./precomputed_volume_loader.js";
 import { loadSettings } from "./llm.js";
-import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
+import { inspectSourceRemote, postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
 export interface AgentTraceItem {
   tool: string;
@@ -245,8 +246,15 @@ const LAYER_GUIDE = (d: DatasetDescriptor): string => {
   return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info).
 
   sources= conventions:
-    zarr / zarr2 / zarr3 / n5 — multiscale array on a per-axis voxel grid.
-        python_on_layers loads the voxels as a numpy array.
+    zarr / zarr2 / zarr3 — multiscale array on a per-axis voxel grid.
+        python_on_layers loads the voxels as a numpy array. Runs on
+        Pyodide (browser) or HF backend depending on size.
+    n5 — multiscale array, CellMap's native format. Same loading shape
+        as zarr but ALWAYS runs on the HF backend (zarrita/Pyodide
+        can't read N5). Inspect goes through /api/inspect-source on
+        the backend, which uses tensorstore. Treat exactly like zarr
+        from a python_on_layers standpoint; just expect a slightly
+        slower first call when the backend is asleep.
     precomputed — Neuroglancer precomputed segmentation. Tourguide
         can read voxels (uint64 compressed_segmentation, sharded or
         not), meshes (legacy unsharded + multilod_draco sharded or
@@ -1404,12 +1412,33 @@ async function execPythonOnLayers(
   const client = new AnalysisClient();
   const layerInspections: { name: string; layer: DatasetLayer; url: string; insp: Awaited<ReturnType<typeof client.inspect>> }[] = [];
   const finestBytes: number[] = [];
+  // N5 layers can't be inspected in the browser worker (zarrita doesn't
+  // read N5). Track them so we can route inspect through the HF backend
+  // AND force the runtime to backend (worker can't run N5 analyses
+  // either). Any layer with an n5:// source or a .n5/ path lands here.
+  let anyLayerIsN5 = false;
   try {
     for (const { name, layer } of resolved) {
       const url = normalizeZarrUrl(layer.source);
-      const insp = await client.inspect(url, ctx.descriptor.voxel_size_nm, (m) =>
-        ctx.callbacks.onProgress?.(`Inspecting ${name}: ${m}`),
-      );
+      const layerIsN5 = isN5Source(layer.source);
+      if (layerIsN5) anyLayerIsN5 = true;
+      let insp;
+      if (layerIsN5) {
+        // Backend inspect via tensorstore. Requires the Space awake;
+        // waitForBackendReady further down will block on cold-start
+        // anyway, so we don't pre-wake here.
+        if (!backendUrl) {
+          throw new Error(
+            `Layer '${name}' is an N5 source — Pyodide can't read N5, so the HF backend is required. Open Settings → Advanced → Analysis backend.`,
+          );
+        }
+        ctx.callbacks.onProgress?.(`Inspecting ${name} via backend (N5)…`);
+        insp = await inspectSourceRemote(backendUrl, url, ctx.descriptor.voxel_size_nm, ctx.signal);
+      } else {
+        insp = await client.inspect(url, ctx.descriptor.voxel_size_nm, (m) =>
+          ctx.callbacks.onProgress?.(`Inspecting ${name}: ${m}`),
+        );
+      }
       layerInspections.push({ name, layer, url, insp });
       // Index 0 is the finest scale. Track to gauge whether even the
       // finest fits in our target — if yes for everyone, no need to
@@ -1433,6 +1462,16 @@ async function execPythonOnLayers(
     } else if (mustBeLocal) {
       runtime = "local";
       runtimeReason = "skeleton inputs require local runtime";
+    } else if (anyLayerIsN5) {
+      // N5 forces backend — Pyodide / zarrita don't read N5. Backend
+      // already inspected the source via tensorstore above.
+      if (!backendUrl) {
+        throw new Error(
+          "Layer uses N5 — Pyodide can't read N5, so the HF backend is required. Open Settings → Advanced → Analysis backend.",
+        );
+      }
+      runtime = "backend";
+      runtimeReason = "N5 layers require the backend (Pyodide can't read N5)";
     } else if (mustBeBackend) {
       if (!backendUrl) {
         throw new Error(

@@ -279,6 +279,48 @@ interface RemoteResponse {
  *  `?d=...&q=...#!{...}`) to the backend's share store and return a
  *  short id. Throws on failure so the caller can fall back to the
  *  full URL. */
+/** Ask the HF backend to probe a remote zarr/n5 source for its
+ *  multiscale shape. Used when the browser worker can't read the
+ *  source format (currently N5). Response matches the worker's
+ *  LayerInspection shape so the existing scale-picker can consume
+ *  it unchanged. */
+export async function inspectSourceRemote(
+  backendUrl: string,
+  url: string,
+  defaultVoxelNm: [number, number, number],
+  signal?: AbortSignal,
+): Promise<{
+  isMultiscale: boolean;
+  axes: { name: string }[];
+  scales: {
+    path: string;
+    shape: number[];
+    voxelNm: [number, number, number];
+    offsetNm: [number, number, number];
+    downsample: [number, number, number];
+    approxBytes: number;
+  }[];
+}> {
+  const res = await fetch(new URL("api/inspect-source", ensureTrailingSlash(backendUrl)).toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, defaultVoxelNm }),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { detail?: unknown };
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(`Remote inspect failed (${res.status}): ${message.slice(0, 400)}`);
+  }
+  return await res.json();
+}
+
 export interface ShareCreateResult {
   id: string;
   /** True when the backend wrote to persistent storage (HF Datasets).

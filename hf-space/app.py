@@ -496,13 +496,13 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
     else:
         raise HTTPException(status_code=400, detail=f"unsupported layer URL scheme: {raw_proto}")
 
-    # Try zarr v2 first (CellMap default), fall back to v3. When both
-    # tensorstore drivers fail, fall back to zarr-python — it tolerates
-    # numcodecs additions (checksum, etc.) that tensorstore strict-
-    # rejects. Slower per-chunk but reliable.
+    # Try zarr v2 first (CellMap default), fall back to v3, then n5.
+    # When all tensorstore drivers fail, fall back to zarr-python — it
+    # tolerates numcodecs additions (checksum, etc.) that tensorstore
+    # strict-rejects. Slower per-chunk but reliable.
     errors_by_driver: Dict[str, Exception] = {}
     ts_arr = None
-    for driver in ("zarr", "zarr3"):
+    for driver in ("zarr", "zarr3", "n5"):
         spec: Dict[str, Any] = {
             "driver": driver,
             "kvstore": kvstore,
@@ -1098,6 +1098,204 @@ async def data(session_id: str, layer_id: str, path: str) -> Response:
 async def _cleanup_session_later(session_id: str) -> None:
     await asyncio.sleep(SESSION_TTL_SECONDS)
     shutil.rmtree(SESSION_ROOT / session_id, ignore_errors=True)
+
+
+# --- Inspect endpoint -------------------------------------------------------
+#
+# Mirror of what the browser worker does for zarr, generalized to N5
+# too. The frontend currently only routes here for N5 sources (zarrita
+# can't read N5); zarr keeps using the worker because that's instant
+# and doesn't depend on the Space being awake. CellMap N5 convention
+# is the only one we explicitly handle — scales discovered as s0, s1,
+# ... subdirs with `pixelResolution.dimensions` (ZYX) for spacing and
+# `transform.translate` for offset.
+
+
+class InspectSourceBody(BaseModel):
+    url: str
+    # Fallback voxel size in xyz (nm) when we can't read it from
+    # attributes — used to keep downstream fly_to / centroid math
+    # in usable units even if metadata is missing.
+    defaultVoxelNm: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+
+def _strip_url_prefix(url: str) -> str:
+    """Drop any 'n5://', 'zarr*://' prefix the frontend may have passed."""
+    for prefix in ("n5://", "zarr3://", "zarr2://", "zarr://"):
+        if url.startswith(prefix):
+            return url[len(prefix):]
+    return url
+
+
+def _kvstore_for(url: str) -> Dict[str, Any]:
+    """Build tensorstore kvstore for http/https/s3/gs URLs.
+
+    S3 public buckets reachable as HTTPS — we don't try the native
+    s3 driver since CellMap data is anonymous-read."""
+    raw = url.rstrip("/") + "/"
+    if raw.startswith("s3://"):
+        raw = "https://" + raw[len("s3://"):]
+    scheme = raw.split("://", 1)[0] if "://" in raw else ""
+    if scheme in ("http", "https"):
+        return {"driver": "http", "base_url": raw}
+    if scheme == "gs":
+        return {"driver": "gcs", "base_url": raw}
+    raise HTTPException(status_code=400, detail=f"unsupported scheme for inspect: {scheme!r}")
+
+
+async def _fetch_json(url: str) -> Optional[Dict[str, Any]]:
+    """GET a JSON file (e.g. attributes.json) — returns None on 404 / parse error."""
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(url) as resp:
+                if resp.status >= 400:
+                    return None
+                return await resp.json(content_type=None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _voxel_nm_xyz_from_attrs(attrs: Dict[str, Any], default: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """Pull a per-axis voxel size in nm from a CellMap-style N5 attrs dict.
+
+    Convention: `pixelResolution.dimensions` is in array-axis order
+    (typically ZYX), so we reverse to get XYZ. Falls back to the
+    transform.scale or the supplied default."""
+    pr = attrs.get("pixelResolution")
+    if isinstance(pr, dict):
+        dims = pr.get("dimensions")
+        if isinstance(dims, list) and len(dims) >= 3:
+            try:
+                z, y, x = float(dims[0]), float(dims[1]), float(dims[2])
+                return (x, y, z)
+            except (TypeError, ValueError):
+                pass
+    tr = attrs.get("transform")
+    if isinstance(tr, dict):
+        sc = tr.get("scale")
+        if isinstance(sc, list) and len(sc) >= 3:
+            try:
+                z, y, x = float(sc[0]), float(sc[1]), float(sc[2])
+                return (x, y, z)
+            except (TypeError, ValueError):
+                pass
+    return default
+
+
+def _offset_nm_xyz_from_attrs(attrs: Dict[str, Any]) -> Tuple[float, float, float]:
+    """Pull a per-axis offset in nm from CellMap-style N5 attrs.
+
+    `transform.translate` is array-axis order; reverse to XYZ."""
+    tr = attrs.get("transform")
+    if isinstance(tr, dict):
+        tl = tr.get("translate")
+        if isinstance(tl, list) and len(tl) >= 3:
+            try:
+                z, y, x = float(tl[0]), float(tl[1]), float(tl[2])
+                return (x, y, z)
+            except (TypeError, ValueError):
+                pass
+    return (0.0, 0.0, 0.0)
+
+
+async def _inspect_scale(
+    kvstore: Dict[str, Any],
+    base_url: str,
+    scale_path: str,
+    finest_voxel_nm_xyz: Optional[Tuple[float, float, float]],
+    default_voxel_nm: Tuple[float, float, float],
+) -> Optional[Dict[str, Any]]:
+    """Open one scale with tensorstore, build a LayerScaleInfo dict."""
+    import tensorstore as ts  # noqa: WPS433
+    arr = None
+    for driver in ("n5", "zarr", "zarr3"):
+        try:
+            arr = await ts.open({
+                "driver": driver,
+                "kvstore": kvstore,
+                "path": scale_path,
+                "open": True,
+            })
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if arr is None:
+        return None
+    shape = [int(s) for s in arr.shape]
+    itemsize = arr.dtype.numpy_dtype.itemsize
+    approx_bytes = int(itemsize * int(np.prod(shape)))
+    # Voxel/offset from this scale's attributes.json (CellMap N5 conv)
+    attrs = await _fetch_json(f"{base_url.rstrip('/')}/{scale_path}/attributes.json") or {}
+    voxel_nm = _voxel_nm_xyz_from_attrs(attrs, default_voxel_nm)
+    offset_nm = _offset_nm_xyz_from_attrs(attrs)
+    # Downsample ratio relative to finest if known.
+    if finest_voxel_nm_xyz:
+        ds = tuple(voxel_nm[i] / finest_voxel_nm_xyz[i] if finest_voxel_nm_xyz[i] else 1.0 for i in range(3))
+    else:
+        ds = (1.0, 1.0, 1.0)
+    return {
+        "path": scale_path,
+        "shape": shape,
+        "voxelNm": list(voxel_nm),
+        "offsetNm": list(offset_nm),
+        "downsample": list(ds),
+        "approxBytes": approx_bytes,
+    }
+
+
+@app.post("/api/inspect-source")
+async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
+    """Probe a remote zarr/n5 source for its multiscale shape.
+
+    Used by the frontend when the browser worker can't read the source
+    (currently: anything that isn't zarr v2/v3 — i.e. N5). Returns a
+    LayerInspection-shaped JSON the frontend's existing scale-picker
+    can consume unchanged.
+    """
+    raw = _strip_url_prefix(body.url)
+    kvstore = _kvstore_for(raw)
+    # Convert s3 to https for the base URL we use for attribute fetches.
+    base_url = raw
+    if base_url.startswith("s3://"):
+        base_url = "https://" + base_url[len("s3://"):]
+    base_url = base_url.rstrip("/")
+    # First read root attributes — CellMap's multiscale dir sometimes
+    # lists explicit scales here; otherwise we scan s0, s1, …
+    root_attrs = await _fetch_json(f"{base_url}/attributes.json") or {}
+    scale_paths: List[str] = []
+    if isinstance(root_attrs.get("scales"), list):
+        scale_paths = [str(s) for s in root_attrs["scales"]]
+    else:
+        # Probe s0..s19 (CellMap caps lower than this; 20 is plenty).
+        for i in range(20):
+            sp = f"s{i}"
+            probe = await _fetch_json(f"{base_url}/{sp}/attributes.json")
+            if probe is None:
+                break
+            scale_paths.append(sp)
+    if not scale_paths:
+        raise HTTPException(status_code=404, detail=f"no scales found at {raw}")
+
+    # First pass: get voxel size of the finest scale so coarser scales
+    # can report a sensible downsample factor.
+    finest_attrs = await _fetch_json(f"{base_url}/{scale_paths[0]}/attributes.json") or {}
+    finest_voxel = _voxel_nm_xyz_from_attrs(finest_attrs, body.defaultVoxelNm)
+
+    scales: List[Dict[str, Any]] = []
+    for sp in scale_paths:
+        info = await _inspect_scale(kvstore, base_url, sp, finest_voxel, body.defaultVoxelNm)
+        if info is not None:
+            scales.append(info)
+    if not scales:
+        raise HTTPException(status_code=500, detail=f"could open root attributes but no scale arrays at {raw}")
+    return {
+        "isMultiscale": len(scales) > 1,
+        # Assume ZYX storage order (CellMap convention). The frontend
+        # uses axes only for the scale-picker UI label; runtime layer
+        # access converts via axesOrder on the LayerSpec.
+        "axes": [{"name": "z"}, {"name": "y"}, {"name": "x"}],
+        "scales": scales,
+    }
 
 
 # --- Run endpoint ------------------------------------------------------------

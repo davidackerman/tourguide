@@ -69,30 +69,37 @@ export type ProgressCallback = (message: string, phase?: string) => void;
 
 // Strip Neuroglancer-style datasource prefixes so zarrita gets a plain URL.
 // "zarr://https://..." → "https://...", "zarr2://./x" → "./x", etc.
-// Pull the first zarr entry out of a string-or-array source. Recognizes
-// both NG-style scheme prefixes ('zarr://', 'zarr2://', 'zarr3://') and
-// bare URLs whose path makes them obviously zarr (contains '.zarr/' or
-// ends in '.zarr'). The latter handles NG state JSON, which omits the
-// scheme prefix because NG infers it from the URL.
+// Pull the first zarr/n5 entry out of a string-or-array source. Recognizes
+// NG-style scheme prefixes ('zarr://', 'zarr2://', 'zarr3://', 'n5://')
+// and bare URLs whose path makes the format obvious ('.zarr/' or '.n5/').
+// The latter handles NG state JSON, which omits the scheme prefix when
+// NG can infer it from the URL.
 function pickZarrEntry(source: string | string[]): string | null {
   const list = Array.isArray(source) ? source : [source];
   return (
-    list.find((s) => /^zarr(2|3)?:\/\//.test(s)) ??
-    list.find((s) => /\.zarr(\/|$)/i.test(s)) ??
+    list.find((s) => /^(zarr(2|3)?|n5):\/\//.test(s)) ??
+    list.find((s) => /\.(zarr|n5)(\/|$)/i.test(s)) ??
     null
   );
 }
 
 export function normalizeZarrUrl(source: string | string[]): string {
   const entry = pickZarrEntry(source);
-  if (!entry) throw new Error("Layer source has no zarr URL to load");
-  // Strip whichever prefix is present (zarr://, zarr2://, zarr3://);
-  // a bare URL passes through unchanged.
-  return entry.replace(/^zarr(2|3)?:\/\//, "");
+  if (!entry) throw new Error("Layer source has no zarr/n5 URL to load");
+  // Strip whichever prefix is present; a bare URL passes through unchanged.
+  return entry.replace(/^(zarr(2|3)?|n5):\/\//, "");
 }
 
 export function isZarrSource(source: string | string[]): boolean {
   return pickZarrEntry(source) !== null;
+}
+
+/** True if the source is N5 (vs zarr v2/v3). N5 isn't readable by the
+ *  browser worker — zarrita doesn't support it — so we route N5 inspect
+ *  and load through the HF backend, which uses tensorstore. */
+export function isN5Source(source: string | string[]): boolean {
+  const list = Array.isArray(source) ? source : [source];
+  return list.some((s) => /^n5:\/\//.test(s) || /\.n5(\/|$)/i.test(s));
 }
 
 export class AnalysisClient {
