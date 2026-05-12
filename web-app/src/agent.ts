@@ -284,23 +284,25 @@ PRECOMPUTED SEGMENTATIONS ARE VOXEL-READABLE. Tourguide decodes compressed_segme
 
 PRECOMPUTED-VOLUME LAYERS RUN ON EITHER RUNTIME. Both Pyodide (browser worker) and the HF backend can now read precomputed segmentation volumes — the backend uses tensorstore's neuroglancer_precomputed driver. So you can use Seung-lab packages (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh) WITH precomputed-volume layers — runtime will be forced to backend automatically. The only true conflict that remains is mesh / skeleton inputs (still browser-only) + Seung-lab packages — split those into two calls.
 
-FOR LABEL STATISTICS (volume / centroid / bbox), USE cc3d.statistics ON BACKEND. regionprops_table builds a Python object per label and runs a Python-level loop, so it's miserably slow at scale — on hemibrain at 512 nm (8.7M labels × 215M voxels) regionprops_table takes hours, cc3d.statistics finishes in ~10 seconds. ONE GOTCHA: cc3d.statistics requires max(label) < voxel_count (it allocates a flat array sized by max id). Real-world uint64 ids (hemibrain etc.) are 10+ digits, way over voxel count, so compact them first with np.unique + np.searchsorted (vectorized, fast):
+FOR LABEL STATISTICS (volume / centroid / bbox), USE cc3d.statistics ON BACKEND. regionprops_table builds a Python object per label and runs a Python-level loop, so it's miserably slow at scale — on hemibrain at 512 nm (8.7M labels × 215M voxels) regionprops_table takes hours, cc3d.statistics finishes in ~10 seconds. ONE GOTCHA: cc3d.statistics requires max(label) < voxel_count (it allocates a flat array sized by max id). Real-world uint64 ids (hemibrain etc.) are 10+ digits, way over voxel count, so compact them first.
 
-  import cc3d, numpy as np, pandas as pd
+  # ----- BACKEND (fastremap.renumber, ~3× faster than np.unique) -----
+  import cc3d, fastremap, numpy as np, pandas as pd
   arr = layers["segmentation"]["array"]
   spacing = layers["segmentation"]["spacing"]
   offsets = layers["segmentation"]["offsets"]
   ax = layers["segmentation"]["axes"]
-  # Compact: assign each unique id a small int. unique_ids[k] is the
-  # original id for compact id k. unique_ids[0] is always 0 (background).
-  unique_ids = np.unique(arr)
-  arr_compact = np.searchsorted(unique_ids, arr).astype(np.uint32)
+  arr_compact, mapping = fastremap.renumber(arr, in_place=False, preserve_zero=True)
+  # mapping is {original_id: compact_id}. Vectorize the reverse lookup so
+  # we can label the result rows with original segment ids:
+  keys = np.fromiter(mapping.keys(),   dtype=arr.dtype, count=len(mapping))
+  vals = np.fromiter(mapping.values(), dtype=np.uint32, count=len(mapping))
+  labels_by_compact = np.empty(len(mapping), dtype=arr.dtype)
+  labels_by_compact[vals] = keys
   stats = cc3d.statistics(arr_compact)
-  counts = stats["voxel_counts"]            # indexed by compact id
-  cents  = stats["centroids"]               # (n_compact, 3) in array-axis voxel coords
-  # Drop background (compact id 0)
-  labels = unique_ids[1:]                   # original ids, dtype matches arr
-  counts, cents = counts[1:], cents[1:]
+  counts = stats["voxel_counts"][1:]            # drop background (compact id 0)
+  cents  = stats["centroids"][1:]
+  labels = labels_by_compact[1:]                # original segment ids
   vol_nm3 = counts * (spacing[0] * spacing[1] * spacing[2])
   ix, iy, iz = ax.index("x"), ax.index("y"), ax.index("z")
   df = pd.DataFrame({
@@ -311,12 +313,15 @@ FOR LABEL STATISTICS (volume / centroid / bbox), USE cc3d.statistics ON BACKEND.
       "com_z_nm": cents[:, iz] * spacing[iz] + offsets[iz],
   }).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
 
-When to fall back to regionprops_table (slow but more features): only when you genuinely need surface area / equivalent_diameter / intensity-weighted props / orientation. For just "measure size + position per object", the cc3d.statistics path above is strictly better.
+  # ----- PYODIDE (no fastremap; use np.unique + np.searchsorted) -----
+  # Same idea, all numpy. Replace the fastremap block above with:
+  unique_ids = np.unique(arr)
+  arr_compact = np.searchsorted(unique_ids, arr).astype(np.uint32)
+  # Then run regionprops_table on arr_compact (no cc3d in Pyodide); map
+  # back via original_id = unique_ids[row.label]. Slower than cc3d.statistics
+  # but the only option in the browser.
 
-The same np.searchsorted compaction works on Pyodide too (no cc3d there) — feed arr_compact into regionprops_table when you need richer features:
-  unique = np.unique(arr)
-  arr_compact = np.searchsorted(unique, arr).astype(np.int32)
-  # After regionprops, map back: original_id = unique[row.label]
+When to fall back to regionprops_table on backend: only when you genuinely need surface area / equivalent_diameter / intensity-weighted props / orientation. For just "measure size + position per object", cc3d.statistics is strictly better.
 
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
@@ -510,17 +515,20 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
 # and breaks the link to existing meshes/skeletons + click-to-fly.
 # Use cc3d.statistics (one C++ pass, ~100× faster than regionprops_table
 # at scale). cc3d requires max(label) < voxel_count so we compact ids
-# first; unique_ids[k] maps compact id k -> original segment id.
-import numpy as np, pandas as pd, cc3d
+# first with fastremap.renumber (~3× faster than np.unique).
+import numpy as np, pandas as pd, cc3d, fastremap
 spacing = layers["mito"]["spacing"]   # array-axis order (z,y,x typically)
 offsets = layers["mito"]["offsets"]   # SAME axis order as spacing
 ax = layers["mito"]["axes"]
-unique_ids = np.unique(mito)
-arr_compact = np.searchsorted(unique_ids, mito).astype(np.uint32)
+arr_compact, mapping = fastremap.renumber(mito, in_place=False, preserve_zero=True)
+keys = np.fromiter(mapping.keys(),   dtype=mito.dtype, count=len(mapping))
+vals = np.fromiter(mapping.values(), dtype=np.uint32,  count=len(mapping))
+labels_by_compact = np.empty(len(mapping), dtype=mito.dtype)
+labels_by_compact[vals] = keys                 # compact id i -> original id
 stats = cc3d.statistics(arr_compact)
 counts = stats["voxel_counts"][1:]    # drop background (compact id 0)
 cents  = stats["centroids"][1:]
-labels = unique_ids[1:]               # original segment ids preserved
+labels = labels_by_compact[1:]        # original segment ids preserved
 ix, iy, iz = ax.index("x"), ax.index("y"), ax.index("z")
 df = pd.DataFrame({
     "object_id": labels.astype(np.int64),
