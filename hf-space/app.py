@@ -490,9 +490,12 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
     elif raw_proto == "s3":
         # TODO: tensorstore's native s3 driver is faster than tunneling via
         # http, but needs bucket+path broken out. For now treat as http over
-        # the bucket's HTTPS endpoint (CellMap buckets are public + anon).
-        https_url = "https://" + url.split("://", 1)[1]
-        kvstore = {"driver": "http", "base_url": https_url}
+        # the bucket's virtual-hosted HTTPS endpoint
+        # (https://<bucket>.s3.amazonaws.com/<key>) — public CellMap
+        # buckets allow anonymous read. _s3_to_https handles the host
+        # construction correctly; the previous naive 'https://' + tail
+        # form dropped the .s3.amazonaws.com host.
+        kvstore = {"driver": "http", "base_url": _s3_to_https(url)}
     else:
         raise HTTPException(status_code=400, detail=f"unsupported layer URL scheme: {raw_proto}")
 
@@ -1127,14 +1130,27 @@ def _strip_url_prefix(url: str) -> str:
     return url
 
 
+def _s3_to_https(url: str) -> str:
+    """Convert s3://<bucket>/<key> to a virtual-hosted HTTPS URL.
+
+    AWS S3 public buckets are reachable anonymously as
+    https://<bucket>.s3.amazonaws.com/<key>. The naive
+    'https://' + url[5:] form (which the previous code used)
+    drops the .s3.amazonaws.com host and resolves to nothing.
+    """
+    if not url.startswith("s3://"):
+        return url
+    rest = url[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    return f"https://{bucket}.s3.amazonaws.com/{key}"
+
+
 def _kvstore_for(url: str) -> Dict[str, Any]:
     """Build tensorstore kvstore for http/https/s3/gs URLs.
 
     S3 public buckets reachable as HTTPS — we don't try the native
     s3 driver since CellMap data is anonymous-read."""
-    raw = url.rstrip("/") + "/"
-    if raw.startswith("s3://"):
-        raw = "https://" + raw[len("s3://"):]
+    raw = _s3_to_https(url).rstrip("/") + "/"
     scheme = raw.split("://", 1)[0] if "://" in raw else ""
     if scheme in ("http", "https"):
         return {"driver": "http", "base_url": raw}
@@ -1254,11 +1270,11 @@ async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
     """
     raw = _strip_url_prefix(body.url)
     kvstore = _kvstore_for(raw)
-    # Convert s3 to https for the base URL we use for attribute fetches.
-    base_url = raw
-    if base_url.startswith("s3://"):
-        base_url = "https://" + base_url[len("s3://"):]
-    base_url = base_url.rstrip("/")
+    # Use the virtual-hosted HTTPS form so attribute fetches go to a
+    # real host. The naive s3-to-https swap (just stripping the scheme)
+    # dropped the .s3.amazonaws.com part and produced URLs that resolve
+    # to nothing — which is why scale discovery was returning 404.
+    base_url = _s3_to_https(raw).rstrip("/")
     # First read root attributes — CellMap's multiscale dir sometimes
     # lists explicit scales here; otherwise we scan s0, s1, …
     root_attrs = await _fetch_json(f"{base_url}/attributes.json") or {}
