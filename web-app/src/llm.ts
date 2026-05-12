@@ -714,6 +714,14 @@ export class AnthropicBackend implements LLMBackend {
       AnthropicBackend.totals.cacheCreationTokens += u.cache_creation_input_tokens;
     if (typeof u.cache_read_input_tokens === "number")
       AnthropicBackend.totals.cacheReadTokens += u.cache_read_input_tokens;
+    // Per-call log so the user can verify cache hits in DevTools
+    // without waiting for the Anthropic Console (which lags). Streaming
+    // calls fire this twice — once at message_start (has input + cache
+    // counts) and once at message_delta (has output). Non-stream calls
+    // fire it once with everything.
+    console.log(
+      `[anthropic] usage: in=${u.input_tokens ?? "-"} out=${u.output_tokens ?? "-"} cache_create=${u.cache_creation_input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0}  · session totals: in=${AnthropicBackend.totals.inputTokens} out=${AnthropicBackend.totals.outputTokens} cache_create=${AnthropicBackend.totals.cacheCreationTokens} cache_read=${AnthropicBackend.totals.cacheReadTokens}`,
+    );
   }
 
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {

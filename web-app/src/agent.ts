@@ -282,6 +282,17 @@ ANSWER COUNT QUESTIONS FROM DATASET METADATA, NOT VOXEL READS. If the user asks 
 
 PRECOMPUTED SEGMENTATIONS ARE VOXEL-READABLE. Tourguide decodes compressed_segmentation chunks (sharded or unsharded) directly into a numpy ndarray — pass the layer's name in 'layers' to python_on_layers and you get an instance-label volume just like a zarr. The agent auto-picks a downsampled scale that fits the local memory budget; describe_dataset's precomputed_volume_scales shows what's available. NEVER refuse a regionprops / per-object-metric / connected-components question with "there is no zarr volume" — that reasoning is wrong for precomputed segmentations. The correct decision is: small known id list (≤~100) → meshes path; "every segment in the dataset" → voxels path at a coarse-enough scale.
 
+PRECOMPUTED-VOLUME CODE MUST BE PYODIDE-NATIVE. Reading a precomputed volume forces python_on_layers to run locally (the HF backend can't read precomputed yet). So when a precomputed-segmentation layer is in 'layers', you must NOT import cc3d / fastmorph / fastremap / edt / kimimaro / zmesh — those are HF-backend-only and will trigger a conflict error. Use the stdlib equivalents instead:
+  - fastremap.renumber(arr) for big uint64 ids that overflow regionprops/scipy:
+      unique = np.unique(arr)
+      arr_compact = np.searchsorted(unique, arr).astype(np.int32)
+      # arr_compact has labels 0..len(unique)-1; the i-th original id is unique[i].
+      # After regionprops, map back: original_id = unique[row.label]
+  - cc3d.connected_components → scipy.ndimage.label
+  - fastmorph.erode / dilate / spherical_* → scipy.ndimage.binary_erosion / _dilation / _opening / _closing (per-label loops only if needed)
+  - edt → scipy.ndimage.distance_transform_edt
+The uint64 overflow in regionprops_table is the typical hemibrain trap — solve it with the searchsorted remap above, not with fastremap.
+
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
   {"tool": "<name>", "args": { ... }}
@@ -1317,8 +1328,20 @@ async function execPythonOnLayers(
     resolvedPrecomputedVolumes.length > 0;
   const mustBeBackend = codeImportsSeungLab || codeNeedsMeshLayer;
   if (mustBeLocal && mustBeBackend) {
+    // List the *actual* local-forcing reasons so the agent can fix the
+    // right thing. The old generic 'skeleton inputs' message was
+    // misleading when meshes or precomputed-volume layers triggered it.
+    const localReasons: string[] = [];
+    if (resolvedSkeletons.length > 0) localReasons.push("skeleton inputs");
+    if (resolvedMeshes.length > 0) localReasons.push("mesh inputs");
+    if (resolvedPrecomputedVolumes.length > 0) {
+      localReasons.push("precomputed-volume inputs (HF backend can't read precomputed yet — only the Pyodide worker does)");
+    }
+    const backendReasons: string[] = [];
+    if (codeImportsSeungLab) backendReasons.push("imports a Seung-lab package (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh)");
+    if (codeNeedsMeshLayer) backendReasons.push("sets _TG_NEW_MESH_LAYER");
     throw new Error(
-      "Conflict: this code uses Seung-lab packages or _TG_NEW_MESH_LAYER (backend-only) but also has skeleton inputs (local-only). Split into two python_on_layers calls — one for skeleton work, one for mesh/heavy ops.",
+      `Conflict: this code must run on the HF backend because it ${backendReasons.join(" and ")}, but the inputs require the local Pyodide runtime (${localReasons.join(", ")}). For precomputed-volume layers, stay on Pyodide and use only numpy / scipy / skimage. Replace fastremap.renumber with np.searchsorted(np.unique(arr), arr) — same result, no Seung-lab dependency. cc3d.connected_components → scipy.ndimage.label. fastmorph → scipy.ndimage.binary_*.`,
     );
   }
   // The size-vs-budget decision needs inspect results, so we run inspect
@@ -1808,11 +1831,39 @@ async function execDescribeDataset(
     throw new Error(`No layer named '${name}'. Loaded layers: ${known || "(none)"}.`);
   }
   if (!isZarrSource(layer.source)) {
+    // Non-zarr source — try the precomputed probe so single-layer
+    // describe_dataset returns the same precomputed_volume_scales the
+    // multi-layer (no-name) path returns. Without this, calling
+    // describe_dataset('segmentation') on hemibrain hit a stub that
+    // claimed "voxel size unknown" even though the precomputed info
+    // file is right there.
+    const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+    for (const s of sources) {
+      if (!/^precomputed:\/\//i.test(s)) continue;
+      const info = await probePrecomputedInfo(s);
+      if (!info) continue;
+      const vol = parsePrecomputedVolumeInfo(info.raw);
+      if (!vol) continue;
+      return {
+        name: layer.name,
+        type: layer.type,
+        source: layer.source,
+        source_kind: "precomputed",
+        inspectable: true,
+        precomputed_volume_scales: vol.scales.map((sc) => ({
+          key: sc.key,
+          resolution_nm: sc.resolutionNm,
+          size: sc.size,
+          approx_bytes: sc.approxBytes,
+        })),
+        ng_offset_nm: layer.transform_offset_nm ?? null,
+      };
+    }
     return {
       name: layer.name,
       type: layer.type,
       source: layer.source,
-      note: "Source is not a zarr — no scale-level metadata available. Voxel size unknown without a per-format inspector.",
+      note: "Source is not zarr and not a readable precomputed volume — no scale-level metadata available.",
     };
   }
 
