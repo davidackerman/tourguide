@@ -1402,6 +1402,14 @@ async function execPythonOnLayers(
       }
       runtime = "backend";
       runtimeReason = "code uses Seung-lab packages or _TG_NEW_MESH_LAYER";
+    } else if (backendUrl && wouldBackendServeFinerScale(layerInspections, pendingPrecomputedVolumes, LOCAL_TARGET_BYTES, BACKEND_TARGET_BYTES)) {
+      // For analysis, finer resolution is usually worth the cold start.
+      // If backend's 5 GB budget admits a strictly finer scale than
+      // local's 1.5 GB budget for ANY input layer, route to backend.
+      // Local still wins when local-pick is already the finest scale
+      // (no resolution gain to be had).
+      runtime = "backend";
+      runtimeReason = "backend can serve a finer scale than local";
     } else {
       const totalFinest = finestBytes.reduce((a, b) => a + b, 0);
       if (totalFinest <= LOCAL_TARGET_BYTES) {
@@ -1609,6 +1617,43 @@ function humanBytes(n: number): string {
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+// Pick the index of the FINEST scale whose approxBytes fits the budget.
+// scales are ordered finest-first (idx 0 = finest), so iterating from
+// the front and returning the first match yields the finest fit. If
+// nothing fits, falls back to the coarsest (last) scale.
+function pickScaleIdxForBudget(sizes: number[], budget: number): number {
+  for (let i = 0; i < sizes.length; i++) {
+    if (sizes[i] <= budget) return i;
+  }
+  return sizes.length - 1;
+}
+
+// True if running on the HF backend would let us serve a strictly finer
+// scale than Pyodide would for at least one input layer. Used by the
+// "prefer backend for resolution" runtime rule — if no layer benefits
+// (e.g. all finest scales already fit locally), there's nothing to gain
+// from paying the backend's cold start.
+function wouldBackendServeFinerScale(
+  zarrInspections: { insp: { scales: { approxBytes: number }[] } }[],
+  precomputedPending: { volumeInfo: { scales: { approxBytes: number }[] } }[],
+  localBudget: number,
+  backendBudget: number,
+): boolean {
+  for (const { insp } of zarrInspections) {
+    const sizes = insp.scales.map((s) => s.approxBytes);
+    if (pickScaleIdxForBudget(sizes, backendBudget) < pickScaleIdxForBudget(sizes, localBudget)) {
+      return true;
+    }
+  }
+  for (const p of precomputedPending) {
+    const sizes = p.volumeInfo.scales.map((s) => s.approxBytes);
+    if (pickScaleIdxForBudget(sizes, backendBudget) < pickScaleIdxForBudget(sizes, localBudget)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Wire a CustomAnalysisResult through the agent's callbacks + viewer.
