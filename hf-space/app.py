@@ -91,6 +91,18 @@ SHARE_ID_BYTES = 6  # 12 hex chars → 48 bits, plenty for collision-free
 # configured.
 HF_SHARE_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_SHARE_DATASET = os.environ.get("TG_SHARE_DATASET", "").strip()
+# Diagnostic — lets us tell whether the env vars failed to reach the
+# container vs failed to import vs failed to authenticate. Token is
+# masked; only the prefix + length are logged.
+_tok_dbg = (
+    f"set ({HF_SHARE_TOKEN[:4]}…, len={len(HF_SHARE_TOKEN)})"
+    if HF_SHARE_TOKEN
+    else "EMPTY"
+)
+log.info(
+    "Share storage env check: HF_TOKEN=%s, TG_SHARE_DATASET=%r",
+    _tok_dbg, HF_SHARE_DATASET,
+)
 try:
     if HF_SHARE_TOKEN and HF_SHARE_DATASET:
         from huggingface_hub import HfApi  # noqa: WPS433
