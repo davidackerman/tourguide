@@ -278,7 +278,9 @@ ${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — run_sql / run_pyt
 
 NEVER GUESS DATASET PROPERTIES. If the user asks about a layer's resolution / scale / shape / dtype / available downsamplings, call describe_dataset(layer_name) and answer from its return value. Never invent numbers like "1 × 1 × 1 nm" — when uncertain, say so or call describe_dataset.
 
-ANSWER COUNT QUESTIONS FROM DATASET METADATA, NOT VOXEL READS. If the user asks "how many <objects> are in this layer" (e.g. "how many neurons / bodies / cells"), call describe_dataset() and use the layer's 'num_segments' field — that's the precomputed segment_properties count, returned for free. Do NOT call python_on_layers to count objects in a precomputed segmentation; that path can't read precomputed voxels and is the wrong tool. Use num_segments + answer + done.
+ANSWER COUNT QUESTIONS FROM DATASET METADATA, NOT VOXEL READS. If the user asks "how many <objects> are in this layer" (e.g. "how many neurons / bodies / cells"), call describe_dataset() and use the layer's 'num_segments' field — that's the precomputed segment_properties count, returned for free. Counting via voxel read would download gigabytes for an answer the metadata already has. Use num_segments + answer + done.
+
+PRECOMPUTED SEGMENTATIONS ARE VOXEL-READABLE. Tourguide decodes compressed_segmentation chunks (sharded or unsharded) directly into a numpy ndarray — pass the layer's name in 'layers' to python_on_layers and you get an instance-label volume just like a zarr. The agent auto-picks a downsampled scale that fits the local memory budget; describe_dataset's precomputed_volume_scales shows what's available. NEVER refuse a regionprops / per-object-metric / connected-components question with "there is no zarr volume" — that reasoning is wrong for precomputed segmentations. The correct decision is: small known id list (≤~100) → meshes path; "every segment in the dataset" → voxels path at a coarse-enough scale.
 
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
@@ -395,10 +397,12 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
                     from a prior run_sql ORDER BY <metric> LIMIT N.
       'meshes'    — array of {"layer": str, "segment_ids": [...]} for
                     layers with a precomputed-mesh source. Use when
-                    the layer has no zarr volume (so regionprops on
-                    voxels isn't available) but does have meshes —
-                    THIS is how you compute volume / surface area
-                    on precomputed-only datasets. Binds
+                    you have a small (≤~100) known id list and just
+                    need per-object surface area / volume / centroid.
+                    For "regionprops on EVERY segment" on a precomputed
+                    segmentation, prefer the voxel path ('layers')
+                    instead — mesh fetching one-at-a-time doesn't
+                    scale to thousands of objects. Binds
                     '<layer>_mesh = {seg_id: {"vertices": (N,3) f32 nm,
                     "faces": (M,3) u32}}'. Supports
                     'neuroglancer_legacy_mesh' (unsharded only) and

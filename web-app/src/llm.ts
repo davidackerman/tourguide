@@ -660,13 +660,12 @@ interface AnthropicUsage {
   cache_read_input_tokens?: number;
 }
 
-// Conservative default — Anthropic's model IDs use hyphens, not dots
-// ('claude-sonnet-4-5', not 'claude-sonnet-4.6'). 4-5 has been GA for
-// a while and is broadly available; users with access to newer models
-// can pick them via the dropdown after hitting Refresh. Centralized so
-// settings_ui / welcome_ui / the AnthropicBackend default all stay in
-// sync if/when this needs to move.
-export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5";
+// Default model — Anthropic's IDs use hyphens, not dots
+// ('claude-sonnet-4-6', not 'claude-sonnet-4.6'). Centralized so
+// settings_ui / welcome_ui / the AnthropicBackend default all stay
+// in sync. Users can pick a different model via the dropdown after
+// hitting Refresh (lists what /v1/models returns for their key).
+export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 // ---------------------------------------------------------------------------
 // Anthropic Claude (native API)
@@ -1119,7 +1118,7 @@ export const OPENAI_COMPATIBLE_PRESETS: Record<string, { url: string; placeholde
   },
   openrouter: {
     url: "https://openrouter.ai/api/v1",
-    placeholderModel: "anthropic/claude-sonnet-4-5",
+    placeholderModel: "anthropic/claude-sonnet-4-6",
     label: "OpenRouter (one key for Claude/Gemini/Llama/...)",
   },
   xai: {

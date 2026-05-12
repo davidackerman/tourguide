@@ -119,16 +119,14 @@ function renderGeminiModelOptions(currentId: string): string {
 
 // Same shape as the Gemini renderer but for Anthropic. Stub list uses
 // model IDs in Anthropic's actual format (hyphens, not dots — the
-// dotted form returns 404 on /v1/messages).
+// dotted form returns 404 on /v1/messages). Stub is only shown until
+// the user pastes a key and clicks Refresh, which replaces it with the
+// real /v1/models list for their key.
 export function renderAnthropicModelOptions(currentId: string): string {
   const cached = loadCachedAnthropicModels();
   const list = cached && cached.length > 0
     ? cached.map((m) => ({ id: m.id, label: m.id }))
-    : [
-        { id: "claude-sonnet-4-5", label: "claude-sonnet-4-5" },
-        { id: "claude-haiku-4-5", label: "claude-haiku-4-5" },
-        { id: "claude-opus-4-1", label: "claude-opus-4-1" },
-      ];
+    : [{ id: DEFAULT_ANTHROPIC_MODEL, label: DEFAULT_ANTHROPIC_MODEL }];
   if (currentId && !list.some((m) => m.id === currentId)) {
     list.unshift({ id: currentId, label: `${currentId} (current)` });
   }
@@ -204,7 +202,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
             Claude model
             <select data-field="anthropicModel">${renderAnthropicModelOptions(current.anthropicModel || DEFAULT_ANTHROPIC_MODEL)}</select>
           </label>
-          <p class="hint">Hits api.anthropic.com directly using <code>anthropic-dangerous-direct-browser-access</code>. List populated from your key via <code>/v1/models</code> — click Refresh after pasting.</p>
+          <p class="hint">Hits api.anthropic.com directly using <code>anthropic-dangerous-direct-browser-access</code>. The model list comes from your key via <code>/v1/models</code>, so paste a key first — then click Refresh to populate the dropdown.</p>
           <button class="btn-secondary btn-tiny" data-action="refresh-anthropic-models" type="button">↻ Refresh available models</button>
           <span class="anthropic-model-status" data-anthropic-model-status></span>
           <br/>
@@ -303,6 +301,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           </div>
 
           <h4>Refresh Gemini model list</h4>
+          <p class="hint">Needs your API key (above) — Google's <code>/v1beta/models</code> endpoint requires auth. Paste a key first, then click Refresh.</p>
           <div class="gemini-model-actions">
             <button class="btn-secondary btn-tiny" data-action="refresh-gemini-models" type="button">↻ Refresh available models</button>
             <span class="gemini-model-status" data-gemini-model-status></span>

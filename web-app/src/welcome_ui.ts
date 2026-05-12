@@ -133,6 +133,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
               Model
               <select data-welcome-anthropic-model>${renderAnthropicModelOptions(settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL)}</select>
             </label>
+            <p class="hint">Paste your key first, then click Refresh to load the real model list for your account via <code>/v1/models</code>.</p>
             <div class="welcome-test-row">
               <button class="btn-secondary btn-tiny" data-welcome-refresh-anthropic type="button">↻ Refresh models</button>
               <span class="anthropic-model-status" data-welcome-anthropic-model-status></span>
