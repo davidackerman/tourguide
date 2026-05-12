@@ -284,16 +284,41 @@ PRECOMPUTED SEGMENTATIONS ARE VOXEL-READABLE. Tourguide decodes compressed_segme
 
 PRECOMPUTED-VOLUME LAYERS RUN ON EITHER RUNTIME. Both Pyodide (browser worker) and the HF backend can now read precomputed segmentation volumes — the backend uses tensorstore's neuroglancer_precomputed driver. So you can use Seung-lab packages (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh) WITH precomputed-volume layers — runtime will be forced to backend automatically. The only true conflict that remains is mesh / skeleton inputs (still browser-only) + Seung-lab packages — split those into two calls.
 
-The uint64 overflow in regionprops_table is the classic hemibrain trap (label IDs are ~10^15+). Two ways to handle it depending on runtime:
-  - Pyodide (small scales, no Seung-lab): np.searchsorted remap:
-      unique = np.unique(arr)
-      arr_compact = np.searchsorted(unique, arr).astype(np.int32)
-      # arr_compact has labels 0..len(unique)-1; the i-th original id is unique[i].
-      # After regionprops, map back: original_id = unique[row.label]
-  - Backend (large scales, Seung-lab available):
-      import fastremap
-      arr_compact, mapping = fastremap.renumber(arr, preserve_zero=True)
-      # mapping: dict[original_id, compact_id]; reverse with {v:k for k,v in mapping.items()}.
+FOR LABEL STATISTICS (volume / centroid / bbox), USE cc3d.statistics ON BACKEND. regionprops_table builds a Python object per label and runs a Python-level loop, so it's miserably slow at scale — on hemibrain at 512 nm (8.7M labels × 215M voxels) regionprops_table takes hours, cc3d.statistics finishes in ~10 seconds. cc3d.statistics handles uint64 IDs natively (no remap), in one C++ pass:
+
+  import cc3d, numpy as np, pandas as pd
+  arr = layers["segmentation"]["array"]
+  spacing = layers["segmentation"]["spacing"]
+  offsets = layers["segmentation"]["offsets"]
+  ax = layers["segmentation"]["axes"]
+  stats = cc3d.statistics(arr)
+  counts = stats["voxel_counts"]            # array (or dict if labels are huge): label -> voxel count
+  cents  = stats["centroids"]               # (n_labels, 3) in array-axis voxel coords
+  # voxel_counts indexed by label value; treat 0 as background.
+  labels = np.arange(len(counts)) if hasattr(counts, "__len__") and not isinstance(counts, dict) else np.array(list(counts.keys()))
+  if isinstance(counts, dict):
+      counts_arr = np.array([counts[k] for k in labels])
+      cents_arr = np.array([cents[k] for k in labels])
+  else:
+      keep = counts > 0
+      labels, counts_arr, cents_arr = labels[keep], counts[keep], cents[keep]
+      labels, counts_arr, cents_arr = labels[1:], counts_arr[1:], cents_arr[1:]  # drop background
+  vol_nm3 = counts_arr * (spacing[0] * spacing[1] * spacing[2])
+  ix, iy, iz = ax.index("x"), ax.index("y"), ax.index("z")
+  df = pd.DataFrame({
+      "object_id": labels.astype(np.int64),
+      "volume_nm_3": vol_nm3,
+      "com_x_nm": cents_arr[:, ix] * spacing[ix] + offsets[ix],
+      "com_y_nm": cents_arr[:, iy] * spacing[iy] + offsets[iy],
+      "com_z_nm": cents_arr[:, iz] * spacing[iz] + offsets[iz],
+  }).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
+
+When to fall back to regionprops_table (slow but more features): only when you genuinely need surface area / equivalent_diameter / intensity-weighted props / orientation. For just "measure size + position per object", cc3d.statistics is strictly better.
+
+When stuck on Pyodide (no cc3d available) and hitting the uint64 overflow in regionprops_table: use the np.searchsorted remap.
+  unique = np.unique(arr)
+  arr_compact = np.searchsorted(unique, arr).astype(np.int32)
+  # After regionprops, map back: original_id = unique[row.label]
 
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
@@ -485,29 +510,26 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
 # mito is type=segmentation in describe_dataset → ALREADY instance-
 # labeled. Do NOT call cc3d.connected_components — that re-IDs from 1
 # and breaks the link to existing meshes/skeletons + click-to-fly.
-# Pass the array directly to regionprops_table; the resulting 'label'
-# column IS the existing segment id.
-import numpy as np, pandas as pd
-from skimage import measure as _sk
+# Use cc3d.statistics (one C++ pass, handles uint64 native, ~100×
+# faster than regionprops_table at scale).
+import numpy as np, pandas as pd, cc3d
 spacing = layers["mito"]["spacing"]   # array-axis order (z,y,x typically)
 offsets = layers["mito"]["offsets"]   # SAME axis order as spacing
-props = _sk.regionprops_table(
-    mito,                              # the already-labeled volume
-    spacing=spacing,
-    properties=("label", "area", "centroid", "bbox", "equivalent_diameter"),
-)
-df = pd.DataFrame(props)
-df["volume_nm_3"] = df["area"]
-# centroid-{0,1,2} are in the SAME axis order as spacing — z,y,x.
-# Convert to world-nm xyz, adding the per-axis offset.
 ax = layers["mito"]["axes"]
-def col(name):
-    return f"centroid-{ax.index(name)}"
-df["com_x_nm"] = df[col("x")] + offsets[ax.index("x")]
-df["com_y_nm"] = df[col("y")] + offsets[ax.index("y")]
-df["com_z_nm"] = df[col("z")] + offsets[ax.index("z")]
-df["object_id"] = df["label"].astype(int)   # original segment ids preserved
-_TG_TABLE = df[["object_id","volume_nm_3","com_x_nm","com_y_nm","com_z_nm","equivalent_diameter"]]
+stats = cc3d.statistics(mito)
+counts = stats["voxel_counts"]; cents = stats["centroids"]
+labels = np.arange(len(counts))
+keep = counts > 0; labels, counts, cents = labels[keep], counts[keep], cents[keep]
+labels, counts, cents = labels[1:], counts[1:], cents[1:]  # drop background id=0
+ix, iy, iz = ax.index("x"), ax.index("y"), ax.index("z")
+df = pd.DataFrame({
+    "object_id": labels.astype(np.int64),    # original segment ids preserved
+    "volume_nm_3": counts * (spacing[0] * spacing[1] * spacing[2]),
+    "com_x_nm": cents[:, ix] * spacing[ix] + offsets[ix],
+    "com_y_nm": cents[:, iy] * spacing[iy] + offsets[iy],
+    "com_z_nm": cents[:, iz] * spacing[iz] + offsets[iz],
+}).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
+_TG_TABLE = df
 _TG_TABLE_NAME = "mito"
 _TG_NARRATION = f"Measured {len(df)} mito components."
 """
@@ -786,11 +808,13 @@ WHEN TO USE meshes= VS layers= IN python_on_layers:
         mesh for the OLD id, not the new one),
       • silently breaks click-to-fly (the row's object_id no longer
         matches the rendered segment).
-    Pass the array directly to regionprops_table as the labels arg:
-        props = regionprops_table(mito, spacing=spacing,
-                                  properties=("label", "area", "centroid", ...))
-    The "label" column IS the original segment id; copy it into
-    object_id verbatim. Use np.unique(arr[arr > 0]) if you only need
+    For label statistics, use cc3d.statistics(arr) — see the
+    "FOR LABEL STATISTICS" section above for the full pattern. It
+    preserves the original ids (returns voxel_counts indexed by
+    label value) and is ~100× faster than regionprops_table on big
+    label sets. Use regionprops_table only when you need surface
+    area / orientation / intensity-weighted props that cc3d.statistics
+    doesn't provide. Use np.unique(arr[arr > 0]) if you only need
     the id list without metrics.
     For ambiguous cases (image-typed binary mask, etc.), call
     ask_user with a yesno is_already_labeled (default true for
