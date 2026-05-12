@@ -47,6 +47,7 @@ const customBtn = $<HTMLButtonElement>("custom-btn");
 const downloadBtn = $<HTMLButtonElement>("download-btn");
 const settingsBtn = $<HTMLButtonElement>("settings-btn");
 const shareBtn = $<HTMLButtonElement>("share-btn");
+const copyNgBtn = $<HTMLButtonElement>("copy-ng-btn");
 const backendIndicator = $<HTMLButtonElement>("backend-indicator");
 // Make the indicator a quick way into Settings when AI isn't configured —
 // matches the title attribute on the button.
@@ -731,6 +732,9 @@ shareBtn.addEventListener("click", async () => {
   const backendUrl = loadSettings().analysisBackendUrl.trim();
   let finalUrl = url;
   let shortened = false;
+  // null = no short-link was attempted (inline URL — no storage involved);
+  // true = HF Datasets (persistent); false = /tmp fallback (ephemeral).
+  let persistent: boolean | null = null;
   if (backendUrl) {
     try {
       const suffix = url.slice(url.indexOf("?") >= 0 ? url.indexOf("?") : url.indexOf("#"));
@@ -742,10 +746,11 @@ shareBtn.addEventListener("click", async () => {
         const h = await fetchHealth(backendUrl, ac.signal);
         clearTimeout(timer);
         if (h?.ok) {
-          const id = await createShareLink(backendUrl, suffix);
+          const result = await createShareLink(backendUrl, suffix);
           const base = url.split("?")[0].split("#")[0];
-          finalUrl = `${base}?s=${id}`;
+          finalUrl = `${base}?s=${result.id}`;
           shortened = true;
+          persistent = result.persistent;
         }
       }
     } catch (err) {
@@ -761,17 +766,50 @@ shareBtn.addEventListener("click", async () => {
       ? `✓ Copied short link${tablesHint}`
       : `✓ Copied${tablesHint}`;
     setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2200);
+    // Combine ephemeral-link warning + truncation warning into one
+    // dialog so the user gets at most one modal interruption.
+    const warnings: string[] = [];
+    if (shortened && persistent === false) {
+      warnings.push(
+        "⚠ This link is stored in ephemeral memory on the analysis Space — " +
+          "it will stop working when the Space restarts (typically every few hours-to-days). " +
+          "Tell the recipient to open it soon. For persistent links, the Space owner can set " +
+          "HF_TOKEN + TG_SHARE_DATASET in the Space's secrets.",
+      );
+    }
     if (truncatedTableSummaries.length > 0) {
-      // One-off info dialog so the user knows what got trimmed.
-      // Skipped silently if everything fit.
-      alert(
-        "Share link embedded a truncated view of some tables — recipients see only the top rows:\n\n  • " +
+      warnings.push(
+        "Share link embedded a truncated view of some tables — recipients see only the top rows:\n  • " +
           truncatedTableSummaries.join("\n  • ") +
           "\n\nFor the full tables, send the CSV downloads (Custom → Download).",
       );
     }
+    if (warnings.length > 0) alert(warnings.join("\n\n"));
   } catch {
     prompt("Copy this URL:", finalUrl);
+  }
+});
+
+// Copy NG link — plain Neuroglancer permalink with just the viewer
+// state (camera + layers + selected segments). No tourguide DB, no
+// computed tables. Useful for sharing a view in a non-tourguide
+// context (Slack, papers, plain NG demo). Recipient pastes into any
+// Neuroglancer instance and lands on the same view.
+const NG_DEMO_BASE = "https://neuroglancer-demo.appspot.com/";
+copyNgBtn.addEventListener("click", async () => {
+  const ngState = viewer.getNgState();
+  if (!ngState) {
+    copyNgBtn.textContent = "✗ no NG state";
+    setTimeout(() => (copyNgBtn.textContent = "📋 Copy NG"), 2000);
+    return;
+  }
+  const url = `${NG_DEMO_BASE}#!${encodeURIComponent(JSON.stringify(ngState))}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    copyNgBtn.textContent = "✓ Copied NG link";
+    setTimeout(() => (copyNgBtn.textContent = "📋 Copy NG"), 2000);
+  } catch {
+    prompt("Copy this NG link:", url);
   }
 });
 

@@ -279,10 +279,17 @@ interface RemoteResponse {
  *  `?d=...&q=...#!{...}`) to the backend's share store and return a
  *  short id. Throws on failure so the caller can fall back to the
  *  full URL. */
+export interface ShareCreateResult {
+  id: string;
+  /** True when the backend wrote to persistent storage (HF Datasets).
+   *  False means /tmp fallback — link will die when the Space restarts. */
+  persistent: boolean;
+}
+
 export async function createShareLink(
   backendUrl: string,
   suffix: string,
-): Promise<string> {
+): Promise<ShareCreateResult> {
   const res = await fetch(new URL("api/share", ensureTrailingSlash(backendUrl)).toString(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -291,9 +298,9 @@ export async function createShareLink(
   if (!res.ok) {
     throw new Error(`share create failed: HTTP ${res.status}`);
   }
-  const body = (await res.json()) as { id?: string };
+  const body = (await res.json()) as { id?: string; persistent?: boolean };
   if (!body.id) throw new Error("share response missing id");
-  return body.id;
+  return { id: body.id, persistent: body.persistent === true };
 }
 
 /** Fetch a previously-stored permalink suffix by id. Returns the raw

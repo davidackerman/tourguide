@@ -73,11 +73,78 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days; survives idle Space sleep
 # across container cycle.
 SHARE_ROOT = Path(os.environ.get("TG_SHARE_ROOT", "/tmp/tourguide-shares"))
 SHARE_ROOT.mkdir(parents=True, exist_ok=True)
-SHARE_MAX_BYTES = 1_000_000  # 1 MB — generous; the largest realistic
-                              # permalink suffix is in the low-100s of KB.
+SHARE_MAX_BYTES = 10_000_000  # 10 MB — enough room for several
+                              # 5k-row tables in a single share without
+                              # forcing truncation past what the
+                              # frontend already does at the boundary.
 SHARE_ID_BYTES = 6  # 12 hex chars → 48 bits, plenty for collision-free
                     # ids at this scale and short enough to fit a chat
                     # message comfortably.
+
+# Optional persistent share storage via HF Datasets. Set both env vars
+# in the Space's secrets to activate:
+#   HF_TOKEN           — token with write access to TG_SHARE_DATASET
+#   TG_SHARE_DATASET   — repo id, e.g. "ackermand/tourguide-shares"
+# Without these, shares write to /tmp (ephemeral; cleared on Space
+# restart). Reads always try HF first regardless of where the original
+# write went, so links survive across container cycles when HF is
+# configured.
+HF_SHARE_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+HF_SHARE_DATASET = os.environ.get("TG_SHARE_DATASET", "").strip()
+try:
+    if HF_SHARE_TOKEN and HF_SHARE_DATASET:
+        from huggingface_hub import HfApi  # noqa: WPS433
+        _hf_share_api: Optional[Any] = HfApi(token=HF_SHARE_TOKEN)
+    else:
+        _hf_share_api = None
+except Exception as _hf_imp_exc:  # noqa: BLE001
+    _hf_share_api = None
+    log.warning("huggingface_hub import failed; share storage stays on /tmp: %s", _hf_imp_exc)
+HF_SHARES_AVAILABLE = _hf_share_api is not None
+log.info(
+    "Share storage: %s",
+    f"HF Datasets {HF_SHARE_DATASET} (persistent)"
+    if HF_SHARES_AVAILABLE
+    else "/tmp (ephemeral — set HF_TOKEN + TG_SHARE_DATASET for persistent)",
+)
+
+
+async def _share_write_hf(share_id: str, suffix: str) -> bool:
+    """Upload share content to HF Dataset. Returns True on success."""
+    if not HF_SHARES_AVAILABLE or _hf_share_api is None:
+        return False
+    try:
+        await asyncio.to_thread(
+            _hf_share_api.upload_file,
+            path_or_fileobj=suffix.encode("utf-8"),
+            path_in_repo=f"shares/{share_id}.txt",
+            repo_id=HF_SHARE_DATASET,
+            repo_type="dataset",
+            commit_message=f"share {share_id}",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("HF share write failed for %s: %s — falling back to /tmp", share_id, exc)
+        return False
+
+
+async def _share_read_hf(share_id: str) -> Optional[str]:
+    """Fetch share content from HF Dataset. Returns None if not found / errored."""
+    if not HF_SHARES_AVAILABLE or _hf_share_api is None:
+        return None
+    try:
+        path = await asyncio.to_thread(
+            _hf_share_api.hf_hub_download,
+            repo_id=HF_SHARE_DATASET,
+            filename=f"shares/{share_id}.txt",
+            repo_type="dataset",
+        )
+        return Path(path).read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        # 404 / network blip / token revoked — all OK to swallow,
+        # we'll fall through to /tmp on the read side.
+        log.info("HF share read miss for %s: %s", share_id, exc)
+        return None
 
 # Caps exposed to the frontend via /health — match the plan.
 MAX_CONCURRENT_ANALYSES = 2
@@ -1200,10 +1267,11 @@ async def create_share(body: ShareCreateBody) -> Dict[str, Any]:
     """Store a permalink suffix and return a short id.
 
     Suffix is the everything-after-the-page-URL string the frontend
-    builds — e.g. `?d=...&q=...#!{...}`. We just write it to disk
-    verbatim; no parsing here, the frontend's decode logic handles
-    that on the load side. Caps payload size to keep a flood from
-    filling /tmp.
+    builds — e.g. `?d=...&q=...#!{...}`. When HF Datasets is
+    configured (HF_TOKEN + TG_SHARE_DATASET env vars), uploads there
+    for persistence across Space restarts. Falls back to /tmp
+    otherwise. The response's `persistent` field tells the frontend
+    which path was used so it can warn the user about ephemerality.
     """
     if len(body.suffix.encode("utf-8")) > SHARE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="share payload too large")
@@ -1211,11 +1279,17 @@ async def create_share(body: ShareCreateBody) -> Dict[str, Any]:
     # tries rather than spin.
     for _ in range(5):
         sid = uuid.uuid4().hex[: SHARE_ID_BYTES * 2]
+        # Try HF first (persistent); fall back to /tmp on failure or
+        # when not configured. Even when HF wrote successfully, we
+        # ALSO keep a /tmp copy so a hot recipient hit doesn't have
+        # to round-trip to HF for the read.
+        wrote_hf = await _share_write_hf(sid, body.suffix)
         target = SHARE_ROOT / f"{sid}.txt"
         if target.exists():
+            # collision with /tmp file — try a new id
             continue
         target.write_text(body.suffix, encoding="utf-8")
-        return {"id": sid}
+        return {"id": sid, "persistent": wrote_hf}
     raise HTTPException(status_code=500, detail="couldn't allocate share id")
 
 
@@ -1227,10 +1301,21 @@ async def get_share(share_id: str) -> Dict[str, Any]:
     # whatever's in the URL.
     if not re.fullmatch(r"[A-Za-z0-9_-]+", share_id):
         raise HTTPException(status_code=400, detail="invalid share id")
+    # /tmp first (fast hot path for shares created on this container);
+    # fall back to HF Datasets when /tmp has been cleared (Space
+    # restart) or the share was created on a different container.
     target = SHARE_ROOT / f"{share_id}.txt"
-    if not target.exists():
+    if target.exists():
+        return {"suffix": target.read_text(encoding="utf-8")}
+    content = await _share_read_hf(share_id)
+    if content is None:
         raise HTTPException(status_code=404, detail="share not found")
-    return {"suffix": target.read_text(encoding="utf-8")}
+    # Warm /tmp for subsequent reads on this container.
+    try:
+        target.write_text(content, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"suffix": content}
 
 
 # --- Dev entrypoint ----------------------------------------------------------
