@@ -1275,22 +1275,40 @@ async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
     # dropped the .s3.amazonaws.com part and produced URLs that resolve
     # to nothing — which is why scale discovery was returning 404.
     base_url = _s3_to_https(raw).rstrip("/")
+    log.info("inspect-source: base_url=%s", base_url)
     # First read root attributes — CellMap's multiscale dir sometimes
-    # lists explicit scales here; otherwise we scan s0, s1, …
+    # lists explicit scales here; otherwise we scan s0, s1, … and also
+    # try "0", "1", … (some N5 datasets use unprefixed integers).
     root_attrs = await _fetch_json(f"{base_url}/attributes.json") or {}
+    log.info("inspect-source: root attrs keys=%s", list(root_attrs.keys()))
     scale_paths: List[str] = []
+    probe_attempts: List[Dict[str, Any]] = []
     if isinstance(root_attrs.get("scales"), list):
         scale_paths = [str(s) for s in root_attrs["scales"]]
+        probe_attempts.append({"strategy": "root attrs scales[]", "found": len(scale_paths)})
     else:
-        # Probe s0..s19 (CellMap caps lower than this; 20 is plenty).
-        for i in range(20):
-            sp = f"s{i}"
-            probe = await _fetch_json(f"{base_url}/{sp}/attributes.json")
-            if probe is None:
+        for prefix_style in ("s", ""):  # try "s0" first, then "0"
+            tried: List[str] = []
+            for i in range(20):
+                sp = f"{prefix_style}{i}"
+                tried.append(sp)
+                probe = await _fetch_json(f"{base_url}/{sp}/attributes.json")
+                if probe is None:
+                    break
+                scale_paths.append(sp)
+            probe_attempts.append(
+                {"strategy": f"probe '{prefix_style}0..N'", "tried": tried[:3], "found": len(scale_paths)},
+            )
+            if scale_paths:
                 break
-            scale_paths.append(sp)
     if not scale_paths:
-        raise HTTPException(status_code=404, detail=f"no scales found at {raw}")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no scales found at {raw}. base_url={base_url}, "
+                f"root attrs keys={list(root_attrs.keys())}, attempts={probe_attempts}"
+            ),
+        )
 
     # First pass: get voxel size of the finest scale so coarser scales
     # can report a sensible downsample factor.
