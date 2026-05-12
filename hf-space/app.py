@@ -91,9 +91,9 @@ SHARE_ID_BYTES = 6  # 12 hex chars → 48 bits, plenty for collision-free
 # configured.
 HF_SHARE_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_SHARE_DATASET = os.environ.get("TG_SHARE_DATASET", "").strip()
-# Diagnostic — lets us tell whether the env vars failed to reach the
-# container vs failed to import vs failed to authenticate. Token is
-# masked; only the prefix + length are logged.
+# One-line startup sanity probe so future "is persistence wired?"
+# diagnoses don't require redeploying with a debug build. Token is
+# masked; only its prefix + length are logged.
 _tok_dbg = (
     f"set ({HF_SHARE_TOKEN[:4]}…, len={len(HF_SHARE_TOKEN)})"
     if HF_SHARE_TOKEN
@@ -103,15 +103,6 @@ log.info(
     "Share storage env check: HF_TOKEN=%s, TG_SHARE_DATASET=%r",
     _tok_dbg, HF_SHARE_DATASET,
 )
-# Dump every env var name (NOT value) the container has that could
-# plausibly be the dataset config — helps catch a typo / invisible
-# character / wrong-prefix case where Secrets/Variables are saved
-# under a slightly different name than the code reads.
-_matching_keys = sorted(
-    k for k in os.environ
-    if any(needle in k.upper() for needle in ("TG_", "SHARE", "DATASET", "TOURGUIDE"))
-)
-log.info("Share-related env keys present: %s", _matching_keys)
 try:
     if HF_SHARE_TOKEN and HF_SHARE_DATASET:
         from huggingface_hub import HfApi  # noqa: WPS433
