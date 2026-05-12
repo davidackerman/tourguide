@@ -1032,6 +1032,18 @@ async function execPythonOnLayers(
     scale: PrecomputedScale;
     offsetNm?: [number, number, number];
   }
+  // Probed but scale not yet chosen — scale depends on the resolved
+  // runtime (Pyodide ≤1.5 GB vs HF backend ≤5 GB), and we don't know
+  // that until after mustBeLocal/mustBeBackend + size-based routing.
+  // Mirrors what the zarr path does: probe first, pick scale later.
+  interface PendingPrecomputedVolume {
+    varName: string;
+    baseUrl: string;
+    volumeInfo: PrecomputedVolumeInfo;
+    offsetNm?: [number, number, number];
+    layerName: string;
+  }
+  const pendingPrecomputedVolumes: PendingPrecomputedVolume[] = [];
   const resolvedPrecomputedVolumes: PrecomputedVolumeResolved[] = [];
   for (const name of layerNames) {
     const layer = ctx.descriptor.layers.find((l) => l.name === name);
@@ -1054,22 +1066,17 @@ async function execPythonOnLayers(
         let volumeInfo: PrecomputedVolumeInfo | null = null;
         if (info) volumeInfo = parsePrecomputedVolumeInfo(info.raw);
         if (volumeInfo && volumeInfo.scales.length > 0) {
-          // Match the existing zarr path's local-runtime budget. The
-          // worker can't go bigger than Pyodide's heap.
-          const scale = pickScaleForBudget(volumeInfo, SAFE_INPUT_BYTES);
-          if (!scale) {
-            const finest = volumeInfo.scales[0];
-            const coarsest = volumeInfo.scales[volumeInfo.scales.length - 1];
-            throw new Error(
-              `Layer '${name}' precomputed volume has no scale ≤ ${(SAFE_INPUT_BYTES / 1e9).toFixed(2)} GB. Finest: ${(finest.approxBytes / 1e9).toFixed(2)} GB, coarsest: ${(coarsest.approxBytes / 1e9).toFixed(3)} GB. Probably an unsupported dtype/encoding — describe_dataset will say which.`,
-            );
-          }
+          // Defer scale-picking until after runtime resolution so the
+          // chosen scale matches the actual byte budget (Pyodide 1.5 GB
+          // vs HF backend 5 GB). Picking up front with SAFE_INPUT_BYTES
+          // forced backend runs to a needlessly coarse scale.
           const safeVar = name.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
-          resolvedPrecomputedVolumes.push({
+          pendingPrecomputedVolumes.push({
             varName: safeVar,
             baseUrl: precomputedSrc,
-            scale,
+            volumeInfo,
             offsetNm: layer.transform_offset_nm,
+            layerName: name,
           });
           continue;
         }
@@ -1370,6 +1377,13 @@ async function execPythonOnLayers(
       // route through backend purely for size.
       if (insp.scales[0]) finestBytes.push(insp.scales[0].approxBytes);
     }
+    // Include precomputed-volume layers' finest scales in the routing
+    // decision too. Without this, a hemibrain-only query (no zarr
+    // layers) would always have totalFinest=0 and go local regardless
+    // of how big the precomputed volume actually is.
+    for (const p of pendingPrecomputedVolumes) {
+      if (p.volumeInfo.scales[0]) finestBytes.push(p.volumeInfo.scales[0].approxBytes);
+    }
 
     // Effective runtime resolution.
     let runtime: "local" | "backend";
@@ -1402,6 +1416,26 @@ async function execPythonOnLayers(
       }
     }
     const targetBytes = runtime === "backend" ? BACKEND_TARGET_BYTES : LOCAL_TARGET_BYTES;
+
+    // Now that runtime + targetBytes are known, pick precomputed-volume
+    // scales. Backend route → finer scales (up to 5 GB); local route →
+    // coarser scales (≤1.5 GB). Same picker the zarr path uses.
+    for (const p of pendingPrecomputedVolumes) {
+      const scale = pickScaleForBudget(p.volumeInfo, targetBytes);
+      if (!scale) {
+        const finest = p.volumeInfo.scales[0];
+        const coarsest = p.volumeInfo.scales[p.volumeInfo.scales.length - 1];
+        throw new Error(
+          `Layer '${p.layerName}' precomputed volume has no scale ≤ ${(targetBytes / 1e9).toFixed(2)} GB (${runtime} runtime). Finest: ${(finest.approxBytes / 1e9).toFixed(2)} GB, coarsest: ${(coarsest.approxBytes / 1e9).toFixed(3)} GB. Probably an unsupported dtype/encoding — describe_dataset will say which.`,
+        );
+      }
+      resolvedPrecomputedVolumes.push({
+        varName: p.varName,
+        baseUrl: p.baseUrl,
+        scale,
+        offsetNm: p.offsetNm,
+      });
+    }
 
     // Per-layer scale: pick the FINEST scale that still fits the
     // chosen runtime's byte budget. If even the coarsest is bigger
