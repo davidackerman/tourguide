@@ -1171,47 +1171,92 @@ async def _fetch_json(url: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _voxel_nm_xyz_from_attrs(attrs: Dict[str, Any], default: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    """Pull a per-axis voxel size in nm from a CellMap-style N5 attrs dict.
+def _extract_axes_order(root_attrs: Dict[str, Any]) -> List[str]:
+    """Read the axis order from N5 root attributes.
 
-    Convention: `pixelResolution.dimensions` is in array-axis order
-    (typically ZYX), so we reverse to get XYZ. Falls back to the
-    transform.scale or the supplied default."""
+    CellMap N5 has TWO conventions for axis info:
+      - root 'axes' as list of strings or dicts with 'name'
+      - multiscales[0].axes (OME-NGFF) — list of dicts with 'name'
+    Both should be in the same array-axis order (i.e. matching
+    arr.shape positions). Returns lowercase axis names; falls back
+    to ['z','y','x'] if metadata is missing.
+    """
+    names: List[str] = []
+    axes = root_attrs.get("axes")
+    if isinstance(axes, list):
+        for a in axes:
+            if isinstance(a, str):
+                names.append(a.lower())
+            elif isinstance(a, dict) and isinstance(a.get("name"), str):
+                names.append(a["name"].lower())
+    if not names:
+        ms = root_attrs.get("multiscales")
+        if isinstance(ms, list) and ms and isinstance(ms[0], dict):
+            ms_axes = ms[0].get("axes")
+            if isinstance(ms_axes, list):
+                for a in ms_axes:
+                    if isinstance(a, dict) and isinstance(a.get("name"), str):
+                        names.append(a["name"].lower())
+    return names or ["z", "y", "x"]
+
+
+def _voxel_nm_xyz_from_attrs(
+    attrs: Dict[str, Any],
+    axes_order: List[str],
+    default: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    """Pull per-axis voxel size in nm, aligned to xyz via axes_order.
+
+    `pixelResolution.dimensions` and `transform.scale` are in array-axis
+    order (i.e. same order as axes_order). We index by position into
+    the dims array using the axis name."""
+    by_axis: Dict[str, float] = {}
     pr = attrs.get("pixelResolution")
     if isinstance(pr, dict):
         dims = pr.get("dimensions")
-        if isinstance(dims, list) and len(dims) >= 3:
-            try:
-                z, y, x = float(dims[0]), float(dims[1]), float(dims[2])
-                return (x, y, z)
-            except (TypeError, ValueError):
-                pass
-    tr = attrs.get("transform")
-    if isinstance(tr, dict):
-        sc = tr.get("scale")
-        if isinstance(sc, list) and len(sc) >= 3:
-            try:
-                z, y, x = float(sc[0]), float(sc[1]), float(sc[2])
-                return (x, y, z)
-            except (TypeError, ValueError):
-                pass
-    return default
+        if isinstance(dims, list):
+            for i in range(min(len(dims), len(axes_order))):
+                try:
+                    by_axis[axes_order[i]] = float(dims[i])
+                except (TypeError, ValueError):
+                    pass
+    if not by_axis:
+        tr = attrs.get("transform")
+        if isinstance(tr, dict):
+            sc = tr.get("scale")
+            if isinstance(sc, list):
+                for i in range(min(len(sc), len(axes_order))):
+                    try:
+                        by_axis[axes_order[i]] = float(sc[i])
+                    except (TypeError, ValueError):
+                        pass
+    return (
+        by_axis.get("x", default[0]),
+        by_axis.get("y", default[1]),
+        by_axis.get("z", default[2]),
+    )
 
 
-def _offset_nm_xyz_from_attrs(attrs: Dict[str, Any]) -> Tuple[float, float, float]:
-    """Pull a per-axis offset in nm from CellMap-style N5 attrs.
-
-    `transform.translate` is array-axis order; reverse to XYZ."""
+def _offset_nm_xyz_from_attrs(
+    attrs: Dict[str, Any],
+    axes_order: List[str],
+) -> Tuple[float, float, float]:
+    """Pull per-axis offset in nm, aligned to xyz via axes_order."""
+    by_axis: Dict[str, float] = {}
     tr = attrs.get("transform")
     if isinstance(tr, dict):
         tl = tr.get("translate")
-        if isinstance(tl, list) and len(tl) >= 3:
-            try:
-                z, y, x = float(tl[0]), float(tl[1]), float(tl[2])
-                return (x, y, z)
-            except (TypeError, ValueError):
-                pass
-    return (0.0, 0.0, 0.0)
+        if isinstance(tl, list):
+            for i in range(min(len(tl), len(axes_order))):
+                try:
+                    by_axis[axes_order[i]] = float(tl[i])
+                except (TypeError, ValueError):
+                    pass
+    return (
+        by_axis.get("x", 0.0),
+        by_axis.get("y", 0.0),
+        by_axis.get("z", 0.0),
+    )
 
 
 async def _inspect_scale(
@@ -1220,6 +1265,7 @@ async def _inspect_scale(
     scale_path: str,
     finest_voxel_nm_xyz: Optional[Tuple[float, float, float]],
     default_voxel_nm: Tuple[float, float, float],
+    axes_order: List[str],
 ) -> Optional[Dict[str, Any]]:
     """Open one scale with tensorstore, build a LayerScaleInfo dict.
 
@@ -1249,10 +1295,13 @@ async def _inspect_scale(
     shape = [int(s) for s in arr.shape]
     itemsize = arr.dtype.numpy_dtype.itemsize
     approx_bytes = int(itemsize * int(np.prod(shape)))
-    # Voxel/offset from this scale's attributes.json (CellMap N5 conv)
+    # Voxel/offset from this scale's attributes.json (CellMap N5 conv).
+    # pixelResolution.dimensions / transform.translate are stored in
+    # array-axis order (matching arr.shape), so we map them to xyz via
+    # axes_order, NOT by reversing.
     attrs = await _fetch_json(f"{base_url.rstrip('/')}/{scale_path}/attributes.json") or {}
-    voxel_nm = _voxel_nm_xyz_from_attrs(attrs, default_voxel_nm)
-    offset_nm = _offset_nm_xyz_from_attrs(attrs)
+    voxel_nm = _voxel_nm_xyz_from_attrs(attrs, axes_order, default_voxel_nm)
+    offset_nm = _offset_nm_xyz_from_attrs(attrs, axes_order)
     # Downsample ratio relative to finest if known.
     if finest_voxel_nm_xyz:
         ds = tuple(voxel_nm[i] / finest_voxel_nm_xyz[i] if finest_voxel_nm_xyz[i] else 1.0 for i in range(3))
@@ -1339,14 +1388,23 @@ async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
             ),
         )
 
+    # Pull axis order from the metadata. CellMap N5 stores both an
+    # `axes` field at root AND multiscales[0].axes — either tells us
+    # which axis is which position in arr.shape. Without this, mapping
+    # pixelResolution.dimensions to xyz is guesswork (the previous
+    # code blindly reversed it, which was correct for some datasets
+    # and wrong for others — producing 'off' COM coords).
+    axes_order = _extract_axes_order(root_attrs)
+    log.info("inspect-source: axes_order=%s", axes_order)
+
     # First pass: get voxel size of the finest scale so coarser scales
     # can report a sensible downsample factor.
     finest_attrs = await _fetch_json(f"{base_url}/{scale_paths[0]}/attributes.json") or {}
-    finest_voxel = _voxel_nm_xyz_from_attrs(finest_attrs, body.defaultVoxelNm)
+    finest_voxel = _voxel_nm_xyz_from_attrs(finest_attrs, axes_order, body.defaultVoxelNm)
 
     scales: List[Dict[str, Any]] = []
     for sp in scale_paths:
-        info = await _inspect_scale(kvstore, base_url, sp, finest_voxel, body.defaultVoxelNm)
+        info = await _inspect_scale(kvstore, base_url, sp, finest_voxel, body.defaultVoxelNm, axes_order)
         if info is not None:
             scales.append(info)
     if not scales:
@@ -1359,10 +1417,9 @@ async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
         )
     return {
         "isMultiscale": len(scales) > 1,
-        # Assume ZYX storage order (CellMap convention). The frontend
-        # uses axes only for the scale-picker UI label; runtime layer
-        # access converts via axesOrder on the LayerSpec.
-        "axes": [{"name": "z"}, {"name": "y"}, {"name": "x"}],
+        # Axes in the real array-axis order so the frontend's
+        # _layer_to_globals can align spacing/offsets correctly.
+        "axes": [{"name": n} for n in axes_order],
         "scales": scales,
     }
 
