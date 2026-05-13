@@ -34,6 +34,13 @@ export interface AgentTraceItem {
   args: Record<string, unknown>;
   result?: unknown;
   error?: string;
+  // Time the LLM spent generating this step's tool-call JSON (stream
+  // start → stream end). Excludes tool execution. Undefined for
+  // the synthetic `done` trace item, which has no LLM call.
+  llmMs?: number;
+  // Time the tool executor itself took. Undefined for non-executed
+  // steps (parse errors, done).
+  toolMs?: number;
 }
 
 export interface AgentCallbacks {
@@ -2516,10 +2523,10 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         }
       },
     });
-    const stepElapsed = ((performance.now() - stepStart) / 1000).toFixed(1);
+    const llmMs = performance.now() - stepStart;
     const apiCalls = GeminiBackend.requestCount - startReqCount;
     const apiNote = apiCalls > 0 ? ` · ${apiCalls} API call${apiCalls === 1 ? "" : "s"} this turn` : "";
-    console.debug(`[agent] step ${i + 1}: done in ${stepElapsed}s (${tokenCount} tokens)${apiNote}`);
+    console.debug(`[agent] step ${i + 1}: done in ${(llmMs / 1000).toFixed(1)}s (${tokenCount} tokens)${apiNote}`);
 
     let call: ToolCall;
     try {
@@ -2568,6 +2575,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         tool: call.tool,
         args: call.args ?? {},
         error: `Unknown tool: ${call.tool}`,
+        llmMs,
       };
       ctx.callbacks.onTrace?.(trace);
       messages.push({ role: "assistant", content: JSON.stringify(call) });
@@ -2579,10 +2587,12 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     }
 
     messages.push({ role: "assistant", content: JSON.stringify(call) });
-    const trace: AgentTraceItem = { tool: call.tool, args: call.args ?? {} };
+    const trace: AgentTraceItem = { tool: call.tool, args: call.args ?? {}, llmMs };
+    const toolStart = performance.now();
     try {
       const result = await executor(call.args ?? {}, ctx);
       trace.result = result;
+      trace.toolMs = performance.now() - toolStart;
       ctx.callbacks.onTrace?.(trace);
       // answer / make_plot are clearly user-visible. fly_to and
       // highlight_segments also produce a visible viewer change, so
@@ -2619,6 +2629,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     } catch (err) {
       const errMsg = (err as Error).message;
       trace.error = errMsg;
+      trace.toolMs = performance.now() - toolStart;
       ctx.callbacks.onTrace?.(trace);
       // Synthesize a hint specific to common error shapes so the model
       // can self-correct. Small WebLLM models can't translate raw

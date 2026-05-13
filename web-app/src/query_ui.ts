@@ -517,6 +517,18 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     card.statusEl.className = `turn-status ${kind}`;
   };
 
+  // Pretty-print ms — sub-second uses ms, second+ uses s with 1 decimal.
+  const fmtMs = (ms: number): string =>
+    ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+
+  // One-line turn timing for the status: "(4.2 s · think 1.8 s · tools 2.4 s)".
+  const formatTurnTiming = (totalMs: number, llmTotalMs: number, toolTotalMs: number): string => {
+    const parts = [fmtMs(totalMs)];
+    if (llmTotalMs > 0) parts.push(`think ${fmtMs(llmTotalMs)}`);
+    if (toolTotalMs > 0) parts.push(`tools ${fmtMs(toolTotalMs)}`);
+    return `(${parts.join(" · ")})`;
+  };
+
   const renderPlot = (
     card: TurnCard,
     pngDataUrl: string,
@@ -651,9 +663,18 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     const openBtn = isPythonTool
       ? `<button class="btn-tiny agent-trace-open-step" type="button" title="Open this code in the Custom Python dialog">🐍 Edit</button>`
       : "";
+    // Per-step timing badge: "think 1.8s · tool 2.4s". Skipped when both
+    // are undefined (e.g. unknown-tool error before any timing was set).
+    const llmStr = typeof item.llmMs === "number" ? `think ${fmtMs(item.llmMs)}` : "";
+    const toolStr = typeof item.toolMs === "number" ? `tool ${fmtMs(item.toolMs)}` : "";
+    const timingStr = [llmStr, toolStr].filter(Boolean).join(" · ");
+    const timingBadge = timingStr
+      ? `<span class="agent-trace-step-timing" title="LLM stream time + tool execution time">${escapeHtml(timingStr)}</span>`
+      : "";
     row.innerHTML = `
       <div class="agent-trace-item-header">
         <span class="agent-trace-tool">${escapeHtml(item.tool)}</span>
+        ${timingBadge}
         <button class="btn-tiny agent-trace-copy-step" type="button" title="Copy this step">📋</button>
         ${openBtn}
         <span class="agent-trace-step-status" data-step-status></span>
@@ -911,6 +932,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     let turnSummary = "";
     const abortController = new AbortController();
     currentAbortController = abortController;
+    const turnStart = performance.now();
     try {
       await runAgent(question, {
         db,
@@ -952,14 +974,21 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
           onAskUser: (prompt, fields) => renderAskUser(card, prompt, fields, abortController.signal),
         },
       });
+      // Aggregate per-step timings into a turn-level breakdown so the
+      // user can see where the time went. LLM = thinking; tools =
+      // network + analysis backend + worker.
+      const totalMs = performance.now() - turnStart;
+      const llmTotal = card.traceItems.reduce((s, t) => s + (t.llmMs ?? 0), 0);
+      const toolTotal = card.traceItems.reduce((s, t) => s + (t.toolMs ?? 0), 0);
+      const timing = formatTurnTiming(totalMs, llmTotal, toolTotal);
       if (!answeredOrFlew) {
-        setStatus(card, "Agent finished without delivering an answer.", "");
+        setStatus(card, `Agent finished without delivering an answer. ${timing}`, "");
       } else {
         // Always end with a clear "done" — overwrites any leftover
         // "Step N: writing answer …" that was hanging around when the
         // executor returned. Green "ok" styling so it's visually
         // distinct from the in-flight pending state.
-        setStatus(card, "✓ Done.", "ok");
+        setStatus(card, `✓ Done ${timing}`, "ok");
       }
       sessionTurns.push({ question, summary: turnSummary || "(no visible result)" });
     } catch (err) {

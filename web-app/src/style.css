@@ -1526,6 +1526,13 @@ input.api-key {
   font-weight: 600;
 }
 
+.agent-trace-step-timing {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  margin-left: 0.4rem;
+}
+
 .agent-trace-args,
 .agent-trace-result {
   color: var(--fg-dim);
