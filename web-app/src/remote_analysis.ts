@@ -186,6 +186,18 @@ export interface RemoteRunBody {
     voxelNm: [number, number, number];
     offsetNm: [number, number, number];
   }[];
+  // Precomputed segmentation volumes. Backend uses tensorstore's
+  // neuroglancer_precomputed driver to read these — no chunk size /
+  // encoding / sharding metadata needed on the wire (tensorstore
+  // re-reads the info file from baseUrl). Empty / omitted is fine.
+  precomputedVolumeLayers?: {
+    varName: string;
+    baseUrl: string;
+    scaleKey: string;
+    axesOrder: string[];
+    voxelNm: [number, number, number];
+    offsetNm: [number, number, number];
+  }[];
   tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
   code: string;
   timeoutMs: number;
@@ -267,10 +279,59 @@ interface RemoteResponse {
  *  `?d=...&q=...#!{...}`) to the backend's share store and return a
  *  short id. Throws on failure so the caller can fall back to the
  *  full URL. */
+/** Ask the HF backend to probe a remote zarr/n5 source for its
+ *  multiscale shape. Used when the browser worker can't read the
+ *  source format (currently N5). Response matches the worker's
+ *  LayerInspection shape so the existing scale-picker can consume
+ *  it unchanged. */
+export async function inspectSourceRemote(
+  backendUrl: string,
+  url: string,
+  defaultVoxelNm: [number, number, number],
+  signal?: AbortSignal,
+): Promise<{
+  isMultiscale: boolean;
+  axes: { name: string }[];
+  scales: {
+    path: string;
+    shape: number[];
+    voxelNm: [number, number, number];
+    offsetNm: [number, number, number];
+    downsample: [number, number, number];
+    approxBytes: number;
+  }[];
+}> {
+  const res = await fetch(new URL("api/inspect-source", ensureTrailingSlash(backendUrl)).toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, defaultVoxelNm }),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { detail?: unknown };
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(`Remote inspect failed (${res.status}): ${message.slice(0, 400)}`);
+  }
+  return await res.json();
+}
+
+export interface ShareCreateResult {
+  id: string;
+  /** True when the backend wrote to persistent storage (HF Datasets).
+   *  False means /tmp fallback — link will die when the Space restarts. */
+  persistent: boolean;
+}
+
 export async function createShareLink(
   backendUrl: string,
   suffix: string,
-): Promise<string> {
+): Promise<ShareCreateResult> {
   const res = await fetch(new URL("api/share", ensureTrailingSlash(backendUrl)).toString(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -279,9 +340,9 @@ export async function createShareLink(
   if (!res.ok) {
     throw new Error(`share create failed: HTTP ${res.status}`);
   }
-  const body = (await res.json()) as { id?: string };
+  const body = (await res.json()) as { id?: string; persistent?: boolean };
   if (!body.id) throw new Error("share response missing id");
-  return body.id;
+  return { id: body.id, persistent: body.persistent === true };
 }
 
 /** Fetch a previously-stored permalink suffix by id. Returns the raw

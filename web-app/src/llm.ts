@@ -14,6 +14,13 @@ export interface LLMCompleteOptions {
   // interruptGenerate() method we call. The throw is what unwinds the
   // agent loop's `await` so it can stop instead of running another step.
   signal?: AbortSignal;
+  // Mark the system prompt as cacheable for the call's lifetime (~5 min
+  // on Anthropic). Only honored by AnthropicBackend; other backends
+  // ignore it. Worth setting for callers that resend the same large
+  // system prompt several times in quick succession — namely the agent
+  // loop, which pays full input price on a ~20k-token system block
+  // every iteration.
+  cacheSystem?: boolean;
 }
 
 export interface LLMBackend {
@@ -646,6 +653,20 @@ export class OpenAICompatibleBackend implements LLMBackend {
   }
 }
 
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
+// Default model — Anthropic's IDs use hyphens, not dots
+// ('claude-sonnet-4-6', not 'claude-sonnet-4.6'). Centralized so
+// settings_ui / welcome_ui / the AnthropicBackend default all stay
+// in sync. Users can pick a different model via the dropdown after
+// hitting Refresh (lists what /v1/models returns for their key).
+export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
+
 // ---------------------------------------------------------------------------
 // Anthropic Claude (native API)
 // ---------------------------------------------------------------------------
@@ -664,7 +685,7 @@ export class AnthropicBackend implements LLMBackend {
   private apiKey: string;
   private model: string;
 
-  constructor(apiKey: string, model = "claude-sonnet-4.6") {
+  constructor(apiKey: string, model = DEFAULT_ANTHROPIC_MODEL) {
     this.apiKey = apiKey;
     this.model = model;
   }
@@ -674,6 +695,34 @@ export class AnthropicBackend implements LLMBackend {
   }
 
   static requestCount = 0;
+
+  // Running totals across this page session. Cache stats let us verify
+  // that the cache_control tag is actually taking effect; without this
+  // it's hard to tell from outside whether the second iteration of an
+  // agent loop hit the cached prefix or paid full input price.
+  static totals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+  };
+
+  static recordUsage(u: AnthropicUsage): void {
+    if (typeof u.input_tokens === "number") AnthropicBackend.totals.inputTokens += u.input_tokens;
+    if (typeof u.output_tokens === "number") AnthropicBackend.totals.outputTokens += u.output_tokens;
+    if (typeof u.cache_creation_input_tokens === "number")
+      AnthropicBackend.totals.cacheCreationTokens += u.cache_creation_input_tokens;
+    if (typeof u.cache_read_input_tokens === "number")
+      AnthropicBackend.totals.cacheReadTokens += u.cache_read_input_tokens;
+    // Per-call log so the user can verify cache hits in DevTools
+    // without waiting for the Anthropic Console (which lags). Streaming
+    // calls fire this twice — once at message_start (has input + cache
+    // counts) and once at message_delta (has output). Non-stream calls
+    // fire it once with everything.
+    console.log(
+      `[anthropic] usage: in=${u.input_tokens ?? "-"} out=${u.output_tokens ?? "-"} cache_create=${u.cache_creation_input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0}  · session totals: in=${AnthropicBackend.totals.inputTokens} out=${AnthropicBackend.totals.outputTokens} cache_create=${AnthropicBackend.totals.cacheCreationTokens} cache_read=${AnthropicBackend.totals.cacheReadTokens}`,
+    );
+  }
 
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
     const useStream = !!options.onToken;
@@ -697,7 +746,23 @@ export class AnthropicBackend implements LLMBackend {
       stream: useStream,
       temperature: options.temperature ?? 0.1,
     };
-    if (systemParts.length > 0) body.system = systemParts.join("\n\n");
+    if (systemParts.length > 0) {
+      // When cacheSystem is set, send the system prompt as a single
+      // content block tagged cache_control:ephemeral. Anthropic caches
+      // the prefix for ~5 minutes; subsequent calls with the same
+      // system text hit the cache at $0.30/M instead of $3/M. The
+      // minimum cacheable size is 1024 tokens (Sonnet/Opus) — smaller
+      // prompts get the tag ignored, no error. Last-message block also
+      // gets tagged so the user turn extends the cached prefix on
+      // repeated calls within the same agent loop.
+      if (options.cacheSystem) {
+        body.system = [
+          { type: "text", text: systemParts.join("\n\n"), cache_control: { type: "ephemeral" } },
+        ];
+      } else {
+        body.system = systemParts.join("\n\n");
+      }
+    }
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -737,7 +802,9 @@ export class AnthropicBackend implements LLMBackend {
     if (!useStream) {
       const data = (await res.json()) as {
         content?: Array<{ type?: string; text?: string }>;
+        usage?: AnthropicUsage;
       };
+      if (data.usage) AnthropicBackend.recordUsage(data.usage);
       const text = (data.content ?? [])
         .filter((c) => c.type === "text")
         .map((c) => c.text ?? "")
@@ -769,6 +836,8 @@ export class AnthropicBackend implements LLMBackend {
           const chunk = JSON.parse(json) as {
             type?: string;
             delta?: { type?: string; text?: string };
+            message?: { usage?: AnthropicUsage };
+            usage?: AnthropicUsage;
           };
           if (chunk.type === "content_block_delta" && chunk.delta?.type === "text_delta") {
             const t = chunk.delta.text ?? "";
@@ -776,6 +845,14 @@ export class AnthropicBackend implements LLMBackend {
               accumulated += t;
               options.onToken?.(t, accumulated);
             }
+          } else if (chunk.type === "message_delta" && chunk.usage) {
+            // Anthropic's SSE includes the same input/cache stats in
+            // BOTH message_start and message_delta, with output_tokens
+            // updated to the final cumulative count in message_delta.
+            // Recording both events double-counted everything in the
+            // running totals, so we only record once per call, at
+            // message_delta (which has the complete picture).
+            AnthropicBackend.recordUsage(chunk.usage);
           }
         } catch {
           // partial / malformed line — keep streaming
@@ -895,6 +972,55 @@ export async function listGeminiModels(apiKey: string): Promise<GeminiModelInfo[
   return out;
 }
 
+export interface AnthropicModelInfo {
+  id: string;
+  displayName: string;
+  createdAt?: string;
+}
+
+// Fetch the list of Anthropic models the given key can access. Hits
+// /v1/models, which is paginated; we follow has_more until exhausted.
+// Sorted by created_at desc so the newest model lands at the top of
+// the dropdown.
+export async function listAnthropicModels(apiKey: string): Promise<AnthropicModelInfo[]> {
+  if (!apiKey) throw new Error("API key required to list models");
+  const out: AnthropicModelInfo[] = [];
+  let afterId: string | undefined;
+  for (let i = 0; i < 10; i++) {
+    const params = new URLSearchParams({ limit: "100" });
+    if (afterId) params.set("after_id", afterId);
+    const res = await fetch(`https://api.anthropic.com/v1/models?${params}`, {
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`models.list failed (${res.status}): ${text.slice(0, 300)}`);
+    }
+    const data = (await res.json()) as {
+      data?: Array<{ id?: string; display_name?: string; created_at?: string }>;
+      has_more?: boolean;
+      last_id?: string;
+    };
+    for (const m of data.data ?? []) {
+      if (!m.id) continue;
+      out.push({
+        id: m.id,
+        displayName: m.display_name ?? m.id,
+        createdAt: m.created_at,
+      });
+    }
+    if (!data.has_more || !data.last_id) break;
+    afterId = data.last_id;
+  }
+  // Newest first by created_at (string ISO sorts correctly); tie-break by id.
+  out.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "") || a.id.localeCompare(b.id));
+  return out;
+}
+
 // Pull retryDelay out of Gemini's structured 429 error body. Shape:
 //   { "error": { "details": [{ "@type": ".../RetryInfo", "retryDelay": "30s" }] } }
 // Returns undefined if the field isn't present.
@@ -1002,7 +1128,7 @@ export const OPENAI_COMPATIBLE_PRESETS: Record<string, { url: string; placeholde
   },
   openrouter: {
     url: "https://openrouter.ai/api/v1",
-    placeholderModel: "anthropic/claude-sonnet-4.6",
+    placeholderModel: "anthropic/claude-sonnet-4-6",
     label: "OpenRouter (one key for Claude/Gemini/Llama/...)",
   },
   xai: {
@@ -1031,7 +1157,7 @@ const DEFAULT_SETTINGS: Settings = {
   // generous limits elsewhere.
   geminiModel: "gemini-3.1-flash-lite-preview",
   anthropicApiKey: "",
-  anthropicModel: "claude-sonnet-4.6",
+  anthropicModel: DEFAULT_ANTHROPIC_MODEL,
   openaiApiKey: "",
   openaiModel: "",
   openaiBaseUrl: "",

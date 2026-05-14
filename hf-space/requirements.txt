@@ -24,3 +24,7 @@ edt==2.4.1
 kimimaro==5.8.1
 zmesh==1.9.1
 python-multipart==0.0.12
+# Optional: enables persistent share-link storage via HF Datasets.
+# Set HF_TOKEN (write-scope) + TG_SHARE_DATASET (e.g. "user/tourguide-shares")
+# as Space secrets to activate; without these, shares fall back to /tmp.
+huggingface_hub==0.26.2

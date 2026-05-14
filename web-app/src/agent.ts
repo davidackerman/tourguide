@@ -7,19 +7,40 @@ import { loadPyodide } from "./plot.js";
 import type { DatasetDescriptor, DatasetLayer } from "./descriptor.js";
 import {
   AnalysisClient,
+  isN5Source,
   isZarrSource,
   normalizeZarrUrl,
   SAFE_INPUT_BYTES,
   type CustomAnalysisResult,
 } from "./analysis.js";
+import {
+  probePrecomputedInfo,
+  resolveBundledSubpath,
+  probeMeshInfo,
+  fetchSegmentProperties,
+} from "./precomputed_info.js";
+import { parseSharding, type ShardingSpec } from "./precomputed_sharded.js";
+import {
+  parsePrecomputedVolumeInfo,
+  pickScaleForBudget,
+  type PrecomputedScale,
+  type PrecomputedVolumeInfo,
+} from "./precomputed_volume_loader.js";
 import { loadSettings } from "./llm.js";
-import { postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
+import { inspectSourceRemote, postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
 export interface AgentTraceItem {
   tool: string;
   args: Record<string, unknown>;
   result?: unknown;
   error?: string;
+  // Time the LLM spent generating this step's tool-call JSON (stream
+  // start → stream end). Excludes tool execution. Undefined for
+  // the synthetic `done` trace item, which has no LLM call.
+  llmMs?: number;
+  // Time the tool executor itself took. Undefined for non-executed
+  // steps (parse errors, done).
+  toolMs?: number;
 }
 
 export interface AgentCallbacks {
@@ -232,19 +253,25 @@ const LAYER_GUIDE = (d: DatasetDescriptor): string => {
   return `Loaded Neuroglancer layers (THIS is what's actually loaded; never claim a layer exists if it isn't here, and never invent its resolution — call describe_dataset for per-layer scale info).
 
   sources= conventions:
-    zarr / zarr2 / zarr3 / n5 — multiscale array on a per-axis voxel grid.
-        python_on_layers loads the voxels as a numpy array.
-    precomputed — Neuroglancer precomputed segmentation. The volume
-        VOXELS are NOT readable by python_on_layers (no in-browser
-        reader for that format). Skeletons + meshes bundled inside
-        the precomputed dir often ARE accessible; check describe_dataset.
-    precomputed-mesh — 3D mesh per segment, not loadable as an array.
-    precomputed-skeleton — pass via 'skeletons' to python_on_layers
-        for length / branching / geodesic metrics.
-
-  For precomputed-volume layers, volume / regionprops on raw voxels
-  is unavailable. Skeletons cover length-style queries. Mesh-based
-  volume estimation isn't supported yet — tell the user.
+    zarr / zarr2 / zarr3 — multiscale array on a per-axis voxel grid.
+        python_on_layers loads the voxels as a numpy array. Runs on
+        Pyodide (browser) or HF backend depending on size.
+    n5 — multiscale array, CellMap's native format. Same loading shape
+        as zarr but ALWAYS runs on the HF backend (zarrita/Pyodide
+        can't read N5). Inspect goes through /api/inspect-source on
+        the backend, which uses tensorstore. Treat exactly like zarr
+        from a python_on_layers standpoint; just expect a slightly
+        slower first call when the backend is asleep.
+    precomputed — Neuroglancer precomputed segmentation. Tourguide
+        can read voxels (uint64 compressed_segmentation, sharded or
+        not), meshes (legacy unsharded + multilod_draco sharded or
+        unsharded), AND skeletons. describe_dataset returns
+        precomputed_volume_scales so you can see what's available.
+        Pass the layer's name in 'layers' to load voxels as numpy;
+        the agent auto-picks a scale that fits the local memory
+        budget. Skeletons go in 'skeletons', meshes in 'meshes'.
+    precomputed-mesh — standalone mesh source (not inside a seg dir).
+    precomputed-skeleton — standalone skeleton source.
 
   'ng_offset_nm' is the user-applied translation from the pasted NG
   state; tourguide adds it to per-object positions automatically so
@@ -265,6 +292,51 @@ ${d ? LAYER_GUIDE(d) : ""}
 ${db ? SCHEMA_GUIDE(db) : "No organelle database is loaded — run_sql / run_python / make_plot are unavailable, but describe_dataset, python_on_layers, fly_to, highlight_segments, answer, done all work."}
 
 NEVER GUESS DATASET PROPERTIES. If the user asks about a layer's resolution / scale / shape / dtype / available downsamplings, call describe_dataset(layer_name) and answer from its return value. Never invent numbers like "1 × 1 × 1 nm" — when uncertain, say so or call describe_dataset.
+
+ANSWER COUNT QUESTIONS FROM DATASET METADATA, NOT VOXEL READS. If the user asks "how many <objects> are in this layer" (e.g. "how many neurons / bodies / cells"), call describe_dataset() and use the layer's 'num_segments' field — that's the precomputed segment_properties count, returned for free. Counting via voxel read would download gigabytes for an answer the metadata already has. Use num_segments + answer + done.
+
+PRECOMPUTED SEGMENTATIONS ARE VOXEL-READABLE. Tourguide decodes compressed_segmentation chunks (sharded or unsharded) directly into a numpy ndarray — pass the layer's name in 'layers' to python_on_layers and you get an instance-label volume just like a zarr. The agent auto-picks a downsampled scale that fits the local memory budget; describe_dataset's precomputed_volume_scales shows what's available. NEVER refuse a regionprops / per-object-metric / connected-components question with "there is no zarr volume" — that reasoning is wrong for precomputed segmentations. The correct decision is: small known id list (≤~100) → meshes path; "every segment in the dataset" → voxels path at a coarse-enough scale.
+
+PRECOMPUTED-VOLUME LAYERS RUN ON EITHER RUNTIME. Both Pyodide (browser worker) and the HF backend can now read precomputed segmentation volumes — the backend uses tensorstore's neuroglancer_precomputed driver. So you can use Seung-lab packages (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh) WITH precomputed-volume layers — runtime will be forced to backend automatically. The only true conflict that remains is mesh / skeleton inputs (still browser-only) + Seung-lab packages — split those into two calls.
+
+FOR LABEL STATISTICS (volume / centroid / bbox), USE cc3d.statistics ON BACKEND. regionprops_table builds a Python object per label and runs a Python-level loop, so it's miserably slow at scale — on hemibrain at 512 nm (8.7M labels × 215M voxels) regionprops_table takes hours, cc3d.statistics finishes in ~10 seconds. ONE GOTCHA: cc3d.statistics requires max(label) < voxel_count (it allocates a flat array sized by max id). Real-world uint64 ids (hemibrain etc.) are 10+ digits, way over voxel count, so compact them first.
+
+  # ----- BACKEND (fastremap.renumber, ~3× faster than np.unique) -----
+  import cc3d, fastremap, numpy as np, pandas as pd
+  arr = layers["segmentation"]["array"]
+  spacing = layers["segmentation"]["spacing"]
+  offsets = layers["segmentation"]["offsets"]
+  ax = layers["segmentation"]["axes"]
+  arr_compact, mapping = fastremap.renumber(arr, in_place=False, preserve_zero=True)
+  # mapping is {original_id: compact_id}. Vectorize the reverse lookup so
+  # we can label the result rows with original segment ids:
+  keys = np.fromiter(mapping.keys(),   dtype=arr.dtype, count=len(mapping))
+  vals = np.fromiter(mapping.values(), dtype=np.uint32, count=len(mapping))
+  labels_by_compact = np.empty(len(mapping), dtype=arr.dtype)
+  labels_by_compact[vals] = keys
+  stats = cc3d.statistics(arr_compact)
+  counts = stats["voxel_counts"][1:]            # drop background (compact id 0)
+  cents  = stats["centroids"][1:]
+  labels = labels_by_compact[1:]                # original segment ids
+  vol_nm3 = counts * (spacing[0] * spacing[1] * spacing[2])
+  ix, iy, iz = ax.index("x"), ax.index("y"), ax.index("z")
+  df = pd.DataFrame({
+      "object_id": labels.astype(np.int64),
+      "volume_nm_3": vol_nm3,
+      "com_x_nm": cents[:, ix] * spacing[ix] + offsets[ix],
+      "com_y_nm": cents[:, iy] * spacing[iy] + offsets[iy],
+      "com_z_nm": cents[:, iz] * spacing[iz] + offsets[iz],
+  }).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
+
+  # ----- PYODIDE (no fastremap; use np.unique + np.searchsorted) -----
+  # Same idea, all numpy. Replace the fastremap block above with:
+  unique_ids = np.unique(arr)
+  arr_compact = np.searchsorted(unique_ids, arr).astype(np.uint32)
+  # Then run regionprops_table on arr_compact (no cc3d in Pyodide); map
+  # back via original_id = unique_ids[row.label]. Slower than cc3d.statistics
+  # but the only option in the browser.
+
+When to fall back to regionprops_table on backend: only when you genuinely need surface area / equivalent_diameter / intensity-weighted props / orientation. For just "measure size + position per object", cc3d.statistics is strictly better.
 
 ON EACH TURN, respond with a single JSON object describing one tool call:
 
@@ -343,7 +415,7 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
       2) python_on_layers (using the resolved radius)
       3) done
 
-  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
+  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], meshes?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
     HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
     precomputed skeletons) loaded as numpy arrays — use this when the
     user asks you to OPERATE ON LAYERS (erode, dilate, threshold,
@@ -379,6 +451,23 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
                     '<layer>_skel_missing_ids' lists IDs without files.
                     Always provide segment_ids explicitly — usually
                     from a prior run_sql ORDER BY <metric> LIMIT N.
+      'meshes'    — array of {"layer": str, "segment_ids": [...]} for
+                    layers with a precomputed-mesh source. Use when
+                    you have a small (≤~100) known id list and just
+                    need per-object surface area / volume / centroid.
+                    For "regionprops on EVERY segment" on a precomputed
+                    segmentation, prefer the voxel path ('layers')
+                    instead — mesh fetching one-at-a-time doesn't
+                    scale to thousands of objects. Binds
+                    '<layer>_mesh = {seg_id: {"vertices": (N,3) f32 nm,
+                    "faces": (M,3) u32}}'. Supports
+                    'neuroglancer_legacy_mesh' (unsharded only) and
+                    'neuroglancer_multilod_draco' (unsharded OR
+                    sharded — works for hemibrain / FAFB / MICrONS).
+                    describe_dataset reports mesh_format /
+                    mesh_sharded / mesh_analysis_supported so you can
+                    check before requesting. Sharded LEGACY format
+                    is the one variant that still isn't supported.
       'runtime'   — "auto" (default; harness picks). Use "backend" only
                     when the user explicitly asks for full resolution
                     or you know the dataset is huge. Use "local" only
@@ -386,7 +475,7 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
 
     RUNTIME AUTO-SELECTION (you don't usually need to think about this,
     but it shapes what code to write):
-      - 'skeletons' present                       → forced LOCAL
+      - 'skeletons' or 'meshes' present           → forced LOCAL
       - code imports cc3d / fastmorph / fastremap
         / edt / kimimaro / zmesh, OR sets
         _TG_NEW_MESH_LAYER                        → forced BACKEND
@@ -439,31 +528,33 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
 # mito is type=segmentation in describe_dataset → ALREADY instance-
 # labeled. Do NOT call cc3d.connected_components — that re-IDs from 1
 # and breaks the link to existing meshes/skeletons + click-to-fly.
-# Pass the array directly to regionprops_table; the resulting 'label'
-# column IS the existing segment id.
-import numpy as np, pandas as pd
-from skimage import measure as _sk
+# Use cc3d.statistics (one C++ pass, ~100× faster than regionprops_table
+# at scale). cc3d requires max(label) < voxel_count so we compact ids
+# first with fastremap.renumber (~3× faster than np.unique).
+import numpy as np, pandas as pd, cc3d, fastremap
 spacing = layers["mito"]["spacing"]   # array-axis order (z,y,x typically)
 offsets = layers["mito"]["offsets"]   # SAME axis order as spacing
-props = _sk.regionprops_table(
-    mito,                              # the already-labeled volume
-    spacing=spacing,
-    properties=("label", "area", "centroid", "bbox", "equivalent_diameter"),
-)
-df = pd.DataFrame(props)
-df["volume_nm_3"] = df["area"]
-# centroid-{0,1,2} are in the SAME axis order as spacing — z,y,x.
-# Convert to world-nm xyz, adding the per-axis offset.
 ax = layers["mito"]["axes"]
-def col(name):
-    return f"centroid-{ax.index(name)}"
-df["com_x_nm"] = df[col("x")] + offsets[ax.index("x")]
-df["com_y_nm"] = df[col("y")] + offsets[ax.index("y")]
-df["com_z_nm"] = df[col("z")] + offsets[ax.index("z")]
-df["object_id"] = df["label"].astype(int)   # original segment ids preserved
-_TG_TABLE = df[["object_id","volume_nm_3","com_x_nm","com_y_nm","com_z_nm","equivalent_diameter"]]
+arr_compact, mapping = fastremap.renumber(mito, in_place=False, preserve_zero=True)
+keys = np.fromiter(mapping.keys(),   dtype=mito.dtype, count=len(mapping))
+vals = np.fromiter(mapping.values(), dtype=np.uint32,  count=len(mapping))
+labels_by_compact = np.empty(len(mapping), dtype=mito.dtype)
+labels_by_compact[vals] = keys                 # compact id i -> original id
+stats = cc3d.statistics(arr_compact)
+counts = stats["voxel_counts"][1:]    # drop background (compact id 0)
+cents  = stats["centroids"][1:]
+labels = labels_by_compact[1:]        # original segment ids preserved
+ix, iy, iz = ax.index("x"), ax.index("y"), ax.index("z")
+df = pd.DataFrame({
+    "object_id": labels.astype(np.int64),
+    "volume_nm_3": counts * (spacing[0] * spacing[1] * spacing[2]),
+    "com_x_nm": cents[:, ix] * spacing[ix] + offsets[ix],
+    "com_y_nm": cents[:, iy] * spacing[iy] + offsets[iy],
+    "com_z_nm": cents[:, iz] * spacing[iz] + offsets[iz],
+}).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
+_TG_TABLE = df
 _TG_TABLE_NAME = "mito"
-_TG_NARRATION = f"Measured {len(df)} mito components."
+_TG_NARRATION = f"Measured {len(df):,} mito components."
 """
 
       "erode mito by 50 nm" -> python_on_layers
@@ -545,6 +636,52 @@ _TG_FLY = {"layer": "mito", "segment_id": str(int(top.object_id)),
            "pos": [float(top.com_x_nm), float(top.com_y_nm), float(top.com_z_nm)]}
 """
 
+      "volume of these segments" on a precomputed-mesh-only layer
+      (no zarr volume, no skeletons — describe_dataset reports
+      has_mesh=true, mesh_analysis_supported=true) ->
+        meshes=[{"layer":"segmentation","segment_ids":[...]}]
+        # NO 'layers' field — that would try to read precomputed
+        # volume voxels which isn't supported.
+        python="""
+# seg_mesh = {seg_id: {"vertices": (N,3) f32 nm, "faces": (M,3) u32}}
+# Compute volume + surface area + centroid from the triangle mesh:
+#   Volume via signed-tet integration: V = (1/6) * sum |v0 · (v1×v2)|
+#     for each triangle (works for closed meshes; absolute value
+#     handles non-CCW windings).
+#   Surface area: sum of 0.5 * |(v1-v0) × (v2-v0)|.
+#   Centroid: area-weighted triangle centroid.
+import numpy as np, pandas as pd
+rows = []
+for sid, m in seg_mesh.items():
+    v = m["vertices"]; f = m["faces"]
+    if len(f) == 0:
+        rows.append({"object_id": int(sid), "volume_nm_3": 0.0,
+                     "surface_area_nm_2": 0.0,
+                     "com_x_nm": 0.0, "com_y_nm": 0.0, "com_z_nm": 0.0})
+        continue
+    v0 = v[f[:, 0]]; v1 = v[f[:, 1]]; v2 = v[f[:, 2]]
+    cross = np.cross(v1 - v0, v2 - v0)
+    tri_area = 0.5 * np.linalg.norm(cross, axis=1)
+    surf_area = float(tri_area.sum())
+    tet_vol = np.einsum("ij,ij->i", v0, cross) / 6.0
+    vol = float(abs(tet_vol.sum()))
+    tri_cent = (v0 + v1 + v2) / 3.0
+    com = (tri_cent * tri_area[:, None]).sum(axis=0) / max(surf_area, 1e-12)
+    rows.append({
+        "object_id": int(sid),
+        "volume_nm_3": vol,
+        "surface_area_nm_2": surf_area,
+        "com_x_nm": float(com[0]),
+        "com_y_nm": float(com[1]),
+        "com_z_nm": float(com[2]),
+    })
+df = pd.DataFrame(rows).sort_values("volume_nm_3", ascending=False).reset_index(drop=True)
+_TG_TABLE = df
+_TG_TABLE_NAME = "segmentation"   # merges into existing table by object_id
+top = df.iloc[0]
+_TG_NARRATION = f"Largest segment by mesh volume: {int(top.object_id)} ({top.volume_nm_3/1e9:.2f} um^3)"
+"""
+
   answer(text: string)
     Deliver a final text answer to the user. Use for counts, means,
     informational questions. Keep it concise.
@@ -623,6 +760,27 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     skeletonize, mesh, contact area between two label volumes)
     OR persist a NEW LAYER ("add an eroded mito layer",
     "show me the boundaries of X")                              -> python_on_layers
+
+WHEN TO USE meshes= VS layers= IN python_on_layers:
+  Mesh path (cheap, per-object, closed-surface assumption):
+    - "what's the volume of body 1234"
+    - "top N segments by volume / surface area" — but ONLY if you
+      already know which IDs to load (max ~100 — fetching meshes
+      for thousands of segments is slow). For "top N over the
+      whole dataset", fall through to voxels OR rely on the
+      precomputed segment_properties metadata if it lists size.
+    - "centroid of body 1234"
+  Voxel path (use a zarr 'layers' input):
+    - "find ALL connected components" — meshes can't enumerate
+    - "what does layer A touch in layer B" — needs label volumes
+    - "make a new layer that is eroded / thresholded / ..."
+    - "regionprops on EVERY object" with no prior id list
+    - anything where you'd want a per-voxel mask
+  When the layer is precomputed-segmentation (e.g. hemibrain),
+  both paths work now: pass the layer in 'layers' for voxels (auto
+  scale-picked to fit local memory — be aware finest scales are
+  too big for whole-volume regionprops; coarse scales are usually
+  what you want) OR in 'meshes' with a per-object id list.
   - Never reach for run_sql when the question implies geometric
     reasoning over position columns — SQL can't compute density
     or pairwise distances. ORDER BY <size> DESC LIMIT 1 is NOT
@@ -638,6 +796,13 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
     If the user asked to "plot X", the natural flow is: compute the
     table once (set _TG_TABLE) AND set _TG_PLOT in the same call —
     don't compute and discard.
+    Return the FULL DataFrame even when it's millions of rows — the
+    SQL DB and follow-up queries benefit from completeness. The
+    browser's Copy session / Share link buttons truncate large tables
+    at their boundary (top-N by metric, with a note), so returning
+    everything doesn't break sharing — but it does mean the recipient
+    of a share link gets a representative slice plus a CSV download
+    hint, not the whole table.
   - REQUIRED COLUMNS for any _TG_TABLE you save: at minimum
         object_id, com_x_nm, com_y_nm, com_z_nm
     on top of whatever metric you computed (volume_nm_3,
@@ -673,11 +838,13 @@ WHEN TO USE WHICH TOOL — IMPORTANT:
         mesh for the OLD id, not the new one),
       • silently breaks click-to-fly (the row's object_id no longer
         matches the rendered segment).
-    Pass the array directly to regionprops_table as the labels arg:
-        props = regionprops_table(mito, spacing=spacing,
-                                  properties=("label", "area", "centroid", ...))
-    The "label" column IS the original segment id; copy it into
-    object_id verbatim. Use np.unique(arr[arr > 0]) if you only need
+    For label statistics, use cc3d.statistics(arr) — see the
+    "FOR LABEL STATISTICS" section above for the full pattern. It
+    preserves the original ids (returns voxel_counts indexed by
+    label value) and is ~100× faster than regionprops_table on big
+    label sets. Use regionprops_table only when you need surface
+    area / orientation / intensity-weighted props that cc3d.statistics
+    doesn't provide. Use np.unique(arr[arr > 0]) if you only need
     the id list without metrics.
     For ambiguous cases (image-typed binary mask, etc.), call
     ask_user with a yesno is_already_labeled (default true for
@@ -898,11 +1065,13 @@ async function execPythonOnLayers(
   if (!code) throw new Error("python_on_layers requires 'python'");
   const layersArg = args.layers;
   const skeletonsArg = args.skeletons;
+  const meshesArgEarly = args.meshes;
   const hasLayers = Array.isArray(layersArg) && layersArg.length > 0;
   const hasSkeletons = Array.isArray(skeletonsArg) && skeletonsArg.length > 0;
-  if (!hasLayers && !hasSkeletons) {
+  const hasMeshesEarly = Array.isArray(meshesArgEarly) && meshesArgEarly.length > 0;
+  if (!hasLayers && !hasSkeletons && !hasMeshesEarly) {
     throw new Error(
-      "python_on_layers requires either 'layers' (zarr layer names) or 'skeletons' ([{layer, segment_ids}]).",
+      "python_on_layers requires at least one of: 'layers' (zarr layer names), 'skeletons' ([{layer, segment_ids}]), or 'meshes' ([{layer, segment_ids}]).",
     );
   }
   const layerNames = hasLayers ? (layersArg as unknown[]).map((v) => String(v)) : [];
@@ -911,6 +1080,25 @@ async function execPythonOnLayers(
   // letting the worker fail on a bad URL — the model will recover faster
   // from a clear "no such layer" than from a worker error.
   const resolved: { name: string; layer: DatasetLayer }[] = [];
+  interface PrecomputedVolumeResolved {
+    varName: string;
+    baseUrl: string;
+    scale: PrecomputedScale;
+    offsetNm?: [number, number, number];
+  }
+  // Probed but scale not yet chosen — scale depends on the resolved
+  // runtime (Pyodide ≤1.5 GB vs HF backend ≤5 GB), and we don't know
+  // that until after mustBeLocal/mustBeBackend + size-based routing.
+  // Mirrors what the zarr path does: probe first, pick scale later.
+  interface PendingPrecomputedVolume {
+    varName: string;
+    baseUrl: string;
+    volumeInfo: PrecomputedVolumeInfo;
+    offsetNm?: [number, number, number];
+    layerName: string;
+  }
+  const pendingPrecomputedVolumes: PendingPrecomputedVolume[] = [];
+  const resolvedPrecomputedVolumes: PrecomputedVolumeResolved[] = [];
   for (const name of layerNames) {
     const layer = ctx.descriptor.layers.find((l) => l.name === name);
     if (!layer) {
@@ -920,22 +1108,78 @@ async function execPythonOnLayers(
       );
     }
     if (!isZarrSource(layer.source)) {
-      // Differentiate precomputed-volume from other non-zarr sources
-      // so the error tells the model what's actually possible, not
-      // just what failed. Precomputed segmentations (e.g. hemibrain
-      // at precomputed://gs://...) host volume + mesh + skeleton
-      // inside the same dir — the volume voxels aren't readable by
-      // python_on_layers (no precomputed-volume browser reader yet),
-      // but bundled meshes / skeletons may still be accessible.
+      // Non-zarr: try precomputed-segmentation VOLUME before falling
+      // through to the mesh / skeleton hint path. Hemibrain / FAFB /
+      // MICrONS etc. host their voxels here. We probe the info file,
+      // pick the finest scale that fits Pyodide's WASM budget, and
+      // route the layer to the worker's precomputedVolumeLayers slot.
       const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+      const precomputedSrc = sources.find((s) => /^precomputed:\/\//.test(s));
+      if (precomputedSrc) {
+        const info = await probePrecomputedInfo(precomputedSrc);
+        let volumeInfo: PrecomputedVolumeInfo | null = null;
+        if (info) volumeInfo = parsePrecomputedVolumeInfo(info.raw);
+        if (volumeInfo && volumeInfo.scales.length > 0) {
+          // Defer scale-picking until after runtime resolution so the
+          // chosen scale matches the actual byte budget (Pyodide 1.5 GB
+          // vs HF backend 5 GB). Picking up front with SAFE_INPUT_BYTES
+          // forced backend runs to a needlessly coarse scale.
+          const safeVar = name.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+          pendingPrecomputedVolumes.push({
+            varName: safeVar,
+            baseUrl: precomputedSrc,
+            volumeInfo,
+            offsetNm: layer.transform_offset_nm,
+            layerName: name,
+          });
+          continue;
+        }
+      }
       const isPrecomputed = sources.some((s) => /^precomputed:\/\//.test(s));
-      const skelSource = sources.find((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+      // Path-based skeleton detection first.
+      let skelHint = "";
+      const pathSkel = sources.find((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+      if (pathSkel) {
+        skelHint = ` This layer DOES have a skeleton source — try skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / connectivity / branching metrics.`;
+      } else if (isPrecomputed) {
+        // Probe the precomputed info file (cached) to see if
+        // skeletons / meshes are bundled. For meshes, also check
+        // the format — only legacy non-sharded is currently
+        // analyzable. Tells the agent yes/no up front so it
+        // doesn't have to call describe_dataset separately just
+        // to discover this.
+        let bundledSkel: string | null = null;
+        let bundledMesh: string | null = null;
+        for (const s of sources) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          if (!bundledSkel) bundledSkel = await resolveBundledSubpath(s, "skeletons");
+          if (!bundledMesh) bundledMesh = await resolveBundledSubpath(s, "mesh");
+          if (bundledSkel && bundledMesh) break;
+        }
+        let meshAnalyzable = false;
+        if (bundledMesh) {
+          const minfo = await probeMeshInfo(bundledMesh);
+          if (minfo) {
+            meshAnalyzable =
+              (minfo.atType === "neuroglancer_legacy_mesh" && !minfo.isSharded) ||
+              minfo.atType === "neuroglancer_multilod_draco";
+          }
+        }
+        if (bundledSkel && meshAnalyzable) {
+          skelHint = ` This precomputed dir bundles BOTH skeletons and meshes. Pass skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / branching, OR meshes=[{"layer":"${name}","segment_ids":[...]}] for volume / surface area.`;
+        } else if (bundledSkel) {
+          skelHint = ` This precomputed dir bundles skeletons (per its info file) — pass skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / branching metrics.`;
+        } else if (meshAnalyzable) {
+          skelHint = ` This precomputed dir bundles meshes — pass meshes=[{"layer":"${name}","segment_ids":[...]}] for volume / surface area.`;
+        } else if (bundledMesh) {
+          skelHint = ` This precomputed dir bundles meshes, but they're sharded LEGACY format — Tourguide doesn't support that variant (multilod_draco sharded does work).`;
+        } else {
+          skelHint = ` Probed the precomputed info file — no bundled meshes or skeletons.`;
+        }
+      }
       if (isPrecomputed) {
-        const skelHint = skelSource
-          ? ` This layer DOES have a skeleton source — try skeletons=[{"layer":"${name}","segment_ids":[...]}] for length / connectivity / branching metrics.`
-          : ` Many precomputed segmentation dirs also host skeletons (Neuroglancer's segmentation/info file lists them as a 'skeletons' subkey). Call describe_dataset to check.`;
         throw new Error(
-          `Layer '${name}' is a precomputed segmentation, not a zarr volume. python_on_layers can't read precomputed-volume voxels directly (no in-browser reader for that format), so volume / regionprops on the voxels isn't available here.${skelHint} For volume / surface area without voxel access, no tool exists yet (mesh-based geometric integration would need a precomputed mesh reader).`,
+          `Layer '${name}' is a precomputed segmentation, not a zarr volume. python_on_layers can't read precomputed-volume voxels directly (no in-browser reader for that format), so volume / regionprops on the voxels isn't available here.${skelHint}`,
         );
       }
       throw new Error(
@@ -974,12 +1218,28 @@ async function execPythonOnLayers(
         throw new Error(`No layer named '${layerName}' for skeleton input.`);
       }
       const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
-      const skelSource = sources.find(
+      // 1. Path-based: a separate source URL whose path contains
+      //    /skeleton/ or /skeletons/ (Janelia / cellmap convention).
+      let skelSource = sources.find(
         (s) => /\/skeleton\b|\/skeletons?\//i.test(s) || /^precomputed:\/\/.*skeleton/i.test(s),
       );
+      // 2. Bundled-in-precomputed: hemibrain-style segmentations
+      //    declare a `skeletons` subkey inside their info file. Probe
+      //    each precomputed source's info — first one that reports a
+      //    skeletons subpath wins. Cached per session.
+      if (!skelSource) {
+        for (const s of sources) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const resolved = await resolveBundledSubpath(s, "skeletons");
+          if (resolved) {
+            skelSource = resolved;
+            break;
+          }
+        }
+      }
       if (!skelSource) {
         throw new Error(
-          `Layer '${layerName}' has no precomputed-skeleton source (call describe_dataset to see what sources it has).`,
+          `Layer '${layerName}' has no skeleton source — no source URL contains /skeleton/, and no precomputed source declared a 'skeletons' subkey in its info file. Call describe_dataset to confirm.`,
         );
       }
       const safeVar = layerName.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
@@ -991,6 +1251,119 @@ async function execPythonOnLayers(
         // The worker shifts every skeleton vertex by this so the
         // skeleton stays aligned with the volume in analysis math.
         offsetNm: layer.transform_offset_nm,
+      });
+    }
+  }
+
+  // Resolve mesh entries — parallel to the skeleton loop above. We
+  // support `neuroglancer_legacy_mesh` (unsharded) and
+  // `neuroglancer_multilod_draco` (unsharded or sharded). Sharded
+  // legacy is still rejected (no shard reader for that variant yet).
+  const meshesArg = args.meshes;
+  const hasMeshes = Array.isArray(meshesArg) && meshesArg.length > 0;
+  interface MeshResolved {
+    varName: string;
+    source: string;
+    segmentIds: string[];
+    offsetNm?: [number, number, number];
+    format: "neuroglancer_legacy_mesh" | "neuroglancer_multilod_draco";
+    vertexQuantizationBits?: number;
+    transform?: number[];
+    sharding?: ShardingSpec;
+  }
+  const resolvedMeshes: MeshResolved[] = [];
+  if (hasMeshes) {
+    for (const raw of meshesArg as unknown[]) {
+      if (!raw || typeof raw !== "object") {
+        throw new Error("Each entry in 'meshes' must be an object with 'layer' and 'segment_ids'.");
+      }
+      const r = raw as Record<string, unknown>;
+      const layerName = String(r.layer ?? r.name ?? "").trim();
+      if (!layerName) throw new Error("meshes[].layer is required");
+      const idsRaw = r.segment_ids ?? r.ids;
+      if (!Array.isArray(idsRaw) || idsRaw.length === 0) {
+        throw new Error(`meshes['${layerName}'].segment_ids is required (non-empty list).`);
+      }
+      const segmentIds = (idsRaw as unknown[]).map((v) => String(v));
+      const layer = ctx.descriptor.layers.find((l) => l.name === layerName);
+      if (!layer) {
+        throw new Error(`No layer named '${layerName}' for mesh input.`);
+      }
+      const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+      // 1. Path-based mesh source
+      let meshSource: string | null =
+        sources.find((s) => /\/mesh\b|\/meshes?\//i.test(s)) ?? null;
+      // 2. Bundled-in-precomputed (hemibrain pattern)
+      if (!meshSource) {
+        for (const s of sources) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const resolved = await resolveBundledSubpath(s, "mesh");
+          if (resolved) {
+            meshSource = resolved;
+            break;
+          }
+        }
+      }
+      if (!meshSource) {
+        throw new Error(
+          `Layer '${layerName}' has no mesh source. Call describe_dataset; mesh_format will be null when no mesh is available.`,
+        );
+      }
+      // 3. Probe the mesh info to confirm format is supported.
+      const minfo = await probeMeshInfo(meshSource);
+      if (!minfo) {
+        throw new Error(
+          `Couldn't read mesh info for '${layerName}' at ${meshSource}. Network error or unsupported format.`,
+        );
+      }
+      let format: "neuroglancer_legacy_mesh" | "neuroglancer_multilod_draco";
+      let vertexQuantizationBits: number | undefined;
+      let transform: number[] | undefined;
+      let sharding: MeshResolved["sharding"] | undefined;
+      if (minfo.atType === "neuroglancer_legacy_mesh") {
+        if (minfo.isSharded) {
+          throw new Error(
+            `Mesh on '${layerName}' is sharded legacy mesh — that variant isn't supported (sharded multilod_draco is). Skeletons or zarr volumes are the alternatives.`,
+          );
+        }
+        format = "neuroglancer_legacy_mesh";
+      } else if (minfo.atType === "neuroglancer_multilod_draco") {
+        format = "neuroglancer_multilod_draco";
+        const bitsRaw = minfo.raw["vertex_quantization_bits"];
+        if (typeof bitsRaw !== "number" || bitsRaw <= 0) {
+          throw new Error(
+            `Mesh on '${layerName}' is multilod_draco but its info file is missing 'vertex_quantization_bits' (got ${JSON.stringify(bitsRaw)}). Can't decode without it.`,
+          );
+        }
+        vertexQuantizationBits = bitsRaw;
+        const xformRaw = minfo.raw["transform"];
+        if (Array.isArray(xformRaw) && xformRaw.length === 12) {
+          transform = xformRaw.map(Number);
+        }
+        if (minfo.isSharded) {
+          const parsed = parseSharding(minfo.raw["sharding"]);
+          if (!parsed) {
+            throw new Error(
+              `Mesh on '${layerName}' has a sharding field but it's not a recognized neuroglancer_uint64_sharded_v1 spec.`,
+            );
+          }
+          sharding = parsed;
+        }
+      } else {
+        throw new Error(
+          `Mesh format '${minfo.atType || "(unknown)"}' on '${layerName}' isn't supported. Recognized: 'neuroglancer_legacy_mesh' (unsharded), 'neuroglancer_multilod_draco' (unsharded or sharded).`,
+        );
+      }
+      const safeVar = layerName.replace(/[^a-zA-Z0-9_]/g, "_") || "layer";
+      resolvedMeshes.push({
+        varName: `${safeVar}_mesh`,
+        source: meshSource,
+        segmentIds,
+        offsetNm: layer.transform_offset_nm,
+        format,
+        vertexQuantizationBits,
+        transform,
+        sharding,
       });
     }
   }
@@ -1010,11 +1383,24 @@ async function execPythonOnLayers(
   const backendUrl = settings.analysisBackendUrl.trim();
   const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
   const codeNeedsMeshLayer = /\b_TG_NEW_MESH_LAYER\s*=/.test(code);
-  const mustBeLocal = resolvedSkeletons.length > 0;
+  // Precomputed-VOLUME inputs work on EITHER runtime now: the browser
+  // worker has its own reader, and the HF backend reads via tensorstore's
+  // neuroglancer_precomputed driver. So they no longer force local.
+  // Mesh and skeleton inputs are still browser-only (the backend doesn't
+  // ship readers for those yet).
+  const mustBeLocal =
+    resolvedSkeletons.length > 0 ||
+    resolvedMeshes.length > 0;
   const mustBeBackend = codeImportsSeungLab || codeNeedsMeshLayer;
   if (mustBeLocal && mustBeBackend) {
+    const localReasons: string[] = [];
+    if (resolvedSkeletons.length > 0) localReasons.push("skeleton inputs");
+    if (resolvedMeshes.length > 0) localReasons.push("mesh inputs");
+    const backendReasons: string[] = [];
+    if (codeImportsSeungLab) backendReasons.push("imports a Seung-lab package (cc3d / fastmorph / fastremap / edt / kimimaro / zmesh)");
+    if (codeNeedsMeshLayer) backendReasons.push("sets _TG_NEW_MESH_LAYER");
     throw new Error(
-      "Conflict: this code uses Seung-lab packages or _TG_NEW_MESH_LAYER (backend-only) but also has skeleton inputs (local-only). Split into two python_on_layers calls — one for skeleton work, one for mesh/heavy ops.",
+      `Conflict: this code must run on the HF backend because it ${backendReasons.join(" and ")}, but the inputs require the local Pyodide runtime (${localReasons.join(", ")}). Split into two python_on_layers calls — one for the local-only inputs, one for the heavy ops.`,
     );
   }
   // The size-vs-budget decision needs inspect results, so we run inspect
@@ -1033,17 +1419,45 @@ async function execPythonOnLayers(
   const client = new AnalysisClient();
   const layerInspections: { name: string; layer: DatasetLayer; url: string; insp: Awaited<ReturnType<typeof client.inspect>> }[] = [];
   const finestBytes: number[] = [];
+  // N5 layers can't be inspected in the browser worker (zarrita doesn't
+  // read N5). Track them so we can route inspect through the HF backend
+  // AND force the runtime to backend (worker can't run N5 analyses
+  // either). Any layer with an n5:// source or a .n5/ path lands here.
+  let anyLayerIsN5 = false;
   try {
     for (const { name, layer } of resolved) {
       const url = normalizeZarrUrl(layer.source);
-      const insp = await client.inspect(url, ctx.descriptor.voxel_size_nm, (m) =>
-        ctx.callbacks.onProgress?.(`Inspecting ${name}: ${m}`),
-      );
+      const layerIsN5 = isN5Source(layer.source);
+      if (layerIsN5) anyLayerIsN5 = true;
+      let insp;
+      if (layerIsN5) {
+        // Backend inspect via tensorstore. Requires the Space awake;
+        // waitForBackendReady further down will block on cold-start
+        // anyway, so we don't pre-wake here.
+        if (!backendUrl) {
+          throw new Error(
+            `Layer '${name}' is an N5 source — Pyodide can't read N5, so the HF backend is required. Open Settings → Advanced → Analysis backend.`,
+          );
+        }
+        ctx.callbacks.onProgress?.(`Inspecting ${name} via backend (N5)…`);
+        insp = await inspectSourceRemote(backendUrl, url, ctx.descriptor.voxel_size_nm, ctx.signal);
+      } else {
+        insp = await client.inspect(url, ctx.descriptor.voxel_size_nm, (m) =>
+          ctx.callbacks.onProgress?.(`Inspecting ${name}: ${m}`),
+        );
+      }
       layerInspections.push({ name, layer, url, insp });
       // Index 0 is the finest scale. Track to gauge whether even the
       // finest fits in our target — if yes for everyone, no need to
       // route through backend purely for size.
       if (insp.scales[0]) finestBytes.push(insp.scales[0].approxBytes);
+    }
+    // Include precomputed-volume layers' finest scales in the routing
+    // decision too. Without this, a hemibrain-only query (no zarr
+    // layers) would always have totalFinest=0 and go local regardless
+    // of how big the precomputed volume actually is.
+    for (const p of pendingPrecomputedVolumes) {
+      if (p.volumeInfo.scales[0]) finestBytes.push(p.volumeInfo.scales[0].approxBytes);
     }
 
     // Effective runtime resolution.
@@ -1055,6 +1469,16 @@ async function execPythonOnLayers(
     } else if (mustBeLocal) {
       runtime = "local";
       runtimeReason = "skeleton inputs require local runtime";
+    } else if (anyLayerIsN5) {
+      // N5 forces backend — Pyodide / zarrita don't read N5. Backend
+      // already inspected the source via tensorstore above.
+      if (!backendUrl) {
+        throw new Error(
+          "Layer uses N5 — Pyodide can't read N5, so the HF backend is required. Open Settings → Advanced → Analysis backend.",
+        );
+      }
+      runtime = "backend";
+      runtimeReason = "N5 layers require the backend (Pyodide can't read N5)";
     } else if (mustBeBackend) {
       if (!backendUrl) {
         throw new Error(
@@ -1063,6 +1487,14 @@ async function execPythonOnLayers(
       }
       runtime = "backend";
       runtimeReason = "code uses Seung-lab packages or _TG_NEW_MESH_LAYER";
+    } else if (backendUrl && wouldBackendServeFinerScale(layerInspections, pendingPrecomputedVolumes, LOCAL_TARGET_BYTES, BACKEND_TARGET_BYTES)) {
+      // For analysis, finer resolution is usually worth the cold start.
+      // If backend's 5 GB budget admits a strictly finer scale than
+      // local's 1.5 GB budget for ANY input layer, route to backend.
+      // Local still wins when local-pick is already the finest scale
+      // (no resolution gain to be had).
+      runtime = "backend";
+      runtimeReason = "backend can serve a finer scale than local";
     } else {
       const totalFinest = finestBytes.reduce((a, b) => a + b, 0);
       if (totalFinest <= LOCAL_TARGET_BYTES) {
@@ -1077,6 +1509,26 @@ async function execPythonOnLayers(
       }
     }
     const targetBytes = runtime === "backend" ? BACKEND_TARGET_BYTES : LOCAL_TARGET_BYTES;
+
+    // Now that runtime + targetBytes are known, pick precomputed-volume
+    // scales. Backend route → finer scales (up to 5 GB); local route →
+    // coarser scales (≤1.5 GB). Same picker the zarr path uses.
+    for (const p of pendingPrecomputedVolumes) {
+      const scale = pickScaleForBudget(p.volumeInfo, targetBytes);
+      if (!scale) {
+        const finest = p.volumeInfo.scales[0];
+        const coarsest = p.volumeInfo.scales[p.volumeInfo.scales.length - 1];
+        throw new Error(
+          `Layer '${p.layerName}' precomputed volume has no scale ≤ ${(targetBytes / 1e9).toFixed(2)} GB (${runtime} runtime). Finest: ${(finest.approxBytes / 1e9).toFixed(2)} GB, coarsest: ${(coarsest.approxBytes / 1e9).toFixed(3)} GB. Probably an unsupported dtype/encoding — describe_dataset will say which.`,
+        );
+      }
+      resolvedPrecomputedVolumes.push({
+        varName: p.varName,
+        baseUrl: p.baseUrl,
+        scale,
+        offsetNm: p.offsetNm,
+      });
+    }
 
     // Per-layer scale: pick the FINEST scale that still fits the
     // chosen runtime's byte budget. If even the coarsest is bigger
@@ -1192,6 +1644,21 @@ async function execPythonOnLayers(
         backendUrl,
         {
           layers: requestLayers,
+          // Backend reads precomputed via tensorstore's neuroglancer_precomputed
+          // driver. Slimmer shape than the worker uses (tensorstore re-reads
+          // the info file from baseUrl, so we don't ship chunk/encoding/
+          // sharding metadata). xyz axes are the precomputed convention.
+          precomputedVolumeLayers:
+            resolvedPrecomputedVolumes.length > 0
+              ? resolvedPrecomputedVolumes.map((pv) => ({
+                  varName: pv.varName,
+                  baseUrl: pv.baseUrl,
+                  scaleKey: pv.scale.key,
+                  axesOrder: ["x", "y", "z"],
+                  voxelNm: pv.scale.resolutionNm,
+                  offsetNm: pv.offsetNm ?? [0, 0, 0],
+                }))
+              : undefined,
           tables,
           code,
           timeoutMs: 300_000,
@@ -1205,9 +1672,12 @@ async function execPythonOnLayers(
           kind: "custom",
           layers: requestLayers,
           skeletonLayers: resolvedSkeletons.length > 0 ? resolvedSkeletons : undefined,
+          meshLayers: resolvedMeshes.length > 0 ? resolvedMeshes : undefined,
+          precomputedVolumeLayers:
+            resolvedPrecomputedVolumes.length > 0 ? resolvedPrecomputedVolumes : undefined,
           tables,
           code,
-          timeoutMs: 60000,
+          timeoutMs: 120000,
         },
         (m) => ctx.callbacks.onProgress?.(m),
       );
@@ -1232,6 +1702,43 @@ function humanBytes(n: number): string {
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+// Pick the index of the FINEST scale whose approxBytes fits the budget.
+// scales are ordered finest-first (idx 0 = finest), so iterating from
+// the front and returning the first match yields the finest fit. If
+// nothing fits, falls back to the coarsest (last) scale.
+function pickScaleIdxForBudget(sizes: number[], budget: number): number {
+  for (let i = 0; i < sizes.length; i++) {
+    if (sizes[i] <= budget) return i;
+  }
+  return sizes.length - 1;
+}
+
+// True if running on the HF backend would let us serve a strictly finer
+// scale than Pyodide would for at least one input layer. Used by the
+// "prefer backend for resolution" runtime rule — if no layer benefits
+// (e.g. all finest scales already fit locally), there's nothing to gain
+// from paying the backend's cold start.
+function wouldBackendServeFinerScale(
+  zarrInspections: { insp: { scales: { approxBytes: number }[] } }[],
+  precomputedPending: { volumeInfo: { scales: { approxBytes: number }[] } }[],
+  localBudget: number,
+  backendBudget: number,
+): boolean {
+  for (const { insp } of zarrInspections) {
+    const sizes = insp.scales.map((s) => s.approxBytes);
+    if (pickScaleIdxForBudget(sizes, backendBudget) < pickScaleIdxForBudget(sizes, localBudget)) {
+      return true;
+    }
+  }
+  for (const p of precomputedPending) {
+    const sizes = p.volumeInfo.scales.map((s) => s.approxBytes);
+    if (pickScaleIdxForBudget(sizes, backendBudget) < pickScaleIdxForBudget(sizes, localBudget)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Wire a CustomAnalysisResult through the agent's callbacks + viewer.
@@ -1344,26 +1851,154 @@ async function execDescribeDataset(
     // Summary: enough for the model to pick a layer and call back with
     // a name for scale detail. Keep it terse — this returns into the
     // agent context on every describe_dataset() call.
-    return {
-      dataset: ctx.descriptor.display_name,
-      default_voxel_size_nm: ctx.descriptor.voxel_size_nm,
-      layers: ctx.descriptor.layers.map((l) => {
+    //
+    // For layers whose ONLY source is a precomputed segmentation (e.g.
+    // hemibrain at precomputed://gs://.../segmentation), the URL alone
+    // doesn't reveal whether bundled meshes / skeletons exist —
+    // they're declared inside the info file's `mesh` / `skeletons`
+    // subkeys. Probe each precomputed source once (cached) so
+    // has_mesh / has_skeleton + bundled URLs reflect reality.
+    const probedLayers = await Promise.all(
+      ctx.descriptor.layers.map(async (l) => {
         const sourceList = Array.isArray(l.source) ? l.source : [l.source];
+        // Path-based detection (auxiliary sources whose URL itself
+        // contains /mesh/ or /skeleton/) is still the primary signal.
+        let hasMesh = sourceList.some((s) => /\/mesh\b|\/meshes?\//i.test(s));
+        let hasSkeleton = sourceList.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s));
+        const bundled: { mesh?: string; skeletons?: string } = {};
+        // Bundled-in-precomputed detection: only run when neither
+        // mesh nor skeleton is path-detected yet, to avoid the
+        // extra HTTP for layers that already declared them.
+        if (!hasMesh || !hasSkeleton) {
+          for (const s of sourceList) {
+            if (!/^precomputed:\/\//i.test(s)) continue;
+            const info = await probePrecomputedInfo(s);
+            if (!info) continue;
+            if (info.mesh && !hasMesh) {
+              hasMesh = true;
+              bundled.mesh = `${s.replace(/\/$/, "")}/${info.mesh}`;
+            }
+            if (info.skeletons && !hasSkeleton) {
+              hasSkeleton = true;
+              bundled.skeletons = `${s.replace(/\/$/, "")}/${info.skeletons}`;
+            }
+            if (hasMesh && hasSkeleton) break;
+          }
+        }
+        // For any discovered mesh source (path-based OR bundled),
+        // probe its info file to learn the on-disk format. Surfaces
+        // whether mesh-based analysis is currently supported.
+        // Supported: legacy unsharded, multilod_draco (sharded or not).
+        // Unsupported: sharded legacy.
+        let meshFormat: string | null = null;
+        let meshSharded = false;
+        let meshSupported = false;
+        const meshUrl =
+          bundled.mesh ??
+          sourceList.find((s) => /\/mesh\b|\/meshes?\//i.test(s));
+        if (meshUrl) {
+          const minfo = await probeMeshInfo(meshUrl);
+          if (minfo) {
+            meshFormat = minfo.atType || null;
+            meshSharded = minfo.isSharded;
+            meshSupported =
+              (minfo.atType === "neuroglancer_legacy_mesh" && !minfo.isSharded) ||
+              minfo.atType === "neuroglancer_multilod_draco";
+          }
+        }
+        // Probe segment_properties for a cheap object count. For
+        // hemibrain-style segmentations this gives the agent an
+        // immediate answer to "how many neurons" without needing
+        // any mesh / volume reads.
+        let segmentCount: number | null = null;
+        let segmentPropertyLabels: string[] | null = null;
+        for (const s of sourceList) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const info = await probePrecomputedInfo(s);
+          if (!info?.segmentProperties) continue;
+          const propsUrl = `${s.replace(/\/$/, "")}/${info.segmentProperties}`;
+          const props = await fetchSegmentProperties(propsUrl);
+          if (props) {
+            segmentCount = props.numSegments;
+            segmentPropertyLabels = props.propertyLabels.length > 0 ? props.propertyLabels : null;
+          }
+          break;
+        }
+        // Precomputed-VOLUME readability: probe the info file to see
+        // whether tourguide can load voxels into python_on_layers. We
+        // surface the full scale list (sizes + approxBytes) so the
+        // agent knows what fits in the local budget without guessing.
+        let precomputedVolumeReadable = false;
+        let precomputedVolumeScales: Array<{
+          key: string;
+          resolution_nm: [number, number, number];
+          size: [number, number, number];
+          approx_bytes: number;
+        }> | null = null;
+        for (const s of sourceList) {
+          if (!/^precomputed:\/\//i.test(s)) continue;
+          const info = await probePrecomputedInfo(s);
+          if (!info) continue;
+          const vol = parsePrecomputedVolumeInfo(info.raw);
+          if (!vol) continue;
+          precomputedVolumeReadable = true;
+          precomputedVolumeScales = vol.scales.map((sc) => ({
+            key: sc.key,
+            resolution_nm: sc.resolutionNm,
+            size: sc.size,
+            approx_bytes: sc.approxBytes,
+          }));
+          break;
+        }
         return {
           name: l.name,
           type: l.type,
           organelle_class: l.organelle_class ?? null,
           source_kinds: sourceList.map(sourceKind),
           has_volume: sourceList.some((s) => /^(zarr2?|zarr3|n5|graphene)/.test(s) || /\.zarr(\/|$)/i.test(s) || /precomputed:\/\//.test(s)),
-          has_mesh: sourceList.some((s) => /\/mesh\b|\/meshes?\//i.test(s)),
-          has_skeleton: sourceList.some((s) => /\/skeleton\b|\/skeletons?\//i.test(s)),
-          inspectable: isZarrSource(l.source),
+          has_mesh: hasMesh,
+          has_skeleton: hasSkeleton,
+          // When mesh / skeleton was discovered inside a precomputed
+          // segmentation's info file (rather than as a separate
+          // source URL), surface the resolved URL so the agent knows
+          // where to fetch from. Absent when the path-based detection
+          // already found the source.
+          bundled_mesh_url: bundled.mesh ?? null,
+          bundled_skeleton_url: bundled.skeletons ?? null,
+          // Mesh on-disk format (when a mesh source is present).
+          // Currently supported: legacy_mesh (unsharded only) and
+          // multilod_draco (unsharded or sharded). Sharded legacy
+          // still falls through to "not supported".
+          mesh_format: meshFormat,
+          mesh_sharded: meshSharded,
+          mesh_analysis_supported: meshSupported,
+          // From precomputed segment_properties/info — total declared
+          // segment count and (for sites that use them) attribute
+          // labels like ["status", "type", "instance"]. Null when no
+          // segment_properties subdir was found. THE ANSWER to "how
+          // many neurons" lives here — answer this directly without
+          // calling python_on_layers.
+          num_segments: segmentCount,
+          segment_property_labels: segmentPropertyLabels,
+          // True when python_on_layers can load this layer's voxels
+          // (works for both zarr/n5 AND precomputed-segmentation
+          // uint64 compressed_segmentation). When true, you can pass
+          // this layer's name in `layers: [...]` to python_on_layers
+          // and it'll show up as a numpy ndarray. precomputed_volume_scales
+          // lists every scale you can choose from.
+          inspectable: isZarrSource(l.source) || precomputedVolumeReadable,
+          precomputed_volume_scales: precomputedVolumeScales,
           // User-applied translation from the pasted NG state, if any.
           // Tourguide folds this into per-object positions
           // automatically — no need to apply it in your code.
           ng_offset_nm: l.transform_offset_nm ?? null,
         };
       }),
+    );
+    return {
+      dataset: ctx.descriptor.display_name,
+      default_voxel_size_nm: ctx.descriptor.voxel_size_nm,
+      layers: probedLayers,
     };
   }
 
@@ -1373,11 +2008,39 @@ async function execDescribeDataset(
     throw new Error(`No layer named '${name}'. Loaded layers: ${known || "(none)"}.`);
   }
   if (!isZarrSource(layer.source)) {
+    // Non-zarr source — try the precomputed probe so single-layer
+    // describe_dataset returns the same precomputed_volume_scales the
+    // multi-layer (no-name) path returns. Without this, calling
+    // describe_dataset('segmentation') on hemibrain hit a stub that
+    // claimed "voxel size unknown" even though the precomputed info
+    // file is right there.
+    const sources = Array.isArray(layer.source) ? layer.source : [layer.source];
+    for (const s of sources) {
+      if (!/^precomputed:\/\//i.test(s)) continue;
+      const info = await probePrecomputedInfo(s);
+      if (!info) continue;
+      const vol = parsePrecomputedVolumeInfo(info.raw);
+      if (!vol) continue;
+      return {
+        name: layer.name,
+        type: layer.type,
+        source: layer.source,
+        source_kind: "precomputed",
+        inspectable: true,
+        precomputed_volume_scales: vol.scales.map((sc) => ({
+          key: sc.key,
+          resolution_nm: sc.resolutionNm,
+          size: sc.size,
+          approx_bytes: sc.approxBytes,
+        })),
+        ng_offset_nm: layer.transform_offset_nm ?? null,
+      };
+    }
     return {
       name: layer.name,
       type: layer.type,
       source: layer.source,
-      note: "Source is not a zarr — no scale-level metadata available. Voxel size unknown without a per-format inspector.",
+      note: "Source is not zarr and not a readable precomputed volume — no scale-level metadata available.",
     };
   }
 
@@ -1828,6 +2491,11 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       jsonMode: true,
       maxTokens: 1500,
       signal: ctx.signal,
+      // The ~20k-token SYSTEM_PROMPT is resent on every step of this
+      // loop, so caching the prefix turns iterations 2..N into cache
+      // reads ($0.30/M) instead of full input ($3/M). Only honored by
+      // AnthropicBackend.
+      cacheSystem: true,
       onToken: (_t, accumulated) => {
         tokenCount += 1;
         // Pull the tool name out of the streamed JSON as soon as it's
@@ -1855,10 +2523,10 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         }
       },
     });
-    const stepElapsed = ((performance.now() - stepStart) / 1000).toFixed(1);
+    const llmMs = performance.now() - stepStart;
     const apiCalls = GeminiBackend.requestCount - startReqCount;
     const apiNote = apiCalls > 0 ? ` · ${apiCalls} API call${apiCalls === 1 ? "" : "s"} this turn` : "";
-    console.debug(`[agent] step ${i + 1}: done in ${stepElapsed}s (${tokenCount} tokens)${apiNote}`);
+    console.debug(`[agent] step ${i + 1}: done in ${(llmMs / 1000).toFixed(1)}s (${tokenCount} tokens)${apiNote}`);
 
     let call: ToolCall;
     try {
@@ -1907,6 +2575,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
         tool: call.tool,
         args: call.args ?? {},
         error: `Unknown tool: ${call.tool}`,
+        llmMs,
       };
       ctx.callbacks.onTrace?.(trace);
       messages.push({ role: "assistant", content: JSON.stringify(call) });
@@ -1918,10 +2587,12 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     }
 
     messages.push({ role: "assistant", content: JSON.stringify(call) });
-    const trace: AgentTraceItem = { tool: call.tool, args: call.args ?? {} };
+    const trace: AgentTraceItem = { tool: call.tool, args: call.args ?? {}, llmMs };
+    const toolStart = performance.now();
     try {
       const result = await executor(call.args ?? {}, ctx);
       trace.result = result;
+      trace.toolMs = performance.now() - toolStart;
       ctx.callbacks.onTrace?.(trace);
       // answer / make_plot are clearly user-visible. fly_to and
       // highlight_segments also produce a visible viewer change, so
@@ -1958,6 +2629,7 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
     } catch (err) {
       const errMsg = (err as Error).message;
       trace.error = errMsg;
+      trace.toolMs = performance.now() - toolStart;
       ctx.callbacks.onTrace?.(trace);
       // Synthesize a hint specific to common error shapes so the model
       // can self-correct. Small WebLLM models can't translate raw

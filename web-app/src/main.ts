@@ -47,6 +47,7 @@ const customBtn = $<HTMLButtonElement>("custom-btn");
 const downloadBtn = $<HTMLButtonElement>("download-btn");
 const settingsBtn = $<HTMLButtonElement>("settings-btn");
 const shareBtn = $<HTMLButtonElement>("share-btn");
+const copyNgBtn = $<HTMLButtonElement>("copy-ng-btn");
 const backendIndicator = $<HTMLButtonElement>("backend-indicator");
 // Make the indicator a quick way into Settings when AI isn't configured —
 // matches the title attribute on the button.
@@ -638,7 +639,26 @@ shareBtn.addEventListener("click", async () => {
   // it's a candidate for the permalink. Also confirm via the
   // descriptor — a table whose name matches a layer.csv-derived one
   // can be skipped (recipient re-fetches).
+  // Per-table row cap for embedding in the share link. Beyond this
+  // the URL balloons past what most browsers / chat apps accept AND
+  // the short-link backend rejects the upload size. The agent is free
+  // to compute and store millions of rows locally; we just don't ship
+  // that whole payload to a recipient via URL.
+  const SHARE_EMBED_ROW_CAP = 5000;
+  // Heuristic: when truncating, sort by the most-relevant numeric
+  // column descending — volume_nm_3 first, then area_nm_*, then
+  // anything else numeric. Stable across queries that follow the
+  // prompt's "REQUIRED COLUMNS" convention.
+  const pickSortColumn = (cols: string[]): string | null => {
+    const prefer = [
+      "volume_nm_3", "surface_area_nm_2", "length_nm", "area_nm_2",
+      "approx_bytes", "voxel_count",
+    ];
+    for (const p of prefer) if (cols.includes(p)) return p;
+    return null;
+  };
   const sharedTables: SharedTable[] = [];
+  const truncatedTableSummaries: string[] = [];
   if (currentDB) {
     const layerCsvOrganelles = new Set(
       descriptorForShare.layers
@@ -649,7 +669,27 @@ shareBtn.addEventListener("click", async () => {
       if (layerCsvOrganelles.has(t.organelle_class)) continue; // recipient gets this from layer.csv
       try {
         const colList = t.columns.map((c) => `"${c}"`).join(", ");
-        const result = runQuery(currentDB.db, `SELECT ${colList} FROM "${t.table_name}";`);
+        const sortCol = pickSortColumn(t.columns);
+        // Push the sort + LIMIT into SQL so we don't materialize all
+        // 8M rows in JS just to drop them. We still want to know the
+        // TOTAL row count so the share narration can be honest about
+        // what got embedded vs what exists.
+        const totalRes = runQuery(
+          currentDB.db,
+          `SELECT COUNT(*) AS n FROM "${t.table_name}";`,
+        );
+        const totalRows = Number(totalRes.rows[0]?.[0] ?? 0);
+        const orderClause = sortCol ? ` ORDER BY "${sortCol}" DESC` : "";
+        const limitClause = totalRows > SHARE_EMBED_ROW_CAP ? ` LIMIT ${SHARE_EMBED_ROW_CAP}` : "";
+        const result = runQuery(
+          currentDB.db,
+          `SELECT ${colList} FROM "${t.table_name}"${orderClause}${limitClause};`,
+        );
+        if (totalRows > SHARE_EMBED_ROW_CAP) {
+          truncatedTableSummaries.push(
+            `${t.table_name}: ${totalRows.toLocaleString()} rows → top ${SHARE_EMBED_ROW_CAP.toLocaleString()}${sortCol ? ` by ${sortCol}` : ""}`,
+          );
+        }
         sharedTables.push({
           organelle_class: t.organelle_class,
           layer_name: t.layer_name,
@@ -660,6 +700,9 @@ shareBtn.addEventListener("click", async () => {
         console.warn(`[share] couldn't dump table ${t.table_name}:`, err);
       }
     }
+  }
+  if (truncatedTableSummaries.length > 0) {
+    console.info("[share] truncated tables to fit URL:", truncatedTableSummaries);
   }
   const url = await buildPermalinkURL({
     catalogIndex: useCatalogIdx,
@@ -689,6 +732,9 @@ shareBtn.addEventListener("click", async () => {
   const backendUrl = loadSettings().analysisBackendUrl.trim();
   let finalUrl = url;
   let shortened = false;
+  // null = no short-link was attempted (inline URL — no storage involved);
+  // true = HF Datasets (persistent); false = /tmp fallback (ephemeral).
+  let persistent: boolean | null = null;
   if (backendUrl) {
     try {
       const suffix = url.slice(url.indexOf("?") >= 0 ? url.indexOf("?") : url.indexOf("#"));
@@ -700,10 +746,11 @@ shareBtn.addEventListener("click", async () => {
         const h = await fetchHealth(backendUrl, ac.signal);
         clearTimeout(timer);
         if (h?.ok) {
-          const id = await createShareLink(backendUrl, suffix);
+          const result = await createShareLink(backendUrl, suffix);
           const base = url.split("?")[0].split("#")[0];
-          finalUrl = `${base}?s=${id}`;
+          finalUrl = `${base}?s=${result.id}`;
           shortened = true;
+          persistent = result.persistent;
         }
       }
     } catch (err) {
@@ -713,14 +760,56 @@ shareBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(finalUrl);
     const tablesHint = sharedTables.length > 0
-      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded)`
+      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded${truncatedTableSummaries.length > 0 ? `, ${truncatedTableSummaries.length} truncated` : ""})`
       : "";
     shareBtn.textContent = shortened
       ? `✓ Copied short link${tablesHint}`
       : `✓ Copied${tablesHint}`;
     setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2200);
+    // Combine ephemeral-link warning + truncation warning into one
+    // dialog so the user gets at most one modal interruption.
+    const warnings: string[] = [];
+    if (shortened && persistent === false) {
+      warnings.push(
+        "⚠ This link is stored in ephemeral memory on the analysis Space — " +
+          "it will stop working when the Space restarts (typically every few hours-to-days). " +
+          "Tell the recipient to open it soon. For persistent links, the Space owner can set " +
+          "HF_TOKEN + TG_SHARE_DATASET in the Space's secrets.",
+      );
+    }
+    if (truncatedTableSummaries.length > 0) {
+      warnings.push(
+        "Share link embedded a truncated view of some tables — recipients see only the top rows:\n  • " +
+          truncatedTableSummaries.join("\n  • ") +
+          "\n\nFor the full tables, send the CSV downloads (Custom → Download).",
+      );
+    }
+    if (warnings.length > 0) alert(warnings.join("\n\n"));
   } catch {
     prompt("Copy this URL:", finalUrl);
+  }
+});
+
+// Copy NG link — plain Neuroglancer permalink with just the viewer
+// state (camera + layers + selected segments). No tourguide DB, no
+// computed tables. Useful for sharing a view in a non-tourguide
+// context (Slack, papers, plain NG demo). Recipient pastes into any
+// Neuroglancer instance and lands on the same view.
+const NG_DEMO_BASE = "https://neuroglancer-demo.appspot.com/";
+copyNgBtn.addEventListener("click", async () => {
+  const ngState = viewer.getNgState();
+  if (!ngState) {
+    copyNgBtn.textContent = "✗ no NG state";
+    setTimeout(() => (copyNgBtn.textContent = "📋 Copy NG"), 2000);
+    return;
+  }
+  const url = `${NG_DEMO_BASE}#!${encodeURIComponent(JSON.stringify(ngState))}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    copyNgBtn.textContent = "✓ Copied NG link";
+    setTimeout(() => (copyNgBtn.textContent = "📋 Copy NG"), 2000);
+  } catch {
+    prompt("Copy this NG link:", url);
   }
 });
 

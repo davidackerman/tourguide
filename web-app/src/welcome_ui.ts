@@ -15,8 +15,11 @@ import {
   webllmModelLabel,
   hasWebGPU,
   DEFAULT_ANALYSIS_BACKEND,
+  DEFAULT_ANTHROPIC_MODEL,
+  listAnthropicModels,
   type LLMProvider,
 } from "./llm.js";
+import { renderAnthropicModelOptions } from "./settings_ui.js";
 
 const WELCOME_DISMISSED_KEY = "tourguide.welcomeDismissed.v1";
 
@@ -112,54 +115,79 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           <div class="welcome-provider-section" data-welcome-provider-section="gemini" ${initialAi === "gemini" ? "" : "hidden"}>
             <label>
               Gemini API key
-              <input type="password" data-welcome-gemini-key value="${escapeAttr(settings.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/apikey" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-gemini-key value="${escapeAttr(settings.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/apikey" autocomplete="off" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="gemini" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="gemini"></span>
+            </div>
             <p class="hint">~500 req/day on Flash Lite. Stored in browser localStorage only.</p>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="anthropic" ${initialAi === "anthropic" ? "" : "hidden"}>
             <label>
               Anthropic API key
-              <input type="password" data-welcome-anthropic-key value="${escapeAttr(settings.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-anthropic-key value="${escapeAttr(settings.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
             </label>
             <label>
               Model
-              <input type="text" data-welcome-anthropic-model value="${escapeAttr(settings.anthropicModel || "claude-sonnet-4.6")}" placeholder="claude-sonnet-4.6" />
+              <select data-welcome-anthropic-model>${renderAnthropicModelOptions(settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL)}</select>
             </label>
+            <p class="hint">Paste your key first, then click Refresh to load the real model list for your account via <code>/v1/models</code>.</p>
+            <div class="welcome-test-row">
+              <button class="btn-secondary btn-tiny" data-welcome-refresh-anthropic type="button">↻ Refresh models</button>
+              <span class="anthropic-model-status" data-welcome-anthropic-model-status></span>
+            </div>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="anthropic" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="anthropic"></span>
+            </div>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="openai" ${initialAi === "openai" ? "" : "hidden"}>
             <label>
               OpenAI API key
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
             </label>
             <label>
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openai.placeholderModel}" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="openrouter" ${initialAi === "openrouter" ? "" : "hidden"}>
             <label>
               OpenRouter API key
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
             </label>
             <label>
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.openrouter.placeholderModel}" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
             <p class="hint">One key for Claude / Gemini / Llama / etc — browse at <a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a>.</p>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="xai" ${initialAi === "xai" ? "" : "hidden"}>
             <label>
               xAI API key
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
             </label>
             <label>
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="${OPENAI_COMPATIBLE_PRESETS.xai.placeholderModel}" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test key</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
           </div>
 
           <div class="welcome-provider-section" data-welcome-provider-section="openai_compatible" ${initialAi === "openai_compatible" ? "" : "hidden"}>
@@ -169,12 +197,16 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
             </label>
             <label>
               API key (optional for local servers)
-              <input type="password" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" autocomplete="off" />
+              <input type="text" class="api-key" data-welcome-oai-key value="${escapeAttr(settings.openaiApiKey)}" autocomplete="off" />
             </label>
             <label>
               Model
               <input type="text" data-welcome-oai-model value="${escapeAttr(settings.openaiModel)}" placeholder="llama3.2" />
             </label>
+            <div class="welcome-test-row">
+              <button class="btn-secondary" data-welcome-test="oai" type="button">Test connection</button>
+              <span class="test-result" data-welcome-test-result="oai"></span>
+            </div>
             <p class="hint">For Ollama / vLLM / LM Studio / llama.cpp server, or any other OpenAI-compatible endpoint. Local URLs skip auth.</p>
           </div>
 
@@ -267,7 +299,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
         </section>
       </div>
       <div class="modal-footer">
-        <button class="btn-secondary" data-welcome-skip>Skip — I'll set up later</button>
+        <button class="btn-secondary" data-welcome-skip>Save &amp; close (no data load)</button>
       </div>
     </div>
   `;
@@ -277,18 +309,25 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     if (saved) markWelcomeSeen();
     overlay.remove();
   };
-  overlay.querySelector(".modal-close")!.addEventListener("click", () => {
+  // Closing the modal always tries to persist whatever's typed —
+  // otherwise a user who enters an API key but doesn't click a "Load"
+  // button loses it on dismiss. persistSettings's validate step may
+  // surface an "API key didn't validate, save anyway?" confirm; if
+  // the user cancels there, we leave the modal open.
+  const saveAndClose = async (): Promise<void> => {
+    if (!(await persistSettings({ validate: false }))) return;
     markWelcomeSeen();
     close(true);
+  };
+  overlay.querySelector(".modal-close")!.addEventListener("click", () => {
+    void saveAndClose();
   });
   overlay.querySelector("[data-welcome-skip]")!.addEventListener("click", () => {
-    markWelcomeSeen();
-    close(true);
+    void saveAndClose();
   });
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) {
-      markWelcomeSeen();
-      close(true);
+      void saveAndClose();
     }
   });
 
@@ -305,14 +344,167 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     });
   });
 
+  // Per-section Test buttons. Builds a fresh backend from whatever's
+  // currently in the inputs (NOT yet saved) and calls validate(). The
+  // OAI-compatible variants share a single handler keyed off the
+  // currently-selected provider, so openai / openrouter / xai pick the
+  // right preset URL and openai_compatible reads the typed base URL.
+  const runTest = async (
+    btn: HTMLButtonElement,
+    out: HTMLSpanElement,
+    factory: () => { backend: { validate(): Promise<void> } | null; emptyMsg: string },
+  ): Promise<void> => {
+    const { backend, emptyMsg } = factory();
+    if (!backend) {
+      out.textContent = emptyMsg;
+      out.className = "test-result err";
+      return;
+    }
+    out.textContent = "Testing…";
+    out.className = "test-result pending";
+    btn.disabled = true;
+    try {
+      await backend.validate();
+      out.textContent = "OK";
+      out.className = "test-result ok";
+    } catch (err) {
+      out.textContent = (err as Error).message.slice(0, 200);
+      out.className = "test-result err";
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  const findResultFor = (btn: HTMLButtonElement): HTMLSpanElement | null => {
+    const kind = btn.getAttribute("data-welcome-test");
+    if (!kind) return null;
+    return (
+      btn.parentElement?.querySelector<HTMLSpanElement>(`[data-welcome-test-result="${kind}"]`) ?? null
+    );
+  };
+
+  overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='gemini']").forEach((btn) => {
+    const out = findResultFor(btn);
+    if (!out) return;
+    btn.addEventListener("click", () => {
+      void runTest(btn, out, () => {
+        const key = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? "";
+        if (!key) return { backend: null, emptyMsg: "Paste a key first" };
+        return { backend: new GeminiBackend(key, settings.geminiModel), emptyMsg: "" };
+      });
+    });
+  });
+
+  // Refresh button: hits /v1/models with the typed key and repopulates
+  // the model dropdown. Same idea as settings_ui's gemini/anthropic
+  // refresh — protects users from typo'd IDs by replacing guesses with
+  // the real list.
+  const anthRefreshBtn = overlay.querySelector<HTMLButtonElement>("[data-welcome-refresh-anthropic]");
+  const anthRefreshStatus = overlay.querySelector<HTMLSpanElement>("[data-welcome-anthropic-model-status]");
+  const anthModelSel = overlay.querySelector<HTMLSelectElement>("[data-welcome-anthropic-model]");
+  if (anthRefreshBtn && anthRefreshStatus && anthModelSel) {
+    anthRefreshBtn.addEventListener("click", async () => {
+      const key = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? "";
+      if (!key) {
+        anthRefreshStatus.textContent = "Paste a key first";
+        anthRefreshStatus.className = "anthropic-model-status err";
+        return;
+      }
+      anthRefreshStatus.textContent = "Fetching…";
+      anthRefreshStatus.className = "anthropic-model-status pending";
+      anthRefreshBtn.disabled = true;
+      try {
+        const models = await listAnthropicModels(key);
+        if (models.length === 0) {
+          anthRefreshStatus.textContent = "0 models returned";
+          anthRefreshStatus.className = "anthropic-model-status err";
+          return;
+        }
+        // Cache for settings_ui to reuse on its next open. We can't
+        // call saveCachedAnthropicModels directly without re-exporting
+        // it from settings_ui — instead, just write the same key here.
+        try {
+          localStorage.setItem(
+            "tourguide.anthropicModels.v1",
+            JSON.stringify({ fetchedAt: Date.now(), models }),
+          );
+        } catch {
+          /* fine */
+        }
+        const previous = anthModelSel.value;
+        anthModelSel.innerHTML = renderAnthropicModelOptions(previous);
+        anthRefreshStatus.textContent = models.some((m) => m.id === previous)
+          ? `✓ ${models.length} models loaded`
+          : `✓ ${models.length} models · previous "${previous}" not in list`;
+        anthRefreshStatus.className = "anthropic-model-status ok";
+      } catch (err) {
+        anthRefreshStatus.textContent = (err as Error).message.slice(0, 200);
+        anthRefreshStatus.className = "anthropic-model-status err";
+      } finally {
+        anthRefreshBtn.disabled = false;
+      }
+    });
+  }
+
+  overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='anthropic']").forEach((btn) => {
+    const out = findResultFor(btn);
+    if (!out) return;
+    btn.addEventListener("click", () => {
+      void runTest(btn, out, () => {
+        const key = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? "";
+        const model =
+          overlay.querySelector<HTMLSelectElement>("[data-welcome-anthropic-model]")?.value.trim() ||
+          DEFAULT_ANTHROPIC_MODEL;
+        if (!key) return { backend: null, emptyMsg: "Paste a key first" };
+        return { backend: new AnthropicBackend(key, model), emptyMsg: "" };
+      });
+    });
+  });
+
+  overlay.querySelectorAll<HTMLButtonElement>("[data-welcome-test='oai']").forEach((btn) => {
+    const out = findResultFor(btn);
+    if (!out) return;
+    btn.addEventListener("click", () => {
+      void runTest(btn, out, () => {
+        const provider = providerSelect.value as LLMProvider;
+        // Only the visible section's inputs exist in DOM — read from
+        // the currently-active section. openai_compatible additionally
+        // reads its typed base URL; the named presets use the table.
+        const section = overlay.querySelector<HTMLDivElement>(
+          `[data-welcome-provider-section="${provider}"]`,
+        );
+        const key = section?.querySelector<HTMLInputElement>("[data-welcome-oai-key]")?.value.trim() ?? "";
+        const model = section?.querySelector<HTMLInputElement>("[data-welcome-oai-model]")?.value.trim() ?? "";
+        const baseUrl =
+          provider === "openai_compatible"
+            ? section?.querySelector<HTMLInputElement>("[data-welcome-oai-baseurl]")?.value.trim() ?? ""
+            : OPENAI_COMPATIBLE_PRESETS[provider as keyof typeof OPENAI_COMPATIBLE_PRESETS]?.url ?? "";
+        if (!baseUrl) return { backend: null, emptyMsg: "Base URL is empty" };
+        if (!model) return { backend: null, emptyMsg: "Model is empty" };
+        // Local openai_compatible servers may not require a key, so
+        // empty key is allowed there but not for hosted presets.
+        if (provider !== "openai_compatible" && !key) {
+          return { backend: null, emptyMsg: "Paste a key first" };
+        }
+        return { backend: new OpenAICompatibleBackend(baseUrl, key, model), emptyMsg: "" };
+      });
+    });
+  });
+
   // Save settings (extracted so both 'Load demo' and 'Load my data'
   // commit the user's AI / analysis-backend choices before navigating).
   // Returns false if the user cancelled an invalid-Gemini-key warning.
-  const persistSettings = async (): Promise<boolean> => {
+  //
+  // `validate` controls whether to round-trip the API to check the key.
+  // We do this for Load Demo / Load My Data (so the user gets a warning
+  // before navigating with a typo'd key) but skip it for plain dismiss —
+  // the validation call can take 5–10s on a cold network and the user
+  // is already closing the dialog, so blocking them is wrong.
+  const persistSettings = async ({ validate = true }: { validate?: boolean } = {}): Promise<boolean> => {
     const aiChoice = (providerSelect.value as LLMProvider);
     const geminiKey = overlay.querySelector<HTMLInputElement>("[data-welcome-gemini-key]")?.value.trim() ?? settings.geminiApiKey;
     const anthropicKey = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-key]")?.value.trim() ?? settings.anthropicApiKey;
-    const anthropicModel = overlay.querySelector<HTMLInputElement>("[data-welcome-anthropic-model]")?.value.trim() || settings.anthropicModel || "claude-sonnet-4.6";
+    const anthropicModel = overlay.querySelector<HTMLSelectElement>("[data-welcome-anthropic-model]")?.value.trim() || settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL;
     // OpenAI-compatible group: only the visible section's inputs are
     // populated in the DOM (others were never rendered for the
     // un-shown providers, since the welcome dialog renders a fresh
@@ -351,23 +543,25 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     // skip those). A failed validate still lets the user save
     // anyway (typo'd key + click anyway is faster than retyping
     // when the user knows the key is right).
-    try {
-      if (aiChoice === "gemini" && geminiKey) {
-        await new GeminiBackend(geminiKey, next.geminiModel).validate();
-      } else if (aiChoice === "anthropic" && anthropicKey) {
-        await new AnthropicBackend(anthropicKey, anthropicModel).validate();
-      } else if (
-        (aiChoice === "openai" || aiChoice === "openrouter" || aiChoice === "xai") &&
-        oaiKey
-      ) {
-        const url = OPENAI_COMPATIBLE_PRESETS[aiChoice].url;
-        await new OpenAICompatibleBackend(url, oaiKey, oaiModel).validate();
+    if (validate) {
+      try {
+        if (aiChoice === "gemini" && geminiKey) {
+          await new GeminiBackend(geminiKey, next.geminiModel).validate();
+        } else if (aiChoice === "anthropic" && anthropicKey) {
+          await new AnthropicBackend(anthropicKey, anthropicModel).validate();
+        } else if (
+          (aiChoice === "openai" || aiChoice === "openrouter" || aiChoice === "xai") &&
+          oaiKey
+        ) {
+          const url = OPENAI_COMPATIBLE_PRESETS[aiChoice].url;
+          await new OpenAICompatibleBackend(url, oaiKey, oaiModel).validate();
+        }
+      } catch (err) {
+        const ok = confirm(
+          `API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
+        );
+        if (!ok) return false;
       }
-    } catch (err) {
-      const ok = confirm(
-        `API key didn't validate: ${(err as Error).message.slice(0, 200)}\n\nSave settings anyway?`,
-      );
-      if (!ok) return false;
     }
     opts.onSettingsChanged();
     return true;

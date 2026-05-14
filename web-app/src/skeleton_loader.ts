@@ -34,10 +34,23 @@ export interface ParsedSkeleton {
   numEdges: number;
 }
 
-// Strip neuroglancer-style scheme prefix and any trailing slash so we can
-// build subpath URLs cleanly.
+// Strip neuroglancer-style scheme prefix, translate bucket protocols
+// (gs:// / s3://) to fetchable https URLs, and drop any trailing
+// slash so we can build subpath URLs cleanly.
+//
+// Examples:
+//   precomputed://gs://bucket/path        → https://storage.googleapis.com/bucket/path
+//   precomputed://https://janelia/.../sk  → https://janelia/.../sk
+//   gs://bucket/path                       → https://storage.googleapis.com/bucket/path
+//   https://janelia/.../skeleton          → unchanged
 export function normalizeSkeletonBase(source: string): string {
-  return source.replace(/^precomputed:\/\//, "").replace(/\/$/, "");
+  let u = source.replace(/^precomputed:\/\//, "");
+  if (u.startsWith("gs://")) {
+    u = `https://storage.googleapis.com/${u.slice("gs://".length)}`;
+  } else if (u.startsWith("s3://")) {
+    u = `https://s3.amazonaws.com/${u.slice("s3://".length)}`;
+  }
+  return u.replace(/\/$/, "");
 }
 
 export async function fetchSkeletonInfo(base: string): Promise<SkeletonInfo> {

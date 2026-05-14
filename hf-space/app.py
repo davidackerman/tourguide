@@ -73,11 +73,90 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days; survives idle Space sleep
 # across container cycle.
 SHARE_ROOT = Path(os.environ.get("TG_SHARE_ROOT", "/tmp/tourguide-shares"))
 SHARE_ROOT.mkdir(parents=True, exist_ok=True)
-SHARE_MAX_BYTES = 1_000_000  # 1 MB — generous; the largest realistic
-                              # permalink suffix is in the low-100s of KB.
+SHARE_MAX_BYTES = 10_000_000  # 10 MB — enough room for several
+                              # 5k-row tables in a single share without
+                              # forcing truncation past what the
+                              # frontend already does at the boundary.
 SHARE_ID_BYTES = 6  # 12 hex chars → 48 bits, plenty for collision-free
                     # ids at this scale and short enough to fit a chat
                     # message comfortably.
+
+# Optional persistent share storage via HF Datasets. Set both env vars
+# in the Space's secrets to activate:
+#   HF_TOKEN           — token with write access to TG_SHARE_DATASET
+#   TG_SHARE_DATASET   — repo id, e.g. "ackermand/tourguide-shares"
+# Without these, shares write to /tmp (ephemeral; cleared on Space
+# restart). Reads always try HF first regardless of where the original
+# write went, so links survive across container cycles when HF is
+# configured.
+HF_SHARE_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+HF_SHARE_DATASET = os.environ.get("TG_SHARE_DATASET", "").strip()
+# One-line startup sanity probe so future "is persistence wired?"
+# diagnoses don't require redeploying with a debug build. Token is
+# masked; only its prefix + length are logged.
+_tok_dbg = (
+    f"set ({HF_SHARE_TOKEN[:4]}…, len={len(HF_SHARE_TOKEN)})"
+    if HF_SHARE_TOKEN
+    else "EMPTY"
+)
+log.info(
+    "Share storage env check: HF_TOKEN=%s, TG_SHARE_DATASET=%r",
+    _tok_dbg, HF_SHARE_DATASET,
+)
+try:
+    if HF_SHARE_TOKEN and HF_SHARE_DATASET:
+        from huggingface_hub import HfApi  # noqa: WPS433
+        _hf_share_api: Optional[Any] = HfApi(token=HF_SHARE_TOKEN)
+    else:
+        _hf_share_api = None
+except Exception as _hf_imp_exc:  # noqa: BLE001
+    _hf_share_api = None
+    log.warning("huggingface_hub import failed; share storage stays on /tmp: %s", _hf_imp_exc)
+HF_SHARES_AVAILABLE = _hf_share_api is not None
+log.info(
+    "Share storage: %s",
+    f"HF Datasets {HF_SHARE_DATASET} (persistent)"
+    if HF_SHARES_AVAILABLE
+    else "/tmp (ephemeral — set HF_TOKEN + TG_SHARE_DATASET for persistent)",
+)
+
+
+async def _share_write_hf(share_id: str, suffix: str) -> bool:
+    """Upload share content to HF Dataset. Returns True on success."""
+    if not HF_SHARES_AVAILABLE or _hf_share_api is None:
+        return False
+    try:
+        await asyncio.to_thread(
+            _hf_share_api.upload_file,
+            path_or_fileobj=suffix.encode("utf-8"),
+            path_in_repo=f"shares/{share_id}.txt",
+            repo_id=HF_SHARE_DATASET,
+            repo_type="dataset",
+            commit_message=f"share {share_id}",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("HF share write failed for %s: %s — falling back to /tmp", share_id, exc)
+        return False
+
+
+async def _share_read_hf(share_id: str) -> Optional[str]:
+    """Fetch share content from HF Dataset. Returns None if not found / errored."""
+    if not HF_SHARES_AVAILABLE or _hf_share_api is None:
+        return None
+    try:
+        path = await asyncio.to_thread(
+            _hf_share_api.hf_hub_download,
+            repo_id=HF_SHARE_DATASET,
+            filename=f"shares/{share_id}.txt",
+            repo_type="dataset",
+        )
+        return Path(path).read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        # 404 / network blip / token revoked — all OK to swallow,
+        # we'll fall through to /tmp on the read side.
+        log.info("HF share read miss for %s: %s", share_id, exc)
+        return None
 
 # Caps exposed to the frontend via /health — match the plan.
 MAX_CONCURRENT_ANALYSES = 2
@@ -145,6 +224,21 @@ class LayerSpec(BaseModel):
     offsetNm: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
+class PrecomputedVolumeLayerSpec(BaseModel):
+    """Neuroglancer precomputed segmentation volume input.
+
+    Slimmer than the worker's equivalent — tensorstore re-reads the info
+    file from `baseUrl` so we don't need to ship chunk size / encoding /
+    sharding from the client. scaleKey picks the multiscale level.
+    """
+    varName: str
+    baseUrl: str
+    scaleKey: str
+    axesOrder: List[str] = Field(default_factory=lambda: ["x", "y", "z"])
+    voxelNm: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    offsetNm: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
 class TableSpec(BaseModel):
     name: str
     columns: List[str]
@@ -153,6 +247,7 @@ class TableSpec(BaseModel):
 
 class CustomRequestBody(BaseModel):
     layers: List[LayerSpec] = Field(default_factory=list)
+    precomputedVolumeLayers: List[PrecomputedVolumeLayerSpec] = Field(default_factory=list)
     tables: List[TableSpec] = Field(default_factory=list)
     code: str
     timeoutMs: int = 60000
@@ -395,19 +490,22 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
     elif raw_proto == "s3":
         # TODO: tensorstore's native s3 driver is faster than tunneling via
         # http, but needs bucket+path broken out. For now treat as http over
-        # the bucket's HTTPS endpoint (CellMap buckets are public + anon).
-        https_url = "https://" + url.split("://", 1)[1]
-        kvstore = {"driver": "http", "base_url": https_url}
+        # the bucket's virtual-hosted HTTPS endpoint
+        # (https://<bucket>.s3.amazonaws.com/<key>) — public CellMap
+        # buckets allow anonymous read. _s3_to_https handles the host
+        # construction correctly; the previous naive 'https://' + tail
+        # form dropped the .s3.amazonaws.com host.
+        kvstore = {"driver": "http", "base_url": _s3_to_https(url)}
     else:
         raise HTTPException(status_code=400, detail=f"unsupported layer URL scheme: {raw_proto}")
 
-    # Try zarr v2 first (CellMap default), fall back to v3. When both
-    # tensorstore drivers fail, fall back to zarr-python — it tolerates
-    # numcodecs additions (checksum, etc.) that tensorstore strict-
-    # rejects. Slower per-chunk but reliable.
+    # Try zarr v2 first (CellMap default), fall back to v3, then n5.
+    # When all tensorstore drivers fail, fall back to zarr-python — it
+    # tolerates numcodecs additions (checksum, etc.) that tensorstore
+    # strict-rejects. Slower per-chunk but reliable.
     errors_by_driver: Dict[str, Exception] = {}
     ts_arr = None
-    for driver in ("zarr", "zarr3"):
+    for driver in ("zarr", "zarr3", "n5"):
         spec: Dict[str, Any] = {
             "driver": driver,
             "kvstore": kvstore,
@@ -464,6 +562,139 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
             detail=f"tensorstore read failed ({url} path={layer.scalePath!r} shape={list(ts_arr.shape)}): {type(exc).__name__}: {exc}",
         )
     return np.asarray(data)
+
+
+async def _load_via_tensorstore_precomputed(layer: PrecomputedVolumeLayerSpec) -> np.ndarray:
+    """Open a Neuroglancer precomputed segmentation with tensorstore.
+
+    Mirrors what the browser worker's precomputed_volume_loader.ts does
+    (decode compressed_segmentation chunks, optionally sharded, into a
+    single ndarray) but uses tensorstore's native neuroglancer_precomputed
+    driver — which already handles every encoding/sharding variant, so
+    we don't need to maintain a parallel reader on this side.
+    """
+    import tensorstore as ts  # noqa: WPS433
+
+    # baseUrl looks like 'precomputed://gs://bucket/path' or
+    # 'precomputed://https://...'. Tensorstore's kvstore URL form
+    # expects the underlying scheme (gs://, http://, https://) so we
+    # strip the precomputed:// marker.
+    raw = layer.baseUrl
+    if raw.startswith("precomputed://"):
+        raw = raw[len("precomputed://"):]
+    raw = raw.rstrip("/")
+    scheme = raw.split("://", 1)[0] if "://" in raw else ""
+    if scheme not in ("http", "https", "gs", "s3"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported precomputed URL scheme: {scheme!r} (expected gs/s3/http/https)",
+        )
+
+    # Tensorstore is happy with a kvstore URL string for these schemes.
+    # The neuroglancer_precomputed driver reads the info file under that
+    # root; scale_metadata.key picks which downsampling level to open.
+    spec: Dict[str, Any] = {
+        "driver": "neuroglancer_precomputed",
+        "kvstore": raw + "/",
+        "scale_metadata": {"key": layer.scaleKey},
+    }
+    try:
+        ts_arr = await ts.open(spec)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"tensorstore open failed for precomputed {raw} "
+                f"scale={layer.scaleKey!r}: {type(exc).__name__}: {exc}"
+            ),
+        )
+
+    # Neuroglancer precomputed is laid out as (x, y, z, channel). For a
+    # single-channel segmentation that's (x, y, z, 1). We drop the
+    # channel axis and let downstream code see a 3D label volume.
+    try:
+        # Log the tensorstore-reported axes + shape so we can verify
+        # dimension order matches what user code expects (x, y, z) AND
+        # spot whether tensorstore opened the volume with the correct
+        # encoding (raw vs compressed_segmentation). The driver should
+        # pick the encoding up from the info file automatically.
+        try:
+            ts_domain = ts_arr.domain
+            ts_labels = list(ts_domain.labels)
+            ts_shape = list(ts_arr.shape)
+            ts_encoding = ts_arr.spec().to_json().get("scale_metadata", {}).get("encoding")
+        except Exception:  # noqa: BLE001
+            ts_labels, ts_shape, ts_encoding = None, None, None
+        log.info(
+            "precomputed open: scale=%s rank=%d labels=%s shape=%s encoding=%s dtype=%s",
+            layer.scaleKey, ts_arr.rank, ts_labels, ts_shape, ts_encoding, ts_arr.dtype,
+        )
+        rank = ts_arr.rank
+        if rank == 4:
+            sliced = ts_arr[..., 0]
+        elif rank == 3:
+            sliced = ts_arr
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unexpected precomputed rank {rank} (expected 3 or 4)",
+            )
+        data = await sliced.read()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"tensorstore read failed for precomputed {raw} "
+                f"scale={layer.scaleKey!r} shape={list(ts_arr.shape)}: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+    arr = np.asarray(data)
+    # Sanity-check the actual label values. Real hemibrain neuron IDs
+    # are ~10-12 digit uint64s (e.g. 1077906205). A bit-shift / stride
+    # decode bug typically produces powers-of-two or absurdly-large
+    # garbage; legitimately small fragment IDs would be in low 6-7
+    # digits. Sampling cheaply (no full np.unique) so this doesn't add
+    # noticeable latency to every load.
+    try:
+        flat = arr.reshape(-1)
+        nonzero_mask = flat != 0
+        nonzero_count = int(nonzero_mask.sum())
+        first_nonzero = flat[nonzero_mask][:8].tolist() if nonzero_count > 0 else []
+        sample_step = max(1, flat.size // 50_000)
+        sample = flat[::sample_step]
+        sample_unique = int(np.unique(sample).size)
+        log.info(
+            "precomputed loaded: shape=%s dtype=%s min=%s max=%s nonzero=%d/%d "
+            "first_nonzero=%s sample_unique=%d (of %d sampled)",
+            list(arr.shape), arr.dtype, int(arr.min()), int(arr.max()),
+            nonzero_count, flat.size,
+            first_nonzero, sample_unique, sample.size,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("precomputed diagnostic failed: %s", exc)
+    return arr
+
+
+def _precomputed_layer_to_globals(
+    layer: PrecomputedVolumeLayerSpec,
+    arr: np.ndarray,
+) -> Dict[str, Any]:
+    """Same shape as _layer_to_globals — keeps user code agnostic to
+    whether the layer was zarr or precomputed."""
+    spatial_axes = [a for a in layer.axesOrder if a in ("x", "y", "z")]
+    if len(spatial_axes) != arr.ndim:
+        spatial_axes = ["z", "y", "x"][-arr.ndim:]
+    axis_scale = {"x": layer.voxelNm[0], "y": layer.voxelNm[1], "z": layer.voxelNm[2]}
+    axis_offset = {"x": layer.offsetNm[0], "y": layer.offsetNm[1], "z": layer.offsetNm[2]}
+    return {
+        "array": arr,
+        "spacing": tuple(axis_scale.get(a, 1.0) for a in spatial_axes),
+        "offsets": tuple(axis_offset.get(a, 0.0) for a in spatial_axes),
+        "axes": list(spatial_axes),
+    }
 
 
 def _join_url(base: str, rel: str) -> str:
@@ -872,6 +1103,327 @@ async def _cleanup_session_later(session_id: str) -> None:
     shutil.rmtree(SESSION_ROOT / session_id, ignore_errors=True)
 
 
+# --- Inspect endpoint -------------------------------------------------------
+#
+# Mirror of what the browser worker does for zarr, generalized to N5
+# too. The frontend currently only routes here for N5 sources (zarrita
+# can't read N5); zarr keeps using the worker because that's instant
+# and doesn't depend on the Space being awake. CellMap N5 convention
+# is the only one we explicitly handle — scales discovered as s0, s1,
+# ... subdirs with `pixelResolution.dimensions` (ZYX) for spacing and
+# `transform.translate` for offset.
+
+
+class InspectSourceBody(BaseModel):
+    url: str
+    # Fallback voxel size in xyz (nm) when we can't read it from
+    # attributes — used to keep downstream fly_to / centroid math
+    # in usable units even if metadata is missing.
+    defaultVoxelNm: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+
+def _strip_url_prefix(url: str) -> str:
+    """Drop any 'n5://', 'zarr*://' prefix the frontend may have passed."""
+    for prefix in ("n5://", "zarr3://", "zarr2://", "zarr://"):
+        if url.startswith(prefix):
+            return url[len(prefix):]
+    return url
+
+
+def _s3_to_https(url: str) -> str:
+    """Convert s3://<bucket>/<key> to a virtual-hosted HTTPS URL.
+
+    AWS S3 public buckets are reachable anonymously as
+    https://<bucket>.s3.amazonaws.com/<key>. The naive
+    'https://' + url[5:] form (which the previous code used)
+    drops the .s3.amazonaws.com host and resolves to nothing.
+    """
+    if not url.startswith("s3://"):
+        return url
+    rest = url[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    return f"https://{bucket}.s3.amazonaws.com/{key}"
+
+
+def _kvstore_for(url: str) -> Dict[str, Any]:
+    """Build tensorstore kvstore for http/https/s3/gs URLs.
+
+    S3 public buckets reachable as HTTPS — we don't try the native
+    s3 driver since CellMap data is anonymous-read."""
+    raw = _s3_to_https(url).rstrip("/") + "/"
+    scheme = raw.split("://", 1)[0] if "://" in raw else ""
+    if scheme in ("http", "https"):
+        return {"driver": "http", "base_url": raw}
+    if scheme == "gs":
+        return {"driver": "gcs", "base_url": raw}
+    raise HTTPException(status_code=400, detail=f"unsupported scheme for inspect: {scheme!r}")
+
+
+async def _fetch_json(url: str) -> Optional[Dict[str, Any]]:
+    """GET a JSON file (e.g. attributes.json) — returns None on 404 / parse error."""
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(url) as resp:
+                if resp.status >= 400:
+                    return None
+                return await resp.json(content_type=None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _extract_axes_order(root_attrs: Dict[str, Any]) -> List[str]:
+    """Read the axis order from N5 root attributes.
+
+    CellMap N5 has TWO conventions for axis info:
+      - root 'axes' as list of strings or dicts with 'name'
+      - multiscales[0].axes (OME-NGFF) — list of dicts with 'name'
+    Both should be in the same array-axis order (i.e. matching
+    arr.shape positions). Returns lowercase axis names; falls back
+    to ['z','y','x'] if metadata is missing.
+    """
+    names: List[str] = []
+    axes = root_attrs.get("axes")
+    if isinstance(axes, list):
+        for a in axes:
+            if isinstance(a, str):
+                names.append(a.lower())
+            elif isinstance(a, dict) and isinstance(a.get("name"), str):
+                names.append(a["name"].lower())
+    if not names:
+        ms = root_attrs.get("multiscales")
+        if isinstance(ms, list) and ms and isinstance(ms[0], dict):
+            ms_axes = ms[0].get("axes")
+            if isinstance(ms_axes, list):
+                for a in ms_axes:
+                    if isinstance(a, dict) and isinstance(a.get("name"), str):
+                        names.append(a["name"].lower())
+    return names or ["z", "y", "x"]
+
+
+def _voxel_nm_xyz_from_attrs(
+    attrs: Dict[str, Any],
+    axes_order: List[str],
+    default: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    """Pull per-axis voxel size in nm, aligned to xyz via axes_order.
+
+    `pixelResolution.dimensions` and `transform.scale` are in array-axis
+    order (i.e. same order as axes_order). We index by position into
+    the dims array using the axis name."""
+    by_axis: Dict[str, float] = {}
+    pr = attrs.get("pixelResolution")
+    if isinstance(pr, dict):
+        dims = pr.get("dimensions")
+        if isinstance(dims, list):
+            for i in range(min(len(dims), len(axes_order))):
+                try:
+                    by_axis[axes_order[i]] = float(dims[i])
+                except (TypeError, ValueError):
+                    pass
+    if not by_axis:
+        tr = attrs.get("transform")
+        if isinstance(tr, dict):
+            sc = tr.get("scale")
+            if isinstance(sc, list):
+                for i in range(min(len(sc), len(axes_order))):
+                    try:
+                        by_axis[axes_order[i]] = float(sc[i])
+                    except (TypeError, ValueError):
+                        pass
+    return (
+        by_axis.get("x", default[0]),
+        by_axis.get("y", default[1]),
+        by_axis.get("z", default[2]),
+    )
+
+
+def _offset_nm_xyz_from_attrs(
+    attrs: Dict[str, Any],
+    axes_order: List[str],
+) -> Tuple[float, float, float]:
+    """Pull per-axis offset in nm, aligned to xyz via axes_order."""
+    by_axis: Dict[str, float] = {}
+    tr = attrs.get("transform")
+    if isinstance(tr, dict):
+        tl = tr.get("translate")
+        if isinstance(tl, list):
+            for i in range(min(len(tl), len(axes_order))):
+                try:
+                    by_axis[axes_order[i]] = float(tl[i])
+                except (TypeError, ValueError):
+                    pass
+    return (
+        by_axis.get("x", 0.0),
+        by_axis.get("y", 0.0),
+        by_axis.get("z", 0.0),
+    )
+
+
+async def _inspect_scale(
+    kvstore: Dict[str, Any],
+    base_url: str,
+    scale_path: str,
+    finest_voxel_nm_xyz: Optional[Tuple[float, float, float]],
+    default_voxel_nm: Tuple[float, float, float],
+    axes_order: List[str],
+) -> Optional[Dict[str, Any]]:
+    """Open one scale with tensorstore, build a LayerScaleInfo dict.
+
+    Tries tensorstore with two kvstore layouts:
+      1. path=<scale_path>, kvstore at the array's parent (e.g. mito_seg/)
+      2. path=<full_path_to_scale>, kvstore at the bucket root
+    Some tensorstore N5 versions are picky about where the 'root' lives.
+    """
+    import tensorstore as ts  # noqa: WPS433
+    errors: List[str] = []
+    arr = None
+    # Strategy 1: path=scale_path, kvstore at parent
+    for driver in ("n5", "zarr", "zarr3"):
+        try:
+            arr = await ts.open({
+                "driver": driver,
+                "kvstore": kvstore,
+                "path": scale_path,
+                "open": True,
+            })
+            break
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"strat1 driver={driver}: {type(exc).__name__}: {str(exc)[:200]}")
+    if arr is None:
+        log.warning("inspect-source: scale %s strat1 all failed: %s", scale_path, errors)
+        return None
+    shape = [int(s) for s in arr.shape]
+    itemsize = arr.dtype.numpy_dtype.itemsize
+    approx_bytes = int(itemsize * int(np.prod(shape)))
+    # Voxel/offset from this scale's attributes.json (CellMap N5 conv).
+    # pixelResolution.dimensions / transform.translate are stored in
+    # array-axis order (matching arr.shape), so we map them to xyz via
+    # axes_order, NOT by reversing.
+    attrs = await _fetch_json(f"{base_url.rstrip('/')}/{scale_path}/attributes.json") or {}
+    voxel_nm = _voxel_nm_xyz_from_attrs(attrs, axes_order, default_voxel_nm)
+    offset_nm = _offset_nm_xyz_from_attrs(attrs, axes_order)
+    # Downsample ratio relative to finest if known.
+    if finest_voxel_nm_xyz:
+        ds = tuple(voxel_nm[i] / finest_voxel_nm_xyz[i] if finest_voxel_nm_xyz[i] else 1.0 for i in range(3))
+    else:
+        ds = (1.0, 1.0, 1.0)
+    return {
+        "path": scale_path,
+        "shape": shape,
+        "voxelNm": list(voxel_nm),
+        "offsetNm": list(offset_nm),
+        "downsample": list(ds),
+        "approxBytes": approx_bytes,
+    }
+
+
+@app.post("/api/inspect-source")
+async def inspect_source(body: InspectSourceBody) -> Dict[str, Any]:
+    """Probe a remote zarr/n5 source for its multiscale shape.
+
+    Used by the frontend when the browser worker can't read the source
+    (currently: anything that isn't zarr v2/v3 — i.e. N5). Returns a
+    LayerInspection-shaped JSON the frontend's existing scale-picker
+    can consume unchanged.
+    """
+    raw = _strip_url_prefix(body.url)
+    kvstore = _kvstore_for(raw)
+    # Use the virtual-hosted HTTPS form so attribute fetches go to a
+    # real host. The naive s3-to-https swap (just stripping the scheme)
+    # dropped the .s3.amazonaws.com part and produced URLs that resolve
+    # to nothing — which is why scale discovery was returning 404.
+    base_url = _s3_to_https(raw).rstrip("/")
+    log.info("inspect-source: base_url=%s", base_url)
+    # First read root attributes — CellMap's multiscale dir sometimes
+    # lists explicit scales here; otherwise we scan s0, s1, … and also
+    # try "0", "1", … (some N5 datasets use unprefixed integers).
+    root_attrs = await _fetch_json(f"{base_url}/attributes.json") or {}
+    log.info("inspect-source: root attrs keys=%s", list(root_attrs.keys()))
+    scale_paths: List[str] = []
+    probe_attempts: List[Dict[str, Any]] = []
+    # 1) OME-NGFF style: multiscales[0].datasets[].path — this is the
+    #    most reliable convention; CellMap uses it. The 'scales' field
+    #    sitting next to it is a list of downsample factors (e.g.
+    #    [[1,1,1], [2,2,2], …]), NOT scale paths — the earlier code
+    #    confused these.
+    ms = root_attrs.get("multiscales")
+    if isinstance(ms, list) and ms:
+        first = ms[0] if isinstance(ms[0], dict) else None
+        if first:
+            datasets = first.get("datasets")
+            if isinstance(datasets, list):
+                for d in datasets:
+                    if isinstance(d, dict) and isinstance(d.get("path"), str):
+                        scale_paths.append(d["path"])
+                if scale_paths:
+                    probe_attempts.append({"strategy": "multiscales.datasets[].path", "found": len(scale_paths)})
+    # 2) Legacy: scales as a list of subdirectory NAMES (strings)
+    if not scale_paths and isinstance(root_attrs.get("scales"), list):
+        raw_scales = root_attrs["scales"]
+        if all(isinstance(s, str) for s in raw_scales):
+            scale_paths = list(raw_scales)
+            probe_attempts.append({"strategy": "root attrs scales[]", "found": len(scale_paths)})
+    # 3) Probe s0..sN or 0..N
+    if not scale_paths:
+        for prefix_style in ("s", ""):
+            tried: List[str] = []
+            for i in range(20):
+                sp = f"{prefix_style}{i}"
+                tried.append(sp)
+                probe = await _fetch_json(f"{base_url}/{sp}/attributes.json")
+                if probe is None:
+                    break
+                scale_paths.append(sp)
+            probe_attempts.append(
+                {"strategy": f"probe '{prefix_style}0..N'", "tried": tried[:3], "found": len(scale_paths)},
+            )
+            if scale_paths:
+                break
+    if not scale_paths:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no scales found at {raw}. base_url={base_url}, "
+                f"root attrs keys={list(root_attrs.keys())}, attempts={probe_attempts}"
+            ),
+        )
+
+    # Pull axis order from the metadata. CellMap N5 stores both an
+    # `axes` field at root AND multiscales[0].axes — either tells us
+    # which axis is which position in arr.shape. Without this, mapping
+    # pixelResolution.dimensions to xyz is guesswork (the previous
+    # code blindly reversed it, which was correct for some datasets
+    # and wrong for others — producing 'off' COM coords).
+    axes_order = _extract_axes_order(root_attrs)
+    log.info("inspect-source: axes_order=%s", axes_order)
+
+    # First pass: get voxel size of the finest scale so coarser scales
+    # can report a sensible downsample factor.
+    finest_attrs = await _fetch_json(f"{base_url}/{scale_paths[0]}/attributes.json") or {}
+    finest_voxel = _voxel_nm_xyz_from_attrs(finest_attrs, axes_order, body.defaultVoxelNm)
+
+    scales: List[Dict[str, Any]] = []
+    for sp in scale_paths:
+        info = await _inspect_scale(kvstore, base_url, sp, finest_voxel, body.defaultVoxelNm, axes_order)
+        if info is not None:
+            scales.append(info)
+    if not scales:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"could open root attributes but tensorstore failed to open every scale at {raw}. "
+                f"Tried paths: {scale_paths[:5]}. Check the Space logs for per-driver errors."
+            ),
+        )
+    return {
+        "isMultiscale": len(scales) > 1,
+        # Axes in the real array-axis order so the frontend's
+        # _layer_to_globals can align spacing/offsets correctly.
+        "axes": [{"name": n} for n in axes_order],
+        "scales": scales,
+    }
+
+
 # --- Run endpoint ------------------------------------------------------------
 
 
@@ -897,12 +1449,19 @@ async def run_analysis(request: Request, body: CustomRequestBody, background: Ba
     QUEUE_DEPTH += 1
     try:
         async with ANALYSIS_SEMAPHORE:
-            # Load each layer into a numpy array.
+            # Load each layer into a numpy array. Zarr/n5 go through the
+            # existing tensorstore+zarr-python path; precomputed-volume
+            # layers use tensorstore's neuroglancer_precomputed driver.
+            # Both produce the same per-layer globals shape so user code
+            # is agnostic.
             try:
                 layers_info: Dict[str, Dict[str, Any]] = {}
                 for layer in body.layers:
                     arr = await _load_layer(layer, tunnel)
                     layers_info[layer.varName] = _layer_to_globals(layer, arr)
+                for pvlayer in body.precomputedVolumeLayers:
+                    arr = await _load_via_tensorstore_precomputed(pvlayer)
+                    layers_info[pvlayer.varName] = _precomputed_layer_to_globals(pvlayer, arr)
             except HTTPException:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1044,10 +1603,11 @@ async def create_share(body: ShareCreateBody) -> Dict[str, Any]:
     """Store a permalink suffix and return a short id.
 
     Suffix is the everything-after-the-page-URL string the frontend
-    builds — e.g. `?d=...&q=...#!{...}`. We just write it to disk
-    verbatim; no parsing here, the frontend's decode logic handles
-    that on the load side. Caps payload size to keep a flood from
-    filling /tmp.
+    builds — e.g. `?d=...&q=...#!{...}`. When HF Datasets is
+    configured (HF_TOKEN + TG_SHARE_DATASET env vars), uploads there
+    for persistence across Space restarts. Falls back to /tmp
+    otherwise. The response's `persistent` field tells the frontend
+    which path was used so it can warn the user about ephemerality.
     """
     if len(body.suffix.encode("utf-8")) > SHARE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="share payload too large")
@@ -1055,11 +1615,17 @@ async def create_share(body: ShareCreateBody) -> Dict[str, Any]:
     # tries rather than spin.
     for _ in range(5):
         sid = uuid.uuid4().hex[: SHARE_ID_BYTES * 2]
+        # Try HF first (persistent); fall back to /tmp on failure or
+        # when not configured. Even when HF wrote successfully, we
+        # ALSO keep a /tmp copy so a hot recipient hit doesn't have
+        # to round-trip to HF for the read.
+        wrote_hf = await _share_write_hf(sid, body.suffix)
         target = SHARE_ROOT / f"{sid}.txt"
         if target.exists():
+            # collision with /tmp file — try a new id
             continue
         target.write_text(body.suffix, encoding="utf-8")
-        return {"id": sid}
+        return {"id": sid, "persistent": wrote_hf}
     raise HTTPException(status_code=500, detail="couldn't allocate share id")
 
 
@@ -1071,10 +1637,21 @@ async def get_share(share_id: str) -> Dict[str, Any]:
     # whatever's in the URL.
     if not re.fullmatch(r"[A-Za-z0-9_-]+", share_id):
         raise HTTPException(status_code=400, detail="invalid share id")
+    # /tmp first (fast hot path for shares created on this container);
+    # fall back to HF Datasets when /tmp has been cleared (Space
+    # restart) or the share was created on a different container.
     target = SHARE_ROOT / f"{share_id}.txt"
-    if not target.exists():
+    if target.exists():
+        return {"suffix": target.read_text(encoding="utf-8")}
+    content = await _share_read_hf(share_id)
+    if content is None:
         raise HTTPException(status_code=404, detail="share not found")
-    return {"suffix": target.read_text(encoding="utf-8")}
+    # Warm /tmp for subsequent reads on this container.
+    try:
+        target.write_text(content, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"suffix": content}
 
 
 # --- Dev entrypoint ----------------------------------------------------------

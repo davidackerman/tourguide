@@ -12,11 +12,14 @@ import {
   hasWebGPU,
   diagnoseWebGPU,
   DEFAULT_ANALYSIS_BACKEND,
+  DEFAULT_ANTHROPIC_MODEL,
   listGeminiModels,
+  listAnthropicModels,
   type Settings,
   type LLMBackend,
   type LLMProvider,
   type GeminiModelInfo,
+  type AnthropicModelInfo,
 } from "./llm.js";
 
 // v2: bumped 2026-05-07 after correcting free-tier limits. Old caches
@@ -53,6 +56,36 @@ function saveCachedGeminiModels(models: GeminiModelInfo[]): void {
     /* localStorage full or disabled — caching is best-effort */
   }
 }
+
+const ANTHROPIC_MODELS_CACHE_KEY = "tourguide.anthropicModels.v1";
+
+interface CachedAnthropicModels {
+  fetchedAt: number;
+  models: AnthropicModelInfo[];
+}
+
+function loadCachedAnthropicModels(): AnthropicModelInfo[] | null {
+  try {
+    const raw = localStorage.getItem(ANTHROPIC_MODELS_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as CachedAnthropicModels;
+    if (Date.now() - cached.fetchedAt > 7 * 24 * 60 * 60 * 1000) return null;
+    return cached.models;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedAnthropicModels(models: AnthropicModelInfo[]): void {
+  try {
+    localStorage.setItem(
+      ANTHROPIC_MODELS_CACHE_KEY,
+      JSON.stringify({ fetchedAt: Date.now(), models }),
+    );
+  } catch {
+    /* fine */
+  }
+}
 import { waitForBackendReady, fetchHealth } from "./remote_analysis.js";
 
 export interface SettingsUIOptions {
@@ -76,6 +109,24 @@ function renderGeminiModelOptions(currentId: string): string {
         { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
         { id: "gemini-2.5-pro", label: "gemini-2.5-pro" },
       ];
+  if (currentId && !list.some((m) => m.id === currentId)) {
+    list.unshift({ id: currentId, label: `${currentId} (current)` });
+  }
+  return list
+    .map((m) => `<option value="${m.id}" ${currentId === m.id ? "selected" : ""}>${m.label}</option>`)
+    .join("");
+}
+
+// Same shape as the Gemini renderer but for Anthropic. Stub list uses
+// model IDs in Anthropic's actual format (hyphens, not dots — the
+// dotted form returns 404 on /v1/messages). Stub is only shown until
+// the user pastes a key and clicks Refresh, which replaces it with the
+// real /v1/models list for their key.
+export function renderAnthropicModelOptions(currentId: string): string {
+  const cached = loadCachedAnthropicModels();
+  const list = cached && cached.length > 0
+    ? cached.map((m) => ({ id: m.id, label: m.id }))
+    : [{ id: DEFAULT_ANTHROPIC_MODEL, label: DEFAULT_ANTHROPIC_MODEL }];
   if (currentId && !list.some((m) => m.id === currentId)) {
     list.unshift({ id: currentId, label: `${currentId} (current)` });
   }
@@ -131,7 +182,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="gemini" ${current.backend === "gemini" ? "" : "hidden"}>
           <label>
             Gemini API key
-            <input type="password" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/app/apikey" autocomplete="off" />
+            <input type="text" class="api-key" data-field="geminiApiKey" value="${escapeAttr(current.geminiApiKey)}" placeholder="Get a free key at aistudio.google.com/app/apikey" autocomplete="off" />
           </label>
           <label>
             Gemini model
@@ -145,13 +196,16 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="anthropic" ${current.backend === "anthropic" ? "" : "hidden"}>
           <label>
             Anthropic API key
-            <input type="password" data-field="anthropicApiKey" value="${escapeAttr(current.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
+            <input type="text" class="api-key" data-field="anthropicApiKey" value="${escapeAttr(current.anthropicApiKey)}" placeholder="Get a key at console.anthropic.com" autocomplete="off" />
           </label>
           <label>
             Claude model
-            <input type="text" data-field="anthropicModel" value="${escapeAttr(current.anthropicModel || "claude-sonnet-4.6")}" placeholder="claude-sonnet-4.6" />
+            <select data-field="anthropicModel">${renderAnthropicModelOptions(current.anthropicModel || DEFAULT_ANTHROPIC_MODEL)}</select>
           </label>
-          <p class="hint">Hits api.anthropic.com directly using <code>anthropic-dangerous-direct-browser-access</code>. Common model ids: <code>claude-sonnet-4.6</code>, <code>claude-opus-4.7</code>, <code>claude-haiku-4.5</code>.</p>
+          <p class="hint">Hits api.anthropic.com directly using <code>anthropic-dangerous-direct-browser-access</code>. The model list comes from your key via <code>/v1/models</code>, so paste a key first — then click Refresh to populate the dropdown.</p>
+          <button class="btn-secondary btn-tiny" data-action="refresh-anthropic-models" type="button">↻ Refresh available models</button>
+          <span class="anthropic-model-status" data-anthropic-model-status></span>
+          <br/>
           <button class="btn-secondary" data-action="test-anthropic">Test key</button>
           <span class="test-result" data-test-result-anthropic></span>
         </div>
@@ -159,7 +213,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="openai" ${current.backend === "openai" ? "" : "hidden"}>
           <label>
             OpenAI API key
-            <input type="password" data-field="openaiApiKey-openai" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-openai" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-…" autocomplete="off" />
           </label>
           <label>
             Model
@@ -173,7 +227,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="openrouter" ${current.backend === "openrouter" ? "" : "hidden"}>
           <label>
             OpenRouter API key
-            <input type="password" data-field="openaiApiKey-openrouter" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-openrouter" value="${escapeAttr(current.openaiApiKey)}" placeholder="sk-or-…" autocomplete="off" />
           </label>
           <label>
             Model
@@ -187,7 +241,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
         <div class="provider-section" data-provider-section="xai" ${current.backend === "xai" ? "" : "hidden"}>
           <label>
             xAI API key
-            <input type="password" data-field="openaiApiKey-xai" value="${escapeAttr(current.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-xai" value="${escapeAttr(current.openaiApiKey)}" placeholder="xai-…" autocomplete="off" />
           </label>
           <label>
             Model
@@ -205,7 +259,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           </label>
           <label>
             API key (optional for local servers)
-            <input type="password" data-field="openaiApiKey-custom" value="${escapeAttr(current.openaiApiKey)}" autocomplete="off" />
+            <input type="text" class="api-key" data-field="openaiApiKey-custom" value="${escapeAttr(current.openaiApiKey)}" autocomplete="off" />
           </label>
           <label>
             Model
@@ -247,6 +301,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
           </div>
 
           <h4>Refresh Gemini model list</h4>
+          <p class="hint">Needs your API key (above) — Google's <code>/v1beta/models</code> endpoint requires auth. Paste a key first, then click Refresh.</p>
           <div class="gemini-model-actions">
             <button class="btn-secondary btn-tiny" data-action="refresh-gemini-models" type="button">↻ Refresh available models</button>
             <span class="gemini-model-status" data-gemini-model-status></span>
@@ -428,6 +483,51 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
     }
   });
 
+  // Same pattern for Anthropic. /v1/models is the canonical list — much
+  // safer than memorizing IDs that have drifted (4.6 vs 4-6 etc.).
+  const refreshAnthBtn = overlay.querySelector<HTMLButtonElement>(
+    "[data-action='refresh-anthropic-models']",
+  )!;
+  const refreshAnthStatus = overlay.querySelector<HTMLSpanElement>(
+    "[data-anthropic-model-status]",
+  )!;
+  const anthModelEl = overlay.querySelector<HTMLSelectElement>(
+    `[data-field="anthropicModel"]`,
+  )!;
+  refreshAnthBtn.addEventListener("click", async () => {
+    const key = get("anthropicApiKey").trim();
+    if (!key) {
+      refreshAnthStatus.textContent = "Paste a key first";
+      refreshAnthStatus.className = "anthropic-model-status err";
+      return;
+    }
+    refreshAnthStatus.textContent = "Fetching…";
+    refreshAnthStatus.className = "anthropic-model-status pending";
+    refreshAnthBtn.disabled = true;
+    try {
+      const models = await listAnthropicModels(key);
+      if (models.length === 0) {
+        refreshAnthStatus.textContent = "0 models returned";
+        refreshAnthStatus.className = "anthropic-model-status err";
+        return;
+      }
+      saveCachedAnthropicModels(models);
+      const previous = anthModelEl.value;
+      anthModelEl.innerHTML = renderAnthropicModelOptions(previous);
+      if (!models.some((m) => m.id === previous)) {
+        refreshAnthStatus.textContent = `✓ ${models.length} models · previous "${previous}" not in list`;
+      } else {
+        refreshAnthStatus.textContent = `✓ ${models.length} models loaded`;
+      }
+      refreshAnthStatus.className = "anthropic-model-status ok";
+    } catch (err) {
+      refreshAnthStatus.textContent = (err as Error).message.slice(0, 200);
+      refreshAnthStatus.className = "anthropic-model-status err";
+    } finally {
+      refreshAnthBtn.disabled = false;
+    }
+  });
+
   // Test buttons — one per provider section. Each runs validate() on
   // a freshly-constructed backend with the key/model from its own
   // section, so the user gets feedback specific to where they're
@@ -477,7 +577,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
     () => {
       const key = get("anthropicApiKey").trim();
       if (!key) return { backend: null, emptyMsg: "Paste a key first" };
-      return { backend: new AnthropicBackend(key, get("anthropicModel") || "claude-sonnet-4.6"), emptyMsg: "" };
+      return { backend: new AnthropicBackend(key, get("anthropicModel") || DEFAULT_ANTHROPIC_MODEL), emptyMsg: "" };
     },
   );
   // OAI-compatible group: one Test button per provider section, all
@@ -638,7 +738,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       geminiApiKey: get("geminiApiKey").trim(),
       geminiModel: get("geminiModel") || "gemini-2.5-flash",
       anthropicApiKey: get("anthropicApiKey").trim(),
-      anthropicModel: get("anthropicModel").trim() || "claude-sonnet-4.6",
+      anthropicModel: get("anthropicModel").trim() || DEFAULT_ANTHROPIC_MODEL,
       openaiApiKey: getOaiKey().trim(),
       openaiModel: getOaiModel().trim(),
       openaiBaseUrl: get("openaiBaseUrl").trim(),

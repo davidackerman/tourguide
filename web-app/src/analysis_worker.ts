@@ -21,6 +21,12 @@ import {
   normalizeSkeletonBase,
   type ParsedSkeleton,
 } from "./skeleton_loader.js";
+import {
+  fetchLegacyMesh,
+  type ParsedMesh,
+} from "./precomputed_mesh_loader.js";
+import { fetchMultilodMesh } from "./precomputed_multilod_loader.js";
+import { loadPrecomputedScale, type PrecomputedScale } from "./precomputed_volume_loader.js";
 
 // Pin to same Pyodide version as plot.ts so both features share a cache of
 // wheels when the browser revisits.
@@ -64,6 +70,40 @@ export interface CustomRequest {
     voxelNm: [number, number, number];
     offsetNm: [number, number, number];
   }[];
+  // Precomputed-segmentation VOLUME inputs (parallel to `layers`).
+  // The agent decides which scale to pull based on a memory budget and
+  // ships the scale spec verbatim — the worker doesn't re-probe the
+  // info file. Each entry produces the same Python globals shape as a
+  // zarr layer: <varName> as a numpy uint64 ndarray, plus the entry
+  // in the `layers` dict with spacing/offset/axes metadata.
+  precomputedVolumeLayers?: {
+    varName: string;
+    // The precomputed segmentation base (the URL whose `info` file
+    // declared the scales). Loader fetches `<base>/<scale.key>/*`.
+    baseUrl: string;
+    scale: {
+      key: string;
+      resolutionNm: [number, number, number];
+      size: [number, number, number];
+      chunkSize: [number, number, number];
+      voxelOffset: [number, number, number];
+      encoding: "compressed_segmentation" | "raw" | "jpeg";
+      compressedSegmentationBlockSize?: [number, number, number];
+      sharding?: {
+        hash: "identity" | "murmurhash3_x86_128";
+        preshiftBits: number;
+        shardBits: number;
+        minishardBits: number;
+        minishardIndexEncoding: "raw" | "gzip";
+        dataEncoding: "raw" | "gzip";
+      };
+      approxBytes: number;
+    };
+    // Optional NG-state per-source translation, mirrored from the
+    // zarr-layer path. Folded into offsetNm before binding so Python
+    // sees the layer aligned with meshes/skeletons on the same NG layer.
+    offsetNm?: [number, number, number];
+  }[];
   // Precomputed skeleton inputs — fetched per segment, parsed, transformed
   // to nm, and exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
   // "edges": ndarray (M,2)}} on the Python side. Also collected under
@@ -79,6 +119,34 @@ export interface CustomRequest {
     // multi-source layer (volume + mesh + skeleton) stays aligned
     // in analysis math.
     offsetNm?: [number, number, number];
+  }[];
+  // Precomputed mesh inputs — fetched per segment, parsed, and
+  // exposed as `<varName>` = {seg_id: {"vertices": ndarray (N,3),
+  // "faces": ndarray (M,3)}}. Supports `neuroglancer_legacy_mesh`
+  // (unsharded) and `neuroglancer_multilod_draco` (unsharded OR
+  // sharded — sharding is opaque to the worker; the loader handles
+  // shard/minishard lookup when a sharding spec is attached).
+  meshLayers?: {
+    varName: string;
+    source: string;
+    segmentIds: string[];
+    offsetNm?: [number, number, number];
+    // On-disk format from the mesh info file. Selects the parser.
+    format: "neuroglancer_legacy_mesh" | "neuroglancer_multilod_draco";
+    // multilod_draco only: vertex quantization bits from mesh info.
+    vertexQuantizationBits?: number;
+    // multilod_draco only: optional 3x4 row-major transform native→nm.
+    transform?: number[];
+    // multilod_draco only: when present, manifests + fragments are
+    // packed into shard files instead of per-segment paths.
+    sharding?: {
+      hash: "identity" | "murmurhash3_x86_128";
+      preshiftBits: number;
+      shardBits: number;
+      minishardBits: number;
+      minishardIndexEncoding: "raw" | "gzip";
+      dataEncoding: "raw" | "gzip";
+    };
   }[];
   // DataFrames already in the sql.js DB that should be exposed to Python as
   // df_<organelle_class> (already the make_plot convention).
@@ -911,6 +979,37 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
     if (cancelled) return;
   }
 
+  // Precomputed-segmentation VOLUME layers. The agent already picked a
+  // scale that fits the runtime budget; we just stream chunks from the
+  // shard files and stitch into a single BigUint64Array. Output shape
+  // is (z, y, x) to match the zarr convention so user code doesn't need
+  // to branch on source format.
+  for (const vlayer of msg.precomputedVolumeLayers ?? []) {
+    if (cancelled) return;
+    progress(
+      `Reading precomputed volume ${vlayer.varName} (scale ${vlayer.scale.key}) …`,
+      "read",
+    );
+    const result = await loadPrecomputedScale(
+      vlayer.baseUrl,
+      vlayer.scale as PrecomputedScale,
+      (m) => progress(`${vlayer.varName}: ${m}`, "read"),
+    );
+    const ngOffset = vlayer.offsetNm ?? [0, 0, 0];
+    loaded[vlayer.varName] = {
+      data: result.data,
+      shape: result.shape,
+      // result.spacingNm / offsetNm are already (z, y, x) ordered.
+      spacing: result.spacingNm,
+      offsets: [
+        result.offsetNm[0] + ngOffset[2],
+        result.offsetNm[1] + ngOffset[1],
+        result.offsetNm[2] + ngOffset[0],
+      ],
+      axes: ["z", "y", "x"],
+    };
+  }
+
   // Fetch any requested skeletons. Each (varName) loads the
   // precomputed info once + each segment file in series. Failed segments
   // are dropped with a warning so a missing skeleton doesn't sink the
@@ -960,14 +1059,75 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
     if (misses.length > 0) skeletonMisses[skel.varName] = misses;
   }
 
+  // Fetch any requested meshes (parallel to the skeleton loop above).
+  // Dispatch by format: legacy single-LOD unsharded vs multilod_draco
+  // unsharded. Failures are recorded in misses with a clear log line so
+  // the Python side can surface them.
+  const meshes: Record<string, Map<string, ParsedMesh>> = {};
+  const meshMisses: Record<string, string[]> = {};
+  for (const meshLayer of msg.meshLayers ?? []) {
+    const got = new Map<string, ParsedMesh>();
+    const misses: string[] = [];
+    for (const segId of meshLayer.segmentIds) {
+      try {
+        progress(
+          `Reading mesh ${meshLayer.varName}[${segId}] (${got.size + 1}/${meshLayer.segmentIds.length}) …`,
+          "mesh",
+        );
+        let parsed: ParsedMesh;
+        if (meshLayer.format === "neuroglancer_multilod_draco") {
+          if (typeof meshLayer.vertexQuantizationBits !== "number") {
+            throw new Error(
+              "multilod_draco mesh layer missing vertexQuantizationBits (worker bug)",
+            );
+          }
+          parsed = await fetchMultilodMesh(meshLayer.source, segId, {
+            vertexQuantizationBits: meshLayer.vertexQuantizationBits,
+            transform: meshLayer.transform,
+            sharding: meshLayer.sharding,
+          });
+        } else {
+          parsed = await fetchLegacyMesh(meshLayer.source, segId);
+        }
+        // Apply NG-state per-source translation if any, mirroring
+        // the skeleton path. Mutates a fresh copy.
+        if (meshLayer.offsetNm && (meshLayer.offsetNm[0] || meshLayer.offsetNm[1] || meshLayer.offsetNm[2])) {
+          const v = new Float32Array(parsed.vertices);
+          const [dx, dy, dz] = meshLayer.offsetNm;
+          for (let i = 0; i < v.length; i += 3) {
+            v[i] += dx;
+            v[i + 1] += dy;
+            v[i + 2] += dz;
+          }
+          got.set(segId, { ...parsed, vertices: v });
+        } else {
+          got.set(segId, parsed);
+        }
+      } catch (err) {
+        misses.push(segId);
+        console.warn(`[worker] mesh ${meshLayer.varName}[${segId}] failed: ${(err as Error).message}`);
+      }
+      if (cancelled) return;
+    }
+    meshes[meshLayer.varName] = got;
+    if (misses.length > 0) meshMisses[meshLayer.varName] = misses;
+  }
+
   progress("Loading Python runtime …", "python");
   const py = await ensurePyodide();
   // Custom mode needs pandas + matplotlib in addition to the regionprops set.
   await py.loadPackage(["pandas", "matplotlib"]);
   if (cancelled) return;
 
-  // Hand each array to Python with metadata.
-  py.globals.set("_tg_layer_names", msg.layers.map((l) => l.varName));
+  // Hand each array to Python with metadata. Both zarr layers and
+  // precomputed-volume layers go into the same `loaded` dict and the
+  // same `_tg_layer_names` list — the Python side reconstructs them
+  // identically regardless of source format.
+  const allLayerVarNames = [
+    ...msg.layers.map((l) => l.varName),
+    ...(msg.precomputedVolumeLayers ?? []).map((l) => l.varName),
+  ];
+  py.globals.set("_tg_layer_names", allLayerVarNames);
   py.globals.set("_tg_tables_json", JSON.stringify(msg.tables));
   for (const [name, info] of Object.entries(loaded)) {
     py.globals.set(`__tg_${name}_data`, info.data);
@@ -997,6 +1157,19 @@ async function handleCustom(msg: CustomRequest): Promise<void> {
       py.globals.set(`__tg_skel_${layerName}_${segId}_e`, parsed.edges);
     }
     py.globals.set(`__tg_skel_${layerName}_seg_ids`, segIds);
+  }
+  // Mesh binding: same per-segment pattern as skeletons. vertices
+  // (N*3 float32) and faces (M*3 uint32) get reshaped in SETUP_PY.
+  py.globals.set("_tg_mesh_layer_names", Object.keys(meshes));
+  py.globals.set("_tg_mesh_misses_json", JSON.stringify(meshMisses));
+  for (const [layerName, perSeg] of Object.entries(meshes)) {
+    const segIds: string[] = [];
+    for (const [segId, parsed] of perSeg.entries()) {
+      segIds.push(segId);
+      py.globals.set(`__tg_mesh_${layerName}_${segId}_v`, parsed.vertices);
+      py.globals.set(`__tg_mesh_${layerName}_${segId}_f`, parsed.faces);
+    }
+    py.globals.set(`__tg_mesh_${layerName}_seg_ids`, segIds);
   }
   py.globals.set("_tg_user_code", msg.code);
   py.globals.set("_tg_timeout_ms", msg.timeoutMs);
@@ -1063,6 +1236,27 @@ for _name in list(_tg_skel_layer_names):
     if _miss:
         # Surface missing IDs as a sibling so user code / the agent can
         # check what wasn't loaded without a separate round-trip.
+        globals()[f"{_name}_missing_ids"] = list(_miss)
+
+# Reconstruct meshes. Same per-segment dict shape as skeletons, with
+# "vertices" (N,3 float32) + "faces" (M,3 uint32). Bound under the
+# bare varName (e.g. mito_mesh) and also collected under 'meshes'.
+meshes = {}
+_tg_mesh_misses = json.loads(_tg_mesh_misses_json)
+for _name in list(_tg_mesh_layer_names):
+    _per_seg = {}
+    for _seg in list(globals()[f'__tg_mesh_{_name}_seg_ids']):
+        _v = np.asarray(globals()[f'__tg_mesh_{_name}_{_seg}_v'], dtype=np.float32).reshape(-1, 3)
+        _f = np.asarray(globals()[f'__tg_mesh_{_name}_{_seg}_f'], dtype=np.uint32).reshape(-1, 3)
+        try:
+            _key = int(_seg)
+        except (TypeError, ValueError):
+            _key = str(_seg)
+        _per_seg[_key] = {"vertices": _v, "faces": _f}
+    meshes[_name] = _per_seg
+    globals()[_name] = _per_seg
+    _miss = _tg_mesh_misses.get(_name) or []
+    if _miss:
         globals()[f"{_name}_missing_ids"] = list(_miss)
 
 # Build DataFrames from sql.js tables sent across the wire.
