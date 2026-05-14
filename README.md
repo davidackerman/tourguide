@@ -1,6 +1,46 @@
 # Neuroglancer Tourguide
 
-A sidecar service that streams live screenshots and viewer state from Neuroglancer to a browser panel, featuring AI narration, natural language querying of organelle data, interactive plotting and analysis, and movie recording capabilities powered by Gemini, Claude, or local Ollama.
+A 3D microscopy viewer with built-in structured-data browsing, plain-English queries powered by Claude / Gemini / OpenAI / local Ollama, and Python analysis (mesh-based or voxel-based, in-browser or on a cloud backend).
+
+> **This repo contains two flavors of tourguide.** Pick the one that fits your situation.
+
+---
+
+## 🌐 Web tourguide   `web-app/`
+
+Static web app — Neuroglancer embedded in the page, AI agent for natural-language queries and analysis, share links, optional cloud compute backend. Anyone can use it; nothing to install.
+
+- **Live**: https://tourguide-8j4.pages.dev
+- **Docs**: [`web-app/README.md`](web-app/README.md)
+- **Cloud analysis backend** (optional, for big data): [`hf-space/README.md`](hf-space/README.md)
+
+**Best for**: trying things out, sharing views with collaborators, exploratory analysis, day-to-day use, sharing data with anyone via a URL.
+
+What it does:
+- Loads zarr / n5 / Neuroglancer precomputed datasets directly from S3 / GCS / local folders
+- Natural-language queries against organelle CSVs ("show the largest mito", "plot volume distributions")
+- Agent-generated Python analysis (regionprops, cc3d, custom code) — in-browser via Pyodide or on the HF Space for bigger volumes
+- Share-link with NG state + computed tables embedded; persists across browser refreshes
+- One-click "Copy NG link" for sharing just the viewer state with non-tourguide users
+- Bring your own AI key (Gemini free tier works great), or run an in-browser model via WebLLM
+- **Can be run fully on-prem** (`vite preview` + local `uvicorn` for analysis + local Ollama for LLM) — no cloud required
+
+---
+
+## 🖥️ Sidecar tourguide   `server/`
+
+Python service that runs alongside a local Neuroglancer process, streams screenshots, narrates them with local TTS, and records narrated tour videos. Originally the only flavor; preserved for the workflows the web app doesn't (yet) cover.
+
+**Best for**: making narrated tour movies, voice cloning with Chatterbox, fully on-prem GPU workflows, batch tour generation.
+
+What it does (in addition to the web app's features):
+- Voice narration with Chatterbox cloning (GPU TTS)
+- Movie recording with synchronized narration + multiple transition modes
+- Local Ollama integration on a GPU box (the web app supports this too via the OpenAI-compatible backend; the sidecar adds Janelia-cluster-friendly conventions on top)
+
+Setup + usage instructions are below ⬇
+
+---
 
 ## Features
 
