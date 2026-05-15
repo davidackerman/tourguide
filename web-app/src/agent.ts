@@ -1056,6 +1056,19 @@ _PLOT_PNG = base64.b64encode(_buf.getvalue()).decode("ascii")
 // has to think about scale paths. Errors back with an explicit message
 // when a requested layer isn't a zarr source (skeleton / precomputed
 // mesh layers aren't yet supported by the underlying engine).
+// Exposed for the share-link Replay path so it can run a saved python
+// step without going through the agent loop (no LLM call) or the
+// Custom Python dialog (no UI). Same execution surface as the agent
+// uses internally — table ingestion, layer registration, plot rendering,
+// fly_to / highlight, etc. all happen via applyCustomResult which
+// execPythonOnLayers calls before returning.
+export async function runPythonOnLayersReplay(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<{ summary: string; produced: string[] }> {
+  return await execPythonOnLayers(args, ctx);
+}
+
 async function execPythonOnLayers(
   args: Record<string, unknown>,
   ctx: AgentContext,

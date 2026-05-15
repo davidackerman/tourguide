@@ -2,7 +2,7 @@ import type { LLMBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
-import { runAgent, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
+import { runAgent, runPythonOnLayersReplay, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 import { setPendingSession } from "./python_session.js";
 import type { SerializedTurn } from "./permalink.js";
@@ -1135,18 +1135,15 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
     }
   };
 
-  // Replay button: kick off the first python step's analysis directly
-  // with autorun=true so the Custom dialog auto-clicks Run when its
-  // inspect finishes. Bypasses the per-step 🐍 Edit click path
-  // entirely — that one synchronously drains the pending session
-  // during the click chain (before we could flip the autorun flag),
-  // so we set up the pending session ourselves here.
-  //
-  // Per-step 🐍 Edit buttons keep the review-first flow for users
-  // who want to see / tweak code before re-running.
-  replayBtn.addEventListener("click", () => {
-    // Find the first python trace item across all rendered cards.
+  // Replay button: run the first saved python step directly via the
+  // agent's execPythonOnLayers — no Custom Python dialog, no LLM
+  // call. Mirrors what the agent itself does internally when it runs
+  // python_on_layers. Result lands in a fresh turn card with live
+  // status / trace / plots, just like a normal agent turn would.
+  replayBtn.addEventListener("click", async () => {
+    // Find the first python step across rendered cards.
     let firstPython: AgentTraceItem | null = null;
+    let originalQuestion = "";
     for (const card of allCards) {
       for (const item of card.traceItems) {
         if (
@@ -1155,32 +1152,76 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
           item.tool === "make_plot"
         ) {
           firstPython = item;
+          originalQuestion = card.question;
           break;
         }
       }
       if (firstPython) break;
     }
-    if (!firstPython) return;
-    const a = firstPython.args ?? {};
-    const code = String((a as Record<string, unknown>).python ?? (a as Record<string, unknown>).code ?? "");
-    const layers = Array.isArray((a as Record<string, unknown>).layers)
-      ? ((a as Record<string, unknown>).layers as unknown[]).map(String)
-      : [];
-    const skeletons = Array.isArray((a as Record<string, unknown>).skeletons)
-      ? ((a as Record<string, unknown>).skeletons as unknown[])
-          .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
-          .map((s) => ({
-            layer: String(s.layer ?? s.name ?? ""),
-            segmentIds: Array.isArray(s.segment_ids)
-              ? (s.segment_ids as unknown[]).map(String)
-              : Array.isArray(s.ids)
-                ? (s.ids as unknown[]).map(String)
-                : [],
-          }))
-          .filter((s) => s.layer)
-      : [];
-    setPendingSession({ layers, skeletons, code, autorun: true });
-    document.getElementById("custom-btn")?.click();
+    if (!firstPython || !firstPython.args) return;
+    const descriptor = ctx.getDescriptor();
+    if (!descriptor) return;
+
+    // New card for the replay output. Keeps the original session
+    // scrollback intact above; the regenerated outputs appear in
+    // their own dedicated card.
+    const card = createTurnCard(`🔁 Replay: ${originalQuestion}`);
+    setStatus(card, "Running replay…", "pending");
+    replayBtn.disabled = true;
+    let answeredOrFlew = false;
+    const turnStart = performance.now();
+    try {
+      await runPythonOnLayersReplay(firstPython.args, {
+        db: ctx.getDB(),
+        setDB: ctx.setDB,
+        descriptor,
+        viewer: ctx.viewer,
+        backend: ctx.getBackend(),
+        callbacks: {
+          onTrace: (t) => appendTrace(card, t),
+          onProgress: (m) => setStatus(card, m, "pending"),
+          onPlot: (png, code, title, explanation) => {
+            renderPlot(card, png, code, title, explanation);
+            answeredOrFlew = true;
+          },
+          onFly: (_pos, layer, id) => {
+            setStatus(card, `Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
+            answeredOrFlew = true;
+          },
+          onHighlight: (layer, ids) => {
+            setStatus(card, `Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
+            answeredOrFlew = true;
+          },
+          onTable: (tbl) => {
+            renderTable(card, tbl);
+            answeredOrFlew = true;
+          },
+          onMeta: (info) => appendMeta(card, info),
+          // onAnswer / onAskUser aren't reachable from python_on_layers
+          // alone — they're separate tools — so we don't need to wire
+          // them. Replay re-runs the code, not the whole agent turn.
+        },
+      });
+      const totalMs = performance.now() - turnStart;
+      const llmTotal = card.traceItems.reduce((s, t) => s + (t.llmMs ?? 0), 0);
+      const toolTotal = card.traceItems.reduce((s, t) => s + (t.toolMs ?? 0), 0);
+      const timing = formatTurnTiming(totalMs, llmTotal, toolTotal);
+      setStatus(card, `✓ Replay done ${timing}`, "ok");
+      // Hide the banner now that replay's been done — if the user
+      // wants more they can use the per-step 🐍 buttons.
+      replayBanner.hidden = true;
+      // sessionTurns gets a new entry so a follow-up agent turn
+      // (if AI is configured) can refer back to the replayed step.
+      sessionTurns.push({
+        question: originalQuestion,
+        summary: `Replayed: ${answeredOrFlew ? "produced output" : "ran successfully"}`,
+      });
+    } catch (err) {
+      setStatus(card, `Replay failed: ${(err as Error).message}`, "err");
+      console.error(err);
+    } finally {
+      replayBtn.disabled = false;
+    }
   });
 
   return { getSerializedSession, replaySerializedSession };
