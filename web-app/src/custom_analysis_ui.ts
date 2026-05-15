@@ -22,7 +22,7 @@ import type { LLMBackend } from "./llm.js";
 import { loadSettings } from "./llm.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
-import { consumePendingSession } from "./python_session.js";
+import { consumePendingSession, peekPendingSession } from "./python_session.js";
 import {
   fetchHealth,
   openBrowserTunnel,
@@ -311,8 +311,16 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   };
 
   addLayerBtn.addEventListener("click", () => void addLayer());
-  // Start with one layer selected.
-  void addLayer();
+  // Start with one layer selected — UNLESS there's a pending session
+  // about to drain in. The pending-session block below wipes the slots
+  // and adds its own layers; if we let the default addLayer() fire
+  // first it kicks off an inspect that conflicts with the pending
+  // addLayer() calls ('Analysis already in progress' from the
+  // AnalysisClient single-flight lock). Skip the default when pending
+  // is queued.
+  if (peekPendingSession() === null) {
+    void addLayer();
+  }
 
   // --- Skeleton slots ------------------------------------------------------
 
