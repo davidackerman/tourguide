@@ -4,7 +4,7 @@ import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { runAgent, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
-import { setPendingSession } from "./python_session.js";
+import { setPendingSession, peekPendingSession } from "./python_session.js";
 import type { SerializedTurn } from "./permalink.js";
 
 export interface QueryUIContext {
@@ -150,7 +150,14 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
   const traceDefaultCheckbox = box.querySelector<HTMLInputElement>("[data-trace-default]")!;
   traceDefaultCheckbox.checked = loadTraceOpenPref();
   traceDefaultCheckbox.addEventListener("change", () => {
-    saveTraceOpenPref(traceDefaultCheckbox.checked);
+    const isOpen = traceDefaultCheckbox.checked;
+    saveTraceOpenPref(isOpen);
+    // Apply to every already-rendered card so the checkbox feels like
+    // a real toggle, not just a default for future cards. Without this
+    // users have to manually expand/collapse each turn's <details>.
+    for (const card of allCards) {
+      card.detailsEl.open = isOpen;
+    }
   });
 
   // Reflect backend readiness in the persistent hint above the Ask
@@ -1128,23 +1135,27 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
     }
   };
 
-  // Replay button: jump to the FIRST python step's Edit handler so the
-  // Custom Python dialog opens preloaded with that step's code; the
-  // user clicks Run there. Subsequent steps still have their own 🐍
-  // Edit buttons in the trace. Auto-running every step end-to-end
-  // would require executing them without the dialog round-trip, which
-  // is a bigger surface to wire — first-step replay is the naive-user
-  // entry point.
+  // Replay button: jump to the FIRST python step's Edit handler so
+  // the Custom Python dialog opens preloaded with that step's code,
+  // then have the dialog auto-click Run as soon as inspect finishes.
+  // The per-step 🐍 Edit buttons in the trace keep the review-first
+  // flow for users who want to tweak code before running.
   replayBtn.addEventListener("click", () => {
     const firstPythonBtn = box.querySelector<HTMLButtonElement>(
       ".agent-trace-item .agent-trace-open-step",
     );
     if (firstPythonBtn) {
-      // Expand the matching trace details so the user sees subsequent
-      // step buttons after they're done with the first.
       const containingDetails = firstPythonBtn.closest("details");
       if (containingDetails) (containingDetails as HTMLDetailsElement).open = true;
+      // The Edit click handler synchronously calls setPendingSession
+      // and then opens the dialog. Click first, then flip the
+      // pending state's autorun flag — the dialog hasn't drained it
+      // yet (drain happens on dialog mount, which is microtask-async).
       firstPythonBtn.click();
+      const pending = peekPendingSession();
+      if (pending) {
+        setPendingSession({ ...pending, autorun: true });
+      }
     }
   });
 

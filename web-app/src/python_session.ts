@@ -15,6 +15,11 @@ export interface PendingPythonSession {
   layers: string[]; // layer names (zarr volumes)
   skeletons: { layer: string; segmentIds: string[] }[];
   code: string;
+  // When true, the Custom Analysis dialog auto-clicks Run as soon as
+  // its inspect finishes — used by the share-link Replay button so
+  // the recipient doesn't have to interact with the dialog. Default
+  // false; the per-step 🐍 Edit button keeps the review-first flow.
+  autorun?: boolean;
 }
 
 let pending: PendingPythonSession | null = null;

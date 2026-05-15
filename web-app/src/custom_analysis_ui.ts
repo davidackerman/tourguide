@@ -462,6 +462,25 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         renderSkeletonSlot(slot);
       }
       if (pending.code) codeEl.value = pending.code;
+      // Share-link Replay path sets autorun:true so the recipient
+      // never has to interact with the dialog. Wait until every slot
+      // has finished its async inspect (slot.inspection populated),
+      // then click Run. Caps the wait so a stuck inspect doesn't
+      // pin the dialog forever; if we hit the cap we fall through
+      // to manual run.
+      if (pending.autorun) {
+        const startedAt = Date.now();
+        const MAX_WAIT_MS = 120_000; // 2 min — generous for HF cold start
+        while (Date.now() - startedAt < MAX_WAIT_MS) {
+          const allReady = slots.every((s) => s.inspection && s.scaleIdx != null);
+          if (allReady) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        const allReady = slots.every((s) => s.inspection && s.scaleIdx != null);
+        if (allReady && !runBtn.disabled) {
+          runBtn.click();
+        }
+      }
     })();
   }
 

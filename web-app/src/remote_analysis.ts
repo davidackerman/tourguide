@@ -214,12 +214,14 @@ export async function postAnalysisRequest(
   body: RemoteRunBody,
   signal?: AbortSignal,
 ): Promise<CustomAnalysisResult> {
-  const res = await fetch(new URL("api/analysis/run", ensureTrailingSlash(backendUrl)).toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
+  const res = await withColdStartRetry(backendUrl, signal, () =>
+    fetch(new URL("api/analysis/run", ensureTrailingSlash(backendUrl)).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }),
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // Try to pull out the FastAPI 'detail' field — that's the
@@ -284,6 +286,43 @@ interface RemoteResponse {
  *  source format (currently N5). Response matches the worker's
  *  LayerInspection shape so the existing scale-picker can consume
  *  it unchanged. */
+/**
+ * Wrap a backend fetch with HF-Space cold-start handling: a network-
+ * level failure (fetch throws TypeError) triggers waitForBackendReady,
+ * which polls /api/health until the Space comes back. We then retry
+ * the original call once. After that retry, if it still fails, throw
+ * a clear error instead of the raw 'Failed to fetch' so users see an
+ * actionable message.
+ *
+ * Only catches network-level failures — HTTP 4xx/5xx responses are
+ * passed through unchanged (the caller's own status-code handling
+ * still runs).
+ */
+async function withColdStartRetry<T>(
+  backendUrl: string,
+  signal: AbortSignal | undefined,
+  call: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    if (signal?.aborted || (err as Error).name === "AbortError") throw err;
+    const msg = (err as Error).message || "";
+    const isNetwork = err instanceof TypeError || /Failed to fetch|NetworkError/i.test(msg);
+    if (!isNetwork) throw err;
+    try {
+      await waitForBackendReady(backendUrl, { maxMs: 90_000 });
+      return await call();
+    } catch (retryErr) {
+      if (signal?.aborted || (retryErr as Error).name === "AbortError") throw retryErr;
+      throw new Error(
+        `Backend unreachable after a wake-up retry. The HF Space may be sleeping or down — try again in a minute. ` +
+          `(Original: ${msg}; retry: ${(retryErr as Error).message || "no further detail"})`,
+      );
+    }
+  }
+}
+
 export async function inspectSourceRemote(
   backendUrl: string,
   url: string,
@@ -301,12 +340,14 @@ export async function inspectSourceRemote(
     approxBytes: number;
   }[];
 }> {
-  const res = await fetch(new URL("api/inspect-source", ensureTrailingSlash(backendUrl)).toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, defaultVoxelNm }),
-    signal,
-  });
+  const res = await withColdStartRetry(backendUrl, signal, () =>
+    fetch(new URL("api/inspect-source", ensureTrailingSlash(backendUrl)).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, defaultVoxelNm }),
+      signal,
+    }),
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     let message = text;
