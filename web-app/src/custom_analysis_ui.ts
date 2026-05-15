@@ -471,12 +471,13 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
       }
       if (pending.code) codeEl.value = pending.code;
       // Share-link Replay path sets autorun:true so the recipient
-      // never has to interact with the dialog. Wait until every slot
-      // has finished its async inspect (slot.inspection populated),
-      // then click Run. Caps the wait so a stuck inspect doesn't
-      // pin the dialog forever; if we hit the cap we fall through
-      // to manual run.
+      // never has to interact with the dialog. We hide the modal
+      // visually for the duration — the analysis still runs, results
+      // still apply (new layers register, tables ingest, etc.) — and
+      // close the dialog on success. If the run errors, we un-hide
+      // so the user sees what went wrong instead of silent failure.
       if (pending.autorun) {
+        overlay.classList.add("modal-headless");
         const startedAt = Date.now();
         const MAX_WAIT_MS = 120_000; // 2 min — generous for HF cold start
         while (Date.now() - startedAt < MAX_WAIT_MS) {
@@ -486,7 +487,27 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         }
         const allReady = slots.every((s) => s.inspection && s.scaleIdx != null);
         if (allReady && !runBtn.disabled) {
+          // Watch for the run to finish. runBtn.disabled flips true
+          // while the run is in-flight and false when it returns. We
+          // poll because the runBtn handler is fire-and-forget from
+          // our perspective (event dispatcher doesn't await it).
           runBtn.click();
+          const runStart = Date.now();
+          while (Date.now() - runStart < MAX_WAIT_MS && runBtn.disabled) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
+          // Run finished. If errorEl is showing, an error happened —
+          // un-hide so the user sees the message. Otherwise close.
+          const errorEl = overlay.querySelector<HTMLDivElement>("[data-error]");
+          const hasError = errorEl && !errorEl.hidden && errorEl.textContent?.trim();
+          if (hasError) {
+            overlay.classList.remove("modal-headless");
+          } else {
+            close();
+          }
+        } else {
+          // Inspect never settled. Un-hide so the user can investigate.
+          overlay.classList.remove("modal-headless");
         }
       }
     })();

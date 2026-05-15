@@ -196,6 +196,14 @@ button {
   justify-content: center;
   z-index: 1000;
 }
+/* Headless mode: modal stays mounted (so its analysis runs through)
+   but is invisible. Used by share-link Replay so the recipient never
+   sees the Custom Python dialog flash open during autorun. If the
+   run errors, the dialog removes this class so the user sees what
+   went wrong. */
+.modal-overlay.modal-headless {
+  display: none;
+}
 
 .modal {
   background: var(--bg-elev);
