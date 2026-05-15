@@ -27,7 +27,7 @@ import {
   type PrecomputedVolumeInfo,
 } from "./precomputed_volume_loader.js";
 import { loadSettings } from "./llm.js";
-import { inspectSourceRemote, postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
+import { inspectSourceRemote, openBrowserTunnel, postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
 export interface AgentTraceItem {
   tool: string;
@@ -1653,32 +1653,48 @@ async function execPythonOnLayers(
         typeof crypto?.randomUUID === "function"
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      result = await postAnalysisRequest(
-        backendUrl,
-        {
-          layers: requestLayers,
-          // Backend reads precomputed via tensorstore's neuroglancer_precomputed
-          // driver. Slimmer shape than the worker uses (tensorstore re-reads
-          // the info file from baseUrl, so we don't ship chunk/encoding/
-          // sharding metadata). xyz axes are the precomputed convention.
-          precomputedVolumeLayers:
-            resolvedPrecomputedVolumes.length > 0
-              ? resolvedPrecomputedVolumes.map((pv) => ({
-                  varName: pv.varName,
-                  baseUrl: pv.baseUrl,
-                  scaleKey: pv.scale.key,
-                  axesOrder: ["x", "y", "z"],
-                  voxelNm: pv.scale.resolutionNm,
-                  offsetNm: pv.offsetNm ?? [0, 0, 0],
-                }))
-              : undefined,
-          tables,
-          code,
-          timeoutMs: 300_000,
-          sessionId,
-        },
-        ctx.signal,
-      );
+      // Local-folder layers (URLs containing `/local-data/`) need a
+      // WebSocket tunnel back to the browser so the backend can fetch
+      // their chunks. Mirrors what the Custom Python dialog does.
+      // Without this, the backend rejects the request with
+      // 'layer X is local but no browser tunnel is attached'.
+      const needsTunnel = requestLayers.some((l) => /\/local-data\//.test(l.url));
+      let tunnel: { close: () => void; ready: Promise<void> } | null = null;
+      if (needsTunnel) {
+        ctx.callbacks.onProgress?.("Opening tunnel to browser data…");
+        tunnel = openBrowserTunnel(backendUrl, sessionId);
+        await tunnel.ready;
+      }
+      try {
+        result = await postAnalysisRequest(
+          backendUrl,
+          {
+            layers: requestLayers,
+            // Backend reads precomputed via tensorstore's neuroglancer_precomputed
+            // driver. Slimmer shape than the worker uses (tensorstore re-reads
+            // the info file from baseUrl, so we don't ship chunk/encoding/
+            // sharding metadata). xyz axes are the precomputed convention.
+            precomputedVolumeLayers:
+              resolvedPrecomputedVolumes.length > 0
+                ? resolvedPrecomputedVolumes.map((pv) => ({
+                    varName: pv.varName,
+                    baseUrl: pv.baseUrl,
+                    scaleKey: pv.scale.key,
+                    axesOrder: ["x", "y", "z"],
+                    voxelNm: pv.scale.resolutionNm,
+                    offsetNm: pv.offsetNm ?? [0, 0, 0],
+                  }))
+                : undefined,
+            tables,
+            code,
+            timeoutMs: 300_000,
+            sessionId,
+          },
+          ctx.signal,
+        );
+      } finally {
+        tunnel?.close();
+      }
     } else {
       result = await client.customAnalyze(
         {
