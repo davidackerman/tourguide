@@ -1091,11 +1091,56 @@ def _encode_new_mesh_layer_and_write(
 async def data(session_id: str, layer_id: str, path: str) -> Response:
     # No dot-segments, no absolute paths.
     if ".." in path.split("/") or path.startswith("/"):
-        raise HTTPException(status_code=400, detail="invalid path")
+        return Response(
+            content=b'{"detail":"invalid path"}',
+            status_code=400,
+            media_type="application/json",
+            headers=_DATA_CORS_HEADERS,
+        )
     full = SESSION_ROOT / session_id / layer_id / path
     if not full.exists() or not full.is_file():
-        raise HTTPException(status_code=404)
-    return Response(content=full.read_bytes(), media_type="application/octet-stream")
+        # Explicit 404 with CORS headers — Neuroglancer's fetch needs
+        # Access-Control-Allow-Origin even on errors, or it reports the
+        # whole thing as 'HTTP error 0: Network or CORS error' instead
+        # of a clean 404. FastAPI's CORSMiddleware doesn't reliably add
+        # headers to Response() from explicit handlers (vs. raised
+        # HTTPException), so we set them here directly.
+        log.info("data: 404 at %s/%s/%s", session_id, layer_id, path)
+        return Response(
+            content=b'{"detail":"not found"}',
+            status_code=404,
+            media_type="application/json",
+            headers=_DATA_CORS_HEADERS,
+        )
+    return Response(
+        content=full.read_bytes(),
+        media_type="application/octet-stream",
+        headers=_DATA_CORS_HEADERS,
+    )
+
+
+# Cross-origin headers attached to every /api/data response. Liberal
+# `*` because the data is already address-by-random-session-id; if you
+# can guess the URL you can fetch it via any origin. Neuroglancer
+# specifically requires these on the resource responses (not just the
+# preflight) — without them an otherwise-200 fetch comes back as
+# 'HTTP error 0: Network or CORS error' in NG's diagnostics.
+_DATA_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+    # Lets NG (and other CORS-aware fetchers) read Content-Length, which
+    # it uses for progress + range-request planning.
+    "Access-Control-Expose-Headers": "Content-Length, Content-Type",
+}
+
+
+@app.options("/api/data/{session_id}/{layer_id}/{path:path}")
+async def data_preflight(session_id: str, layer_id: str, path: str) -> Response:
+    """Explicit preflight responder. Browsers normally don't preflight
+    simple GETs, but NG sometimes does for range requests / custom headers."""
+    _ = session_id, layer_id, path  # unused, but kept in the signature for routing
+    return Response(status_code=204, headers=_DATA_CORS_HEADERS)
 
 
 async def _cleanup_session_later(session_id: str) -> None:
