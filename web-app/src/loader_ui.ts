@@ -301,10 +301,22 @@ layers:
           try {
             reg = await pickLocalFolder();
           } catch (err) {
-            // User-cancel or any picker failure — surface the alias so
-            // the user knows which pick was aborted.
+            // Distinguish a deliberate cancel (AbortError / 'aborted')
+            // from a real failure. Cancelling should just close the
+            // load attempt quietly — no red error since the user knows
+            // what they did. Any other error gets surfaced with the
+            // alias so the user knows which pick blew up.
+            const msg = (err as Error).message || "";
+            const isCancel =
+              (err as Error).name === "AbortError" ||
+              /\baborted\b/i.test(msg) ||
+              /denied/i.test(msg);
+            if (isCancel) {
+              setError("Folder pick cancelled. Click Load again to retry.");
+              return;
+            }
             throw new Error(
-              `Folder pick for '${alias}' failed: ${(err as Error).message}`,
+              `Folder pick for '${alias}' failed: ${msg}`,
             );
           }
           baseMap[alias] = reg.baseUrl;
