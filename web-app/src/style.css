@@ -830,6 +830,13 @@ input.api-key {
   font-size: 0.82rem;
   line-height: 1.35;
 }
+/* `display: flex` above otherwise overrides the `hidden` attribute's
+   UA `display: none`. Without this rule, the banner shows on every
+   page load — including non-share-link visits — even though the JS
+   side has it correctly hidden by attribute. */
+.replay-banner[hidden] {
+  display: none;
+}
 .replay-banner-text {
   flex: 1;
 }
