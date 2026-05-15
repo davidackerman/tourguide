@@ -13,6 +13,41 @@ export interface SharedTable {
   rows: unknown[][];
 }
 
+// A single agent turn snapshot for replay on the recipient side. We
+// strip large blobs at the share boundary (truncateForShare below);
+// the FULL run-time turn cards keep their data in-memory and aren't
+// affected.
+export interface SerializedTraceItem {
+  tool: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
+  llmMs?: number;
+  toolMs?: number;
+}
+
+export interface SerializedPlot {
+  // PNG data URL. Dropped (set undefined) if oversize at the boundary;
+  // title + explanation still ship so the recipient knows what was
+  // shown even when the picture isn't embedded.
+  png?: string;
+  title?: string;
+  explanation?: string;
+}
+
+export interface SerializedTurn {
+  question: string;
+  // The agent's final answer text (from onAnswer). Optional because
+  // visual-only turns (fly_to / highlight) don't always emit one.
+  answer?: string;
+  // Status line as last shown — e.g. "✓ Done (4.2 s · think 1.8 s · tools 2.4 s)".
+  status?: string;
+  // Per-step trace, in order. Result fields trimmed at boundary.
+  trace: SerializedTraceItem[];
+  // make_plot outputs from this turn.
+  plots?: SerializedPlot[];
+}
+
 interface PermalinkState {
   descriptor?: DatasetDescriptor;
   query?: string;
@@ -35,6 +70,12 @@ interface PermalinkState {
   // share link. Sender-side picks which to include; recipient re-
   // ingests them into the sql.js DB after the descriptor loads.
   analysisTables?: SharedTable[];
+  // Full agent-conversation snapshot — questions, answers, trace
+  // items, plots — so the recipient sees the same scrollback the
+  // sender did. Tables aren't repeated here; they live in
+  // `analysisTables` (and the trace items' table-bearing results
+  // are stripped of row data at the boundary to avoid double-embed).
+  analysisSession?: SerializedTurn[];
 }
 
 function base64UrlEncode(s: string): string {
@@ -105,6 +146,89 @@ export async function decodeSharedTables(encoded: string): Promise<SharedTable[]
   return parsed as SharedTable[];
 }
 
+// Trim a SerializedTurn[] for embedding in a share link.
+//
+// Design: the share is "replay-friendly" — we keep enough text for the
+// recipient to read the agent's reasoning (questions, answers, tool
+// args incl. Python code, short results), and we DROP plot PNGs and
+// table rows entirely. Plot images regenerate when the recipient
+// clicks Replay (which re-runs the saved Python on their backend);
+// table rows already ship via `analysisTables`, so leaving them in
+// the trace would double-embed. Keeps a 10-turn session well under
+// 100 KB even with a full agent trace.
+//
+// Three caps:
+//  - each trace item's `result` / `args` JSON capped at TRUNC_JSON_BYTES
+//    chars (replaced with a "[truncated …]" marker if exceeded)
+//  - python_on_layers result's `table.rows` stripped (rows live in
+//    `analysisTables`)
+//  - plot PNG dropped from every saved plot; title + explanation kept
+//    as a placeholder so the recipient knows what plot existed
+const TRUNC_JSON_BYTES = 10_000;
+
+function truncatedJson(value: unknown): unknown {
+  let s: string;
+  try {
+    s = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    return "[unserializable]";
+  }
+  if (s.length <= TRUNC_JSON_BYTES) return value;
+  return `[truncated: ${s.length} chars → first ${TRUNC_JSON_BYTES}]\n${s.slice(0, TRUNC_JSON_BYTES)}`;
+}
+
+export function truncateSessionForShare(turns: SerializedTurn[]): SerializedTurn[] {
+  return turns.map((t) => ({
+    question: t.question,
+    answer: t.answer,
+    status: t.status,
+    trace: t.trace.map((it) => {
+      // Strip python_on_layers result tables — they're double-embedded
+      // via analysisTables; keeping them here would bloat for nothing.
+      let result = it.result;
+      if (result && typeof result === "object") {
+        const r = result as Record<string, unknown>;
+        const table = r.table as { rows?: unknown[] } | undefined;
+        if (table && Array.isArray(table.rows) && table.rows.length > 0) {
+          result = { ...r, table: { ...table, rows: [], _note: "rows live in analysisTables" } };
+        }
+      }
+      return {
+        tool: it.tool,
+        args: it.args ? (truncatedJson(it.args) as Record<string, unknown>) : undefined,
+        result: result !== undefined ? truncatedJson(result) : undefined,
+        error: it.error,
+        llmMs: it.llmMs,
+        toolMs: it.toolMs,
+      };
+    }),
+    // Drop plot PNG bytes always. Keeping title + explanation gives the
+    // recipient a placeholder card explaining what plot was here and
+    // pointing them at the Replay button for the originating step.
+    plots: t.plots?.map((p) => ({
+      png: undefined,
+      title: p.title,
+      explanation: p.explanation,
+    })),
+  }));
+}
+
+export async function encodeSharedSession(turns: SerializedTurn[]): Promise<string> {
+  if (turns.length === 0) return "";
+  const json = JSON.stringify(truncateSessionForShare(turns));
+  const gz = await gzipString(json);
+  return bytesToBase64Url(gz);
+}
+
+export async function decodeSharedSession(encoded: string): Promise<SerializedTurn[]> {
+  if (!encoded) return [];
+  const bytes = base64UrlToBytes(encoded);
+  const json = await gunzipToString(bytes);
+  const parsed = JSON.parse(json) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("Expected array of turns");
+  return parsed as SerializedTurn[];
+}
+
 // Tourguide state goes in the query string; Neuroglancer owns the hash
 // (its native `#!{...}` format). Putting our params in the hash made NG
 // log "URL hash is expected to be of the form '#!{...}'" and fall back
@@ -128,6 +252,10 @@ export async function encodeState(state: PermalinkState): Promise<string> {
   if (state.analysisTables && state.analysisTables.length > 0) {
     const t = await encodeSharedTables(state.analysisTables);
     if (t) params.push(`t=${t}`);
+  }
+  if (state.analysisSession && state.analysisSession.length > 0) {
+    const n = await encodeSharedSession(state.analysisSession);
+    if (n) params.push(`n=${n}`);
   }
   const search = params.length > 0 ? "?" + params.join("&") : "";
   // NG accepts its state encoded as `#!<json>` — we just use the same
@@ -228,6 +356,22 @@ export async function decodeSharedTablesFromUrl(search: string): Promise<SharedT
     return await decodeSharedTables(t);
   } catch (err) {
     console.error("Failed to decode shared analysis tables:", err);
+    return [];
+  }
+}
+
+// Same shape as decodeSharedTablesFromUrl but for the session (`n=`).
+// Recipient calls this after decodeState's sync output to get the
+// captured turn-by-turn agent history.
+export async function decodeSharedSessionFromUrl(search: string): Promise<SerializedTurn[]> {
+  const queryStr = search.startsWith("?") ? search.slice(1) : search;
+  const params = new URLSearchParams(queryStr);
+  const n = params.get("n");
+  if (!n) return [];
+  try {
+    return await decodeSharedSession(n);
+  } catch (err) {
+    console.error("Failed to decode shared session:", err);
     return [];
   }
 }

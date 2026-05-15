@@ -252,7 +252,7 @@ function updateBackendIndicator(): void {
 }
 updateBackendIndicator();
 
-renderQueryBox(queryHost, {
+const queryHandle = renderQueryBox(queryHost, {
   getDB: () => currentDB,
   setDB: (db) => {
     currentDB = db;
@@ -454,6 +454,19 @@ async function init(): Promise<void> {
     if (tables.length > 0) await ingestSharedTables(tables);
   } catch (err) {
     console.error("Failed to ingest shared analysis tables:", err);
+  }
+  // Embedded agent session — replay the sender's scrollback into the
+  // recipient's query thread. Plot PNGs aren't in the share; each
+  // plot turn renders a placeholder pointing the user at the matching
+  // python step's 🐍 Edit → Run to regenerate on their backend.
+  // Done after table ingestion so any DB-backed turn data is present
+  // by the time the replayed turn cards reference it.
+  try {
+    const { decodeSharedSessionFromUrl } = await import("./permalink.js");
+    const turns = await decodeSharedSessionFromUrl(window.location.search);
+    if (turns.length > 0) queryHandle.replaySerializedSession(turns);
+  } catch (err) {
+    console.error("Failed to replay shared agent session:", err);
   }
 }
 
@@ -704,6 +717,12 @@ shareBtn.addEventListener("click", async () => {
   if (truncatedTableSummaries.length > 0) {
     console.info("[share] truncated tables to fit URL:", truncatedTableSummaries);
   }
+  // Snapshot the current agent thread so the recipient sees the same
+  // scrollback. Plot PNGs / large result blobs are dropped at the
+  // share boundary (see truncateSessionForShare); the recipient gets
+  // a placeholder for each plot and can hit Replay on the matching
+  // python step to regenerate it on their backend.
+  const sessionTurns = queryHandle.getSerializedSession();
   const url = await buildPermalinkURL({
     catalogIndex: useCatalogIdx,
     descriptor: useCatalogIdx === undefined ? descriptorForShare : undefined,
@@ -711,6 +730,7 @@ shareBtn.addEventListener("click", async () => {
     viewerState,
     analysisPrompts: analysisPrompts.length > 0 ? analysisPrompts : undefined,
     analysisTables: sharedTables.length > 0 ? sharedTables : undefined,
+    analysisSession: sessionTurns.length > 0 ? sessionTurns : undefined,
   });
   // Soft size warning — most browsers handle URLs up to ~32k chars
   // fine, beyond that gets sketchy (Safari truncates at 80k, etc.).

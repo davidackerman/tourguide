@@ -5,6 +5,7 @@ import type { BundledViewer } from "./bundled_viewer.js";
 import { runAgent, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 import { setPendingSession } from "./python_session.js";
+import type { SerializedTurn } from "./permalink.js";
 
 export interface QueryUIContext {
   getDB: () => DatasetDB | null;
@@ -15,6 +16,19 @@ export interface QueryUIContext {
   getDescriptor: () => DatasetDescriptor | null;
   getBackend: () => LLMBackend;
   viewer: BundledViewer;
+}
+
+// Returned from renderQueryBox so the caller (main.ts) can snapshot
+// the session for share-link embedding and restore one from a URL.
+export interface QueryUIHandle {
+  /** Snapshot every visible turn as SerializedTurn data — what the
+   *  share-link encoder ships to the recipient. Empty when no turns
+   *  have run yet. */
+  getSerializedSession: () => SerializedTurn[];
+  /** Render saved turns into the query thread as if they had just
+   *  run. Used on share-link load. Cards visually match live ones
+   *  but no agent is invoked. */
+  replaySerializedSession: (turns: SerializedTurn[]) => void;
 }
 
 // Per-turn UI state. Each submit creates a new card; subsequent
@@ -36,7 +50,7 @@ interface TurnCard {
   traceEl: HTMLElement;
   detailsEl: HTMLDetailsElement;
   traceItems: AgentTraceItem[];
-  plots: { png: string; code: string; title?: string }[];
+  plots: { png: string; code: string; title?: string; explanation?: string }[];
   tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
   metaLines: string[];
 }
@@ -62,7 +76,7 @@ const saveTraceOpenPref = (v: boolean): void => {
   }
 };
 
-export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): void {
+export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): QueryUIHandle {
   container.innerHTML = "";
   const box = document.createElement("div");
   box.className = "query-box";
@@ -577,7 +591,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       wrapper.appendChild(det);
     }
     card.plotsEl.appendChild(wrapper);
-    card.plots.push({ png: pngDataUrl, code, title });
+    card.plots.push({ png: pngDataUrl, code, title, explanation });
   };
 
   // Inline summary card for an ingested table. The data is already in
@@ -1004,6 +1018,85 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       stopBtn.hidden = true;
     }
   });
+
+  // Snapshot every rendered turn into the share-link's SerializedTurn
+  // shape. Reads from allCards (the in-memory store of rendered cards)
+  // rather than maintaining a parallel array — keeps the two in sync
+  // automatically as the agent runs.
+  const getSerializedSession = (): SerializedTurn[] =>
+    allCards.map((card) => ({
+      question: card.question,
+      answer: card.answerEl.textContent?.trim() || undefined,
+      status: card.statusEl.textContent?.trim() || undefined,
+      trace: card.traceItems.map((it) => ({
+        tool: it.tool,
+        args: it.args,
+        result: it.result,
+        error: it.error,
+        llmMs: it.llmMs,
+        toolMs: it.toolMs,
+      })),
+      plots: card.plots.length > 0
+        ? card.plots.map((p) => ({
+            png: p.png,
+            title: p.title,
+            explanation: p.explanation,
+          }))
+        : undefined,
+    }));
+
+  // Inverse: take a saved session and render it as if the agent had
+  // just run those turns. Used on share-link load. Tables are NOT
+  // re-rendered here — they ship separately via `analysisTables` and
+  // get ingested into the SQL DB before this fires, so any table that
+  // was in the original session is already in the structured browser.
+  // Plot PNGs are NOT shipped (would bloat the URL); a stub card is
+  // rendered for each saved plot pointing the recipient at the
+  // matching python_on_layers / make_plot step's Replay button.
+  const replaySerializedSession = (turns: SerializedTurn[]): void => {
+    for (const t of turns) {
+      const card = createTurnCard(t.question);
+      for (const it of t.trace) {
+        // SerializedTraceItem.args is optional (`?`) but AgentTraceItem.args
+        // is required — default to {} when missing to keep appendTrace happy.
+        appendTrace(card, { ...it, args: it.args ?? {} });
+      }
+      if (t.answer) card.answerEl.textContent = t.answer;
+      if (t.plots && t.plots.length > 0) {
+        for (const p of t.plots) {
+          if (p.png) {
+            // Future-proof: a future version might preserve the PNG
+            // (or shipped a small thumbnail). Render normally then.
+            renderPlot(card, p.png, "", p.title, p.explanation);
+          } else {
+            // Placeholder so the recipient knows a plot existed here
+            // and how to regenerate it. Replay is one click away
+            // via the 🐍 Edit button on the matching python step.
+            const stub = document.createElement("div");
+            stub.className = "plot-output plot-stub";
+            const titleText = p.title ? ` "${p.title}"` : "";
+            stub.innerHTML = `
+              <p class="hint">📊 Plot${escapeHtml(titleText)} not embedded in share link (PNGs are big and regenerate cheaply). Click 🐍 <strong>Edit</strong> on the matching step below, then Run to regenerate.</p>
+              ${p.explanation ? `<p class="plot-explanation">${escapeHtml(p.explanation)}</p>` : ""}
+            `;
+            card.plotsEl.appendChild(stub);
+          }
+        }
+      }
+      if (t.status) {
+        // Preserve the original status verbatim (incl. ✓ + timings).
+        // Classify via prefix so "✓ Done" stays green; everything else
+        // falls into the neutral bin.
+        const kind = t.status.startsWith("✓") ? "ok" : "";
+        setStatus(card, t.status, kind);
+      }
+      // Also record into sessionTurns so the agent's prior-turn
+      // context picks up these as if the live session ran them.
+      sessionTurns.push({ question: t.question, summary: t.answer || "(no visible result)" });
+    }
+  };
+
+  return { getSerializedSession, replaySerializedSession };
 }
 
 function escapeHtml(s: string): string {
