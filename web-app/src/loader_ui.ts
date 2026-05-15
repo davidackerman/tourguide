@@ -282,13 +282,34 @@ layers:
       // register each, and resolve relative sources against the
       // resulting base URLs. Any source already absolute passes through.
       if (descriptor.folders && Object.keys(descriptor.folders).length > 0) {
+        // Don't use confirm() between the Load click and showDirectoryPicker —
+        // confirm() consumes the page's transient user-activation token, so
+        // the picker call that follows fails with
+        // 'Must be handling a user gesture to show a file picker.'
+        // Surface each alias's hint inline via the YAML-pane error slot and
+        // call pickLocalFolder() directly; the system folder picker itself
+        // tells the user what it's asking for via its title bar.
         const baseMap: Record<string, string> = {};
-        for (const [alias, hint] of Object.entries(descriptor.folders)) {
-          const friendly = `For folder "${alias}": ${hint || "pick the folder containing this layer's data"}.\n\nClick OK to open the folder picker.`;
-          if (!confirm(friendly)) throw new Error(`Folder pick for '${alias}' cancelled`);
-          const reg = await pickLocalFolder();
+        const entries = Object.entries(descriptor.folders);
+        for (let i = 0; i < entries.length; i++) {
+          const [alias, hint] = entries[i];
+          const friendlyHint = hint || `pick the folder containing layer data prefixed with '${alias}/'`;
+          setError(
+            `Folder pick ${i + 1}/${entries.length} — alias '${alias}': ${friendlyHint}`,
+          );
+          let reg;
+          try {
+            reg = await pickLocalFolder();
+          } catch (err) {
+            // User-cancel or any picker failure — surface the alias so
+            // the user knows which pick was aborted.
+            throw new Error(
+              `Folder pick for '${alias}' failed: ${(err as Error).message}`,
+            );
+          }
           baseMap[alias] = reg.baseUrl;
         }
+        setError("");
         resolved = resolveDescriptorAgainstFolder(descriptor, baseMap);
       }
       resolved = await autofillVoxelFromFirstSource(resolved);
