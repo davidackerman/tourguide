@@ -31,7 +31,18 @@ export async function fetchHealth(url: string, signal?: AbortSignal): Promise<Ba
       method: "GET",
       signal,
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // 429 = rate-limited (the Space is up but throttling us). Distinct
+      // from "Space is asleep" — tag the return so waitForBackendReady
+      // can stop hammering. We attach the status to a sentinel object
+      // via a non-enumerable property so callers that just check
+      // `h?.ok` still work.
+      const tagged = Object.assign(Object.create(null) as Record<string, unknown>, {
+        ok: false,
+        __status: res.status,
+      });
+      return tagged as unknown as BackendHealth;
+    }
     const body = (await res.json()) as BackendHealth;
     return body;
   } catch {
@@ -60,6 +71,16 @@ export async function waitForBackendReady(url: string, opts: WaitForReadyOptions
     if (h?.ok) {
       onProgress?.("ready", "Backend ready.");
       return h;
+    }
+    // 429 means the Space is up but rate-limiting us. Bail with a
+    // clear message instead of hammering — every poll adds another
+    // 429 to the console and burns the rate limit further.
+    const status = (h as unknown as { __status?: number })?.__status;
+    if (status === 429) {
+      onProgress?.("offline", "Backend is rate-limiting (HTTP 429). Try again in a minute.");
+      throw new Error(
+        `Backend at ${url} is rate-limited (HTTP 429). The HF Space is up but throttling requests — try again in a minute, or use your own forked Space.`,
+      );
     }
     if (Date.now() - started > maxMs) {
       onProgress?.("offline", "Backend did not respond.");

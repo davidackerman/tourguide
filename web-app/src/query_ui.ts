@@ -1135,93 +1135,127 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
     }
   };
 
-  // Replay button: run the first saved python step directly via the
-  // agent's execPythonOnLayers — no Custom Python dialog, no LLM
+  // Replay button: run EVERY saved python step in order, directly via
+  // the agent's execPythonOnLayers — no Custom Python dialog, no LLM
   // call. Mirrors what the agent itself does internally when it runs
-  // python_on_layers. Result lands in a fresh turn card with live
-  // status / trace / plots, just like a normal agent turn would.
+  // python_on_layers. Results (new layers, ingested tables, plots,
+  // fly_to / highlight) land via the same callbacks an agent turn
+  // uses, into a single fresh '🔁 Replay' turn card. Each replayed
+  // step gets a synthetic trace item so the user can expand and see
+  // what code ran + what summary came back.
   replayBtn.addEventListener("click", async () => {
-    // Find the first python step across rendered cards.
-    let firstPython: AgentTraceItem | null = null;
-    let originalQuestion = "";
-    for (const card of allCards) {
-      for (const item of card.traceItems) {
+    // Walk every rendered card and collect every python step in
+    // order. Sequential execution matters: step N may produce a
+    // layer or table that step N+1 reads from.
+    interface PythonStep {
+      item: AgentTraceItem;
+      question: string;
+      index: number;
+    }
+    const pythonSteps: PythonStep[] = [];
+    for (const c of allCards) {
+      for (const it of c.traceItems) {
         if (
-          item.tool === "python_on_layers" ||
-          item.tool === "run_python" ||
-          item.tool === "make_plot"
+          it.tool === "python_on_layers" ||
+          it.tool === "run_python" ||
+          it.tool === "make_plot"
         ) {
-          firstPython = item;
-          originalQuestion = card.question;
-          break;
+          pythonSteps.push({ item: it, question: c.question, index: pythonSteps.length + 1 });
         }
       }
-      if (firstPython) break;
     }
-    if (!firstPython || !firstPython.args) return;
+    if (pythonSteps.length === 0) return;
     const descriptor = ctx.getDescriptor();
     if (!descriptor) return;
 
-    // New card for the replay output. Keeps the original session
-    // scrollback intact above; the regenerated outputs appear in
-    // their own dedicated card.
-    const card = createTurnCard(`🔁 Replay: ${originalQuestion}`);
-    setStatus(card, "Running replay…", "pending");
+    const card = createTurnCard(`🔁 Replay (${pythonSteps.length} step${pythonSteps.length === 1 ? "" : "s"})`);
+    setStatus(card, `Replaying step 1/${pythonSteps.length}…`, "pending");
     replayBtn.disabled = true;
+    let stepsRun = 0;
     let answeredOrFlew = false;
     const turnStart = performance.now();
-    try {
-      await runPythonOnLayersReplay(firstPython.args, {
-        db: ctx.getDB(),
-        setDB: ctx.setDB,
-        descriptor,
-        viewer: ctx.viewer,
-        backend: ctx.getBackend(),
-        callbacks: {
-          onTrace: (t) => appendTrace(card, t),
-          onProgress: (m) => setStatus(card, m, "pending"),
-          onPlot: (png, code, title, explanation) => {
-            renderPlot(card, png, code, title, explanation);
-            answeredOrFlew = true;
+    let lastError: Error | null = null;
+
+    for (const step of pythonSteps) {
+      setStatus(card, `Replaying step ${step.index}/${pythonSteps.length}: ${step.question}`, "pending");
+      // Append a synthetic trace item BEFORE running. The user sees
+      // the step's args (incl. saved Python code) immediately; the
+      // result populates after execPythonOnLayers returns.
+      const trace: AgentTraceItem = {
+        tool: step.item.tool,
+        args: step.item.args ?? {},
+      };
+      const stepStart = performance.now();
+      try {
+        const result = await runPythonOnLayersReplay(step.item.args ?? {}, {
+          db: ctx.getDB(),
+          setDB: ctx.setDB,
+          descriptor,
+          viewer: ctx.viewer,
+          backend: ctx.getBackend(),
+          callbacks: {
+            // Don't forward onTrace to the card — we'll append one
+            // synthetic trace per outer step after it completes.
+            // (execPythonOnLayers doesn't emit onTrace anyway, but
+            // future-proof.)
+            onProgress: (m) => setStatus(card, `Step ${step.index}/${pythonSteps.length}: ${m}`, "pending"),
+            onPlot: (png, code, title, explanation) => {
+              renderPlot(card, png, code, title, explanation);
+              answeredOrFlew = true;
+            },
+            onFly: (_pos, layer, id) => {
+              setStatus(card, `Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
+              answeredOrFlew = true;
+            },
+            onHighlight: (layer, ids) => {
+              setStatus(card, `Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
+              answeredOrFlew = true;
+            },
+            onTable: (tbl) => {
+              renderTable(card, tbl);
+              answeredOrFlew = true;
+            },
+            onMeta: (info) => appendMeta(card, info),
           },
-          onFly: (_pos, layer, id) => {
-            setStatus(card, `Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
-            answeredOrFlew = true;
-          },
-          onHighlight: (layer, ids) => {
-            setStatus(card, `Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
-            answeredOrFlew = true;
-          },
-          onTable: (tbl) => {
-            renderTable(card, tbl);
-            answeredOrFlew = true;
-          },
-          onMeta: (info) => appendMeta(card, info),
-          // onAnswer / onAskUser aren't reachable from python_on_layers
-          // alone — they're separate tools — so we don't need to wire
-          // them. Replay re-runs the code, not the whole agent turn.
-        },
-      });
-      const totalMs = performance.now() - turnStart;
-      const llmTotal = card.traceItems.reduce((s, t) => s + (t.llmMs ?? 0), 0);
-      const toolTotal = card.traceItems.reduce((s, t) => s + (t.toolMs ?? 0), 0);
-      const timing = formatTurnTiming(totalMs, llmTotal, toolTotal);
-      setStatus(card, `✓ Replay done ${timing}`, "ok");
-      // Hide the banner now that replay's been done — if the user
-      // wants more they can use the per-step 🐍 buttons.
-      replayBanner.hidden = true;
-      // sessionTurns gets a new entry so a follow-up agent turn
-      // (if AI is configured) can refer back to the replayed step.
-      sessionTurns.push({
-        question: originalQuestion,
-        summary: `Replayed: ${answeredOrFlew ? "produced output" : "ran successfully"}`,
-      });
-    } catch (err) {
-      setStatus(card, `Replay failed: ${(err as Error).message}`, "err");
-      console.error(err);
-    } finally {
-      replayBtn.disabled = false;
+        });
+        trace.result = result;
+        trace.toolMs = performance.now() - stepStart;
+        appendTrace(card, trace);
+        stepsRun++;
+      } catch (err) {
+        trace.error = (err as Error).message;
+        trace.toolMs = performance.now() - stepStart;
+        appendTrace(card, trace);
+        lastError = err as Error;
+        break;
+      }
     }
+
+    const totalMs = performance.now() - turnStart;
+    const llmTotal = card.traceItems.reduce((s, t) => s + (t.llmMs ?? 0), 0);
+    const toolTotal = card.traceItems.reduce((s, t) => s + (t.toolMs ?? 0), 0);
+    const timing = formatTurnTiming(totalMs, llmTotal, toolTotal);
+    if (lastError) {
+      setStatus(
+        card,
+        `✗ Replay failed at step ${stepsRun + 1}/${pythonSteps.length}: ${lastError.message} ${timing}`,
+        "err",
+      );
+    } else {
+      setStatus(card, `✓ Replay done (${stepsRun}/${pythonSteps.length} steps) ${timing}`, "ok");
+      replayBanner.hidden = true;
+    }
+    // Add a session-turn entry so any follow-up live agent run
+    // inherits the replay as prior context.
+    sessionTurns.push({
+      question: `Replay (${stepsRun}/${pythonSteps.length} steps)`,
+      summary: lastError
+        ? `Replayed ${stepsRun} step(s); failed: ${lastError.message}`
+        : answeredOrFlew
+          ? `Replayed ${stepsRun} step(s); regenerated outputs`
+          : `Replayed ${stepsRun} step(s) successfully`,
+    });
+    replayBtn.disabled = false;
   });
 
   return { getSerializedSession, replaySerializedSession };
