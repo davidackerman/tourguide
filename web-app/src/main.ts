@@ -252,6 +252,23 @@ function updateBackendIndicator(): void {
 }
 updateBackendIndicator();
 
+// Opportunistically warm the analysis backend on page load.
+// HF Spaces sleep after ~30 min idle; cold-start takes 30-60 s when
+// the first request hits. By firing a single /api/health ping in the
+// background as soon as tourguide opens, we kick off the wake-up so
+// the Space is responsive by the time the user clicks Share, runs an
+// analysis, or replays a shared session. Fire-and-forget — errors
+// are fine (page works without the backend), and 429s just mean
+// it's already busy serving someone, also fine.
+{
+  const warmUpUrl = loadSettings().analysisBackendUrl.trim();
+  if (warmUpUrl) {
+    void fetchHealth(warmUpUrl).catch(() => {
+      /* silent; just a warm-up ping */
+    });
+  }
+}
+
 const queryHandle = renderQueryBox(queryHost, {
   getDB: () => currentDB,
   setDB: (db) => {
