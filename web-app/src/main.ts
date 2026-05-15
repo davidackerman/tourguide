@@ -795,38 +795,114 @@ shareBtn.addEventListener("click", async () => {
       console.warn("[share] short-link failed, using long URL:", err);
     }
   }
-  try {
-    await navigator.clipboard.writeText(finalUrl);
-    const tablesHint = sharedTables.length > 0
-      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded${truncatedTableSummaries.length > 0 ? `, ${truncatedTableSummaries.length} truncated` : ""})`
-      : "";
-    shareBtn.textContent = shortened
-      ? `✓ Copied short link${tablesHint}`
-      : `✓ Copied${tablesHint}`;
-    setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2200);
-    // Combine ephemeral-link warning + truncation warning into one
-    // dialog so the user gets at most one modal interruption.
-    const warnings: string[] = [];
-    if (shortened && persistent === false) {
-      warnings.push(
-        "⚠ This link is stored in ephemeral memory on the analysis Space — " +
-          "it will stop working when the Space restarts (typically every few hours-to-days). " +
-          "Tell the recipient to open it soon. For persistent links, the Space owner can set " +
-          "HF_TOKEN + TG_SHARE_DATASET in the Space's secrets.",
-      );
-    }
-    if (truncatedTableSummaries.length > 0) {
-      warnings.push(
-        "Share link embedded a truncated view of some tables — recipients see only the top rows:\n  • " +
-          truncatedTableSummaries.join("\n  • ") +
-          "\n\nFor the full tables, send the CSV downloads (Custom → Download).",
-      );
-    }
-    if (warnings.length > 0) alert(warnings.join("\n\n"));
-  } catch {
-    prompt("Copy this URL:", finalUrl);
+  // navigator.clipboard.writeText needs transient user activation
+  // (a click within the last ~5 s). The share handler awaits
+  // waitForBackendReady + createShareLink before reaching the copy
+  // step, which on a cold start eats well over 5 s and consumes the
+  // activation from the original Share click. The browser then
+  // rejects the writeText and we'd fall to a native prompt() — ugly.
+  //
+  // Cleaner: show a small result modal with the URL in a read-only
+  // input and a Copy button. Clicking that button is a fresh user
+  // gesture, so clipboard.writeText works reliably. Warnings (ephemeral
+  // storage, truncated tables) render inline in the same modal.
+  const warnings: string[] = [];
+  if (shortened && persistent === false) {
+    warnings.push(
+      "⚠ This link is stored in ephemeral memory on the analysis Space — it stops working when the Space restarts (every few hours-to-days). For persistent links, set HF_TOKEN + TG_SHARE_DATASET in the Space's secrets.",
+    );
   }
+  if (truncatedTableSummaries.length > 0) {
+    warnings.push(
+      `Some tables embedded only their top rows: ${truncatedTableSummaries.join("; ")}. Send the CSV downloads (Custom → Download) for full tables.`,
+    );
+  }
+  showShareResult(finalUrl, {
+    shortened,
+    tablesEmbedded: sharedTables.length,
+    truncatedTables: truncatedTableSummaries.length,
+    warnings,
+  });
+  shareBtn.textContent = "🔗 Share";
 });
+
+interface ShareResultOpts {
+  shortened: boolean;
+  tablesEmbedded: number;
+  truncatedTables: number;
+  warnings: string[];
+}
+
+function showShareResult(url: string, opts: ShareResultOpts): void {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const tablesHint = opts.tablesEmbedded > 0
+    ? `${opts.tablesEmbedded} table${opts.tablesEmbedded === 1 ? "" : "s"} embedded${opts.truncatedTables > 0 ? `, ${opts.truncatedTables} truncated` : ""}`
+    : "";
+  const sublabel = [opts.shortened ? "Short link" : "Long inline URL", tablesHint]
+    .filter(Boolean)
+    .join(" · ");
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-label="Share link" style="max-width: 640px;">
+      <header class="modal-header">
+        <h2>🔗 Share link ready</h2>
+        <button class="modal-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="hint" data-sublabel></p>
+        <input type="text" readonly data-share-url style="width:100%; padding:0.5rem; font-family: monospace; font-size: 0.85rem;" />
+        <div class="form-actions" style="display:flex; gap:0.5rem; margin-top:0.6rem;">
+          <button class="btn-primary" data-action="copy">📋 Copy to clipboard</button>
+          <button class="btn-secondary" data-action="close">Close</button>
+          <span data-copy-status class="hint"></span>
+        </div>
+        <div data-warnings style="margin-top: 0.8rem; display: none;"></div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector<HTMLInputElement>("[data-share-url]")!;
+  const copyBtn = overlay.querySelector<HTMLButtonElement>("[data-action='copy']")!;
+  const closeBtn = overlay.querySelector<HTMLButtonElement>("[data-action='close']")!;
+  const closeX = overlay.querySelector<HTMLButtonElement>(".modal-close")!;
+  const status = overlay.querySelector<HTMLSpanElement>("[data-copy-status]")!;
+  const warningsEl = overlay.querySelector<HTMLDivElement>("[data-warnings]")!;
+  const sublabelEl = overlay.querySelector<HTMLParagraphElement>("[data-sublabel]")!;
+  input.value = url;
+  sublabelEl.textContent = sublabel;
+  if (opts.warnings.length > 0) {
+    warningsEl.style.display = "block";
+    warningsEl.innerHTML = opts.warnings
+      .map((w) => `<p class="hint warn" style="margin: 0.3rem 0;">${w.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</p>`)
+      .join("");
+  }
+  // Auto-select the input text so keyboard-savvy users can just hit
+  // Cmd+C / Ctrl+C without clicking the button. Microtask delay so
+  // the input is laid out before .select() runs.
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  const close = (): void => overlay.remove();
+  closeBtn.addEventListener("click", close);
+  closeX.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      status.textContent = "✓ Copied!";
+      status.className = "hint ok";
+      // Auto-close after a short success flash so the user doesn't
+      // have to also click Close. Long enough to read the confirmation.
+      setTimeout(close, 900);
+    } catch (err) {
+      status.textContent = `Copy failed: ${(err as Error).message}. Select the URL above and Cmd+C / Ctrl+C.`;
+      status.className = "hint err";
+    }
+  });
+}
 
 // Copy NG link — plain Neuroglancer permalink with just the viewer
 // state (camera + layers + selected segments). No tourguide DB, no
