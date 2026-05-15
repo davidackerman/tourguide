@@ -4,7 +4,7 @@ import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { runAgent, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
-import { setPendingSession, peekPendingSession } from "./python_session.js";
+import { setPendingSession } from "./python_session.js";
 import type { SerializedTurn } from "./permalink.js";
 
 export interface QueryUIContext {
@@ -1135,28 +1135,52 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
     }
   };
 
-  // Replay button: jump to the FIRST python step's Edit handler so
-  // the Custom Python dialog opens preloaded with that step's code,
-  // then have the dialog auto-click Run as soon as inspect finishes.
-  // The per-step 🐍 Edit buttons in the trace keep the review-first
-  // flow for users who want to tweak code before running.
+  // Replay button: kick off the first python step's analysis directly
+  // with autorun=true so the Custom dialog auto-clicks Run when its
+  // inspect finishes. Bypasses the per-step 🐍 Edit click path
+  // entirely — that one synchronously drains the pending session
+  // during the click chain (before we could flip the autorun flag),
+  // so we set up the pending session ourselves here.
+  //
+  // Per-step 🐍 Edit buttons keep the review-first flow for users
+  // who want to see / tweak code before re-running.
   replayBtn.addEventListener("click", () => {
-    const firstPythonBtn = box.querySelector<HTMLButtonElement>(
-      ".agent-trace-item .agent-trace-open-step",
-    );
-    if (firstPythonBtn) {
-      const containingDetails = firstPythonBtn.closest("details");
-      if (containingDetails) (containingDetails as HTMLDetailsElement).open = true;
-      // The Edit click handler synchronously calls setPendingSession
-      // and then opens the dialog. Click first, then flip the
-      // pending state's autorun flag — the dialog hasn't drained it
-      // yet (drain happens on dialog mount, which is microtask-async).
-      firstPythonBtn.click();
-      const pending = peekPendingSession();
-      if (pending) {
-        setPendingSession({ ...pending, autorun: true });
+    // Find the first python trace item across all rendered cards.
+    let firstPython: AgentTraceItem | null = null;
+    for (const card of allCards) {
+      for (const item of card.traceItems) {
+        if (
+          item.tool === "python_on_layers" ||
+          item.tool === "run_python" ||
+          item.tool === "make_plot"
+        ) {
+          firstPython = item;
+          break;
+        }
       }
+      if (firstPython) break;
     }
+    if (!firstPython) return;
+    const a = firstPython.args ?? {};
+    const code = String((a as Record<string, unknown>).python ?? (a as Record<string, unknown>).code ?? "");
+    const layers = Array.isArray((a as Record<string, unknown>).layers)
+      ? ((a as Record<string, unknown>).layers as unknown[]).map(String)
+      : [];
+    const skeletons = Array.isArray((a as Record<string, unknown>).skeletons)
+      ? ((a as Record<string, unknown>).skeletons as unknown[])
+          .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+          .map((s) => ({
+            layer: String(s.layer ?? s.name ?? ""),
+            segmentIds: Array.isArray(s.segment_ids)
+              ? (s.segment_ids as unknown[]).map(String)
+              : Array.isArray(s.ids)
+                ? (s.ids as unknown[]).map(String)
+                : [],
+          }))
+          .filter((s) => s.layer)
+      : [];
+    setPendingSession({ layers, skeletons, code, autorun: true });
+    document.getElementById("custom-btn")?.click();
   });
 
   return { getSerializedSession, replaySerializedSession };
