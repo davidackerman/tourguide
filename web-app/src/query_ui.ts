@@ -85,6 +85,13 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
       ⚠ AI not configured — the agent needs an AI backend.
       <button class="btn-link" data-action="open-settings">Set up in Settings</button>
     </div>
+    <div class="replay-banner" data-replay-banner hidden>
+      <div class="replay-banner-text">
+        <strong>📊 Shared session loaded.</strong>
+        <span data-replay-banner-detail></span>
+      </div>
+      <button class="btn-primary btn-tiny" data-action="replay-shared" type="button">🔁 Replay</button>
+    </div>
     <div class="session-toolbar" data-session-toolbar hidden>
       <button class="btn-secondary btn-tiny" data-action="copy-session" type="button">📋 Copy session</button>
       <div class="download-menu">
@@ -126,6 +133,9 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
   const aiHintBtn = box.querySelector<HTMLButtonElement>("[data-action='open-settings']")!;
   const threadEl = box.querySelector<HTMLDivElement>("[data-thread]")!;
   const sessionToolbar = box.querySelector<HTMLDivElement>("[data-session-toolbar]")!;
+  const replayBanner = box.querySelector<HTMLDivElement>("[data-replay-banner]")!;
+  const replayBannerDetail = box.querySelector<HTMLSpanElement>("[data-replay-banner-detail]")!;
+  const replayBtn = box.querySelector<HTMLButtonElement>("[data-action='replay-shared']")!;
   const copyBtn = box.querySelector<HTMLButtonElement>("[data-action='copy-session']")!;
   const copyStatus = box.querySelector<HTMLSpanElement>("[data-copy-status]")!;
   const newSessionBtn = box.querySelector<HTMLButtonElement>("[data-action='new-session']")!;
@@ -1094,7 +1104,49 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): Que
       // context picks up these as if the live session ran them.
       sessionTurns.push({ question: t.question, summary: t.answer || "(no visible result)" });
     }
+    // Surface the banner if any of the replayed turns has python that
+    // would regenerate something on click. Naive-user view: "look,
+    // there's more stuff you can get; click Replay to get it."
+    const replayableStepCount = turns.reduce(
+      (n, t) =>
+        n +
+        t.trace.filter(
+          (it) => it.tool === "python_on_layers" || it.tool === "make_plot" || it.tool === "run_python",
+        ).length,
+      0,
+    );
+    const plotCount = turns.reduce((n, t) => n + (t.plots?.length ?? 0), 0);
+    if (replayableStepCount > 0) {
+      const detailParts: string[] = [];
+      if (plotCount > 0) detailParts.push(`${plotCount} plot${plotCount === 1 ? "" : "s"}`);
+      detailParts.push(
+        `${replayableStepCount} analysis step${replayableStepCount === 1 ? "" : "s"}`,
+      );
+      replayBannerDetail.textContent =
+        ` Plot images and any layers the analysis created weren't embedded — click Replay to regenerate ${detailParts.join(" / ")} on your backend.`;
+      replayBanner.hidden = false;
+    }
   };
+
+  // Replay button: jump to the FIRST python step's Edit handler so the
+  // Custom Python dialog opens preloaded with that step's code; the
+  // user clicks Run there. Subsequent steps still have their own 🐍
+  // Edit buttons in the trace. Auto-running every step end-to-end
+  // would require executing them without the dialog round-trip, which
+  // is a bigger surface to wire — first-step replay is the naive-user
+  // entry point.
+  replayBtn.addEventListener("click", () => {
+    const firstPythonBtn = box.querySelector<HTMLButtonElement>(
+      ".agent-trace-item .agent-trace-open-step",
+    );
+    if (firstPythonBtn) {
+      // Expand the matching trace details so the user sees subsequent
+      // step buttons after they're done with the first.
+      const containingDetails = firstPythonBtn.closest("details");
+      if (containingDetails) (containingDetails as HTMLDetailsElement).open = true;
+      firstPythonBtn.click();
+    }
+  });
 
   return { getSerializedSession, replaySerializedSession };
 }

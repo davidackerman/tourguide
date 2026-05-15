@@ -817,6 +817,25 @@ input.api-key {
   border-bottom: 1px solid var(--border);
   font-size: 0.78rem;
 }
+
+.replay-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.6rem 0;
+  padding: 0.55rem 0.7rem;
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  border-radius: 4px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+.replay-banner-text {
+  flex: 1;
+}
+.replay-banner-text strong {
+  color: var(--fg);
+}
 .session-toolbar .btn-link {
   margin-left: auto;
 }
