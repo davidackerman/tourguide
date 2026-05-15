@@ -239,16 +239,16 @@ function updateBackendIndicator(): void {
   } else {
     backendIndicator.textContent = "No AI";
     backendIndicator.className = "backend-indicator";
-    backendIndicator.title = "Click to configure an AI backend (needed for Ask + Custom Python).";
+    backendIndicator.title = "Click to configure an AI backend (needed for Ask).";
   }
-  // Custom Python and Ask both depend on AI — visually dim Custom in
-  // the topbar when no backend is ready, and update its tooltip so
-  // users know why. Σ Analyze and the structured browser don't need
-  // AI, so we leave those alone.
-  customBtn.disabled = !ready;
+  // Custom Python only NEEDS AI for its 'ask in plain English' mode —
+  // running pasted code against the analysis backend works fine
+  // without it. Leave the button enabled regardless so share-link
+  // recipients (who typically don't have an AI key) can hit Replay
+  // and re-run the saved Python. Tooltip explains the partial gating.
   customBtn.title = ready
     ? "Plain-English Python on one or more layers"
-    : "Requires AI — set up in Settings";
+    : "Run Python on layers — plain-English mode requires AI (Settings)";
 }
 updateBackendIndicator();
 
@@ -620,15 +620,33 @@ shareBtn.addEventListener("click", async () => {
   let useCatalogIdx =
     !currentIsCustom && currentCatalogIndex !== null ? currentCatalogIndex : undefined;
   if (removed.length > 0) {
-    const reasons = removed.map((l) =>
-      /\.hf\.space\/api\/data\//.test(l.source)
-        ? `${l.name} (synthesized — expires when the analysis Space restarts)`
-        : `${l.name} (local-folder pick — only works on your machine)`,
-    ).join("\n  ");
+    // Distinguish synthesized (agent-created, regeneratable via Replay)
+    // from local-folder (truly stuck to one machine). Synthesized
+    // layers are the common case now that python_on_layers can create
+    // them — and the share-link replay flow does regenerate them on
+    // the recipient's backend, so they're not actually lost.
+    const synthesized = removed.filter((l) => /\.hf\.space\/api\/data\//.test(l.source));
+    const localOnly = removed.filter((l) => !/\.hf\.space\/api\/data\//.test(l.source));
+    const reasonLines: string[] = [];
+    if (synthesized.length > 0) {
+      reasonLines.push(
+        `Synthesized by analysis (can be regenerated):\n  ${synthesized.map((l) => l.name).join(", ")}`,
+      );
+    }
+    if (localOnly.length > 0) {
+      reasonLines.push(
+        `Local-folder (only works on your machine):\n  ${localOnly.map((l) => l.name).join(", ")}`,
+      );
+    }
+    const replayHint = synthesized.length > 0
+      ? "\n\nThe recipient can click 🔁 Replay in the shared link to rerun the analysis and recreate these layers on their backend."
+      : "";
     const ok = confirm(
-      `${removed.length} layer(s) won't survive a share link:\n  ${reasons}\n\n` +
-        `OK = strip those layers from the share link.\n` +
-        `Cancel = include them anyway (recipient will see errors).`,
+      `${removed.length} layer(s) can't be embedded directly in the share link:\n\n` +
+        reasonLines.join("\n\n") +
+        replayHint +
+        `\n\nOK = strip those layers from the share link.\n` +
+        `Cancel = include them anyway (URL will 404 for the recipient).`,
     );
     if (ok) {
       descriptorForShare = cleaned;
