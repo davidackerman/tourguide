@@ -1611,17 +1611,36 @@ async function execPythonOnLayers(
 
     const fmtVoxel = (v: [number, number, number]): string =>
       v.map((x) => (Number.isInteger(x) ? String(x) : x.toFixed(1))).join("×");
-    const scaleBlurb = layersForRequest
-      .map((l) => `${l._layerName}@${l._scalePath || "root"} (${humanBytes(l._approxBytes)})`)
-      .join(", ");
+    // pendingPrecomputedVolumes and resolvedPrecomputedVolumes are 1:1
+    // in the same order — pendingPrecomputedVolumes carries layerName,
+    // resolvedPrecomputedVolumes carries the chosen scale.
+    const precomputedBlurb = resolvedPrecomputedVolumes.map((pv, i) => ({
+      layerName: pendingPrecomputedVolumes[i].layerName,
+      scaleKey: pv.scale.key || "root",
+      approxBytes: pv.scale.approxBytes,
+      // precomputed scale.size is xyz; reverse to zyx for parity with
+      // zarr _shape (array-axis order) in the detail line.
+      shape: [pv.scale.size[2], pv.scale.size[1], pv.scale.size[0]],
+      voxelNm: [pv.scale.resolutionNm[2], pv.scale.resolutionNm[1], pv.scale.resolutionNm[0]] as [number, number, number],
+    }));
+    const scaleBlurb = [
+      ...layersForRequest.map((l) => `${l._layerName}@${l._scalePath || "root"} (${humanBytes(l._approxBytes)})`),
+      ...precomputedBlurb.map((p) => `${p.layerName}@${p.scaleKey} (${humanBytes(p.approxBytes)})`),
+    ].join(", ");
     // Detailed per-layer line surfaces shape + voxel size + total
     // voxel count alongside the scale path. Shows up under the
     // backend/local + scale blurb so the user can tell whether
     // they got coarse or fine data without expanding the trace.
-    const detailLines = layersForRequest.map((l) => {
-      const numVox = l._shape.reduce((a, b) => a * b, 1);
-      return `   shape ${l._shape.join("×")} · ${fmtVoxel(l._voxelNm)} nm/vox · ${numVox.toLocaleString()} voxels`;
-    });
+    const detailLines = [
+      ...layersForRequest.map((l) => {
+        const numVox = l._shape.reduce((a, b) => a * b, 1);
+        return `   shape ${l._shape.join("×")} · ${fmtVoxel(l._voxelNm)} nm/vox · ${numVox.toLocaleString()} voxels`;
+      }),
+      ...precomputedBlurb.map((p) => {
+        const numVox = p.shape.reduce((a, b) => a * b, 1);
+        return `   shape ${p.shape.join("×")} · ${fmtVoxel(p.voxelNm)} nm/vox · ${numVox.toLocaleString()} voxels`;
+      }),
+    ];
     const runtimeLabel = runtime === "backend"
       ? "🖥️ started on HF backend"
       : "💻 started locally (in-browser Pyodide)";
