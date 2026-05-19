@@ -2,9 +2,10 @@ import type { LLMBackend } from "./llm.js";
 import type { DatasetDB } from "./db.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import type { BundledViewer } from "./bundled_viewer.js";
-import { runAgent, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
+import { runAgent, runPythonOnLayersReplay, type AgentTraceItem, type AgentTurnSummary, type AskField } from "./agent.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
 import { setPendingSession } from "./python_session.js";
+import type { SerializedTurn } from "./permalink.js";
 
 export interface QueryUIContext {
   getDB: () => DatasetDB | null;
@@ -15,6 +16,19 @@ export interface QueryUIContext {
   getDescriptor: () => DatasetDescriptor | null;
   getBackend: () => LLMBackend;
   viewer: BundledViewer;
+}
+
+// Returned from renderQueryBox so the caller (main.ts) can snapshot
+// the session for share-link embedding and restore one from a URL.
+export interface QueryUIHandle {
+  /** Snapshot every visible turn as SerializedTurn data — what the
+   *  share-link encoder ships to the recipient. Empty when no turns
+   *  have run yet. */
+  getSerializedSession: () => SerializedTurn[];
+  /** Render saved turns into the query thread as if they had just
+   *  run. Used on share-link load. Cards visually match live ones
+   *  but no agent is invoked. */
+  replaySerializedSession: (turns: SerializedTurn[]) => void;
 }
 
 // Per-turn UI state. Each submit creates a new card; subsequent
@@ -36,7 +50,7 @@ interface TurnCard {
   traceEl: HTMLElement;
   detailsEl: HTMLDetailsElement;
   traceItems: AgentTraceItem[];
-  plots: { png: string; code: string; title?: string }[];
+  plots: { png: string; code: string; title?: string; explanation?: string }[];
   tables: { name: string; columns: string[]; rows: (number | string | null)[][] }[];
   metaLines: string[];
 }
@@ -62,7 +76,7 @@ const saveTraceOpenPref = (v: boolean): void => {
   }
 };
 
-export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): void {
+export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): QueryUIHandle {
   container.innerHTML = "";
   const box = document.createElement("div");
   box.className = "query-box";
@@ -70,6 +84,13 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
     <div class="query-ai-hint" data-ai-hint hidden>
       ⚠ AI not configured — the agent needs an AI backend.
       <button class="btn-link" data-action="open-settings">Set up in Settings</button>
+    </div>
+    <div class="replay-banner" data-replay-banner hidden>
+      <div class="replay-banner-text">
+        <strong>📊 Shared session loaded.</strong>
+        <span data-replay-banner-detail></span>
+      </div>
+      <button class="btn-primary btn-tiny" data-action="replay-shared" type="button">🔁 Replay</button>
     </div>
     <div class="session-toolbar" data-session-toolbar hidden>
       <button class="btn-secondary btn-tiny" data-action="copy-session" type="button">📋 Copy session</button>
@@ -112,6 +133,9 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const aiHintBtn = box.querySelector<HTMLButtonElement>("[data-action='open-settings']")!;
   const threadEl = box.querySelector<HTMLDivElement>("[data-thread]")!;
   const sessionToolbar = box.querySelector<HTMLDivElement>("[data-session-toolbar]")!;
+  const replayBanner = box.querySelector<HTMLDivElement>("[data-replay-banner]")!;
+  const replayBannerDetail = box.querySelector<HTMLSpanElement>("[data-replay-banner-detail]")!;
+  const replayBtn = box.querySelector<HTMLButtonElement>("[data-action='replay-shared']")!;
   const copyBtn = box.querySelector<HTMLButtonElement>("[data-action='copy-session']")!;
   const copyStatus = box.querySelector<HTMLSpanElement>("[data-copy-status]")!;
   const newSessionBtn = box.querySelector<HTMLButtonElement>("[data-action='new-session']")!;
@@ -126,7 +150,14 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
   const traceDefaultCheckbox = box.querySelector<HTMLInputElement>("[data-trace-default]")!;
   traceDefaultCheckbox.checked = loadTraceOpenPref();
   traceDefaultCheckbox.addEventListener("change", () => {
-    saveTraceOpenPref(traceDefaultCheckbox.checked);
+    const isOpen = traceDefaultCheckbox.checked;
+    saveTraceOpenPref(isOpen);
+    // Apply to every already-rendered card so the checkbox feels like
+    // a real toggle, not just a default for future cards. Without this
+    // users have to manually expand/collapse each turn's <details>.
+    for (const card of allCards) {
+      card.detailsEl.open = isOpen;
+    }
   });
 
   // Reflect backend readiness in the persistent hint above the Ask
@@ -577,7 +608,7 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       wrapper.appendChild(det);
     }
     card.plotsEl.appendChild(wrapper);
-    card.plots.push({ png: pngDataUrl, code, title });
+    card.plots.push({ png: pngDataUrl, code, title, explanation });
   };
 
   // Inline summary card for an ingested table. The data is already in
@@ -1004,6 +1035,230 @@ export function renderQueryBox(container: HTMLElement, ctx: QueryUIContext): voi
       stopBtn.hidden = true;
     }
   });
+
+  // Snapshot every rendered turn into the share-link's SerializedTurn
+  // shape. Reads from allCards (the in-memory store of rendered cards)
+  // rather than maintaining a parallel array — keeps the two in sync
+  // automatically as the agent runs.
+  const getSerializedSession = (): SerializedTurn[] =>
+    allCards.map((card) => ({
+      question: card.question,
+      answer: card.answerEl.textContent?.trim() || undefined,
+      status: card.statusEl.textContent?.trim() || undefined,
+      trace: card.traceItems.map((it) => ({
+        tool: it.tool,
+        args: it.args,
+        result: it.result,
+        error: it.error,
+        llmMs: it.llmMs,
+        toolMs: it.toolMs,
+      })),
+      plots: card.plots.length > 0
+        ? card.plots.map((p) => ({
+            png: p.png,
+            title: p.title,
+            explanation: p.explanation,
+          }))
+        : undefined,
+    }));
+
+  // Inverse: take a saved session and render it as if the agent had
+  // just run those turns. Used on share-link load. Tables are NOT
+  // re-rendered here — they ship separately via `analysisTables` and
+  // get ingested into the SQL DB before this fires, so any table that
+  // was in the original session is already in the structured browser.
+  // Plot PNGs are NOT shipped (would bloat the URL); a stub card is
+  // rendered for each saved plot pointing the recipient at the
+  // matching python_on_layers / make_plot step's Replay button.
+  const replaySerializedSession = (turns: SerializedTurn[]): void => {
+    for (const t of turns) {
+      const card = createTurnCard(t.question);
+      for (const it of t.trace) {
+        // SerializedTraceItem.args is optional (`?`) but AgentTraceItem.args
+        // is required — default to {} when missing to keep appendTrace happy.
+        appendTrace(card, { ...it, args: it.args ?? {} });
+      }
+      if (t.answer) card.answerEl.textContent = t.answer;
+      if (t.plots && t.plots.length > 0) {
+        for (const p of t.plots) {
+          if (p.png) {
+            // Future-proof: a future version might preserve the PNG
+            // (or shipped a small thumbnail). Render normally then.
+            renderPlot(card, p.png, "", p.title, p.explanation);
+          } else {
+            // Placeholder so the recipient knows a plot existed here
+            // and how to regenerate it. Replay is one click away
+            // via the 🐍 Edit button on the matching python step.
+            const stub = document.createElement("div");
+            stub.className = "plot-output plot-stub";
+            const titleText = p.title ? ` "${p.title}"` : "";
+            stub.innerHTML = `
+              <p class="hint">📊 Plot${escapeHtml(titleText)} not embedded in share link (PNGs are big and regenerate cheaply). Click 🐍 <strong>Edit</strong> on the matching step below, then Run to regenerate.</p>
+              ${p.explanation ? `<p class="plot-explanation">${escapeHtml(p.explanation)}</p>` : ""}
+            `;
+            card.plotsEl.appendChild(stub);
+          }
+        }
+      }
+      if (t.status) {
+        // Preserve the original status verbatim (incl. ✓ + timings).
+        // Classify via prefix so "✓ Done" stays green; everything else
+        // falls into the neutral bin.
+        const kind = t.status.startsWith("✓") ? "ok" : "";
+        setStatus(card, t.status, kind);
+      }
+      // Also record into sessionTurns so the agent's prior-turn
+      // context picks up these as if the live session ran them.
+      sessionTurns.push({ question: t.question, summary: t.answer || "(no visible result)" });
+    }
+    // Surface the banner if any of the replayed turns has python that
+    // would regenerate something on click. Naive-user view: "look,
+    // there's more stuff you can get; click Replay to get it."
+    const replayableStepCount = turns.reduce(
+      (n, t) =>
+        n +
+        t.trace.filter(
+          (it) => it.tool === "python_on_layers" || it.tool === "make_plot" || it.tool === "run_python",
+        ).length,
+      0,
+    );
+    const plotCount = turns.reduce((n, t) => n + (t.plots?.length ?? 0), 0);
+    if (replayableStepCount > 0) {
+      const detailParts: string[] = [];
+      if (plotCount > 0) detailParts.push(`${plotCount} plot${plotCount === 1 ? "" : "s"}`);
+      detailParts.push(
+        `${replayableStepCount} analysis step${replayableStepCount === 1 ? "" : "s"}`,
+      );
+      replayBannerDetail.textContent =
+        ` Plot images and any layers the analysis created weren't embedded — click Replay to regenerate ${detailParts.join(" / ")} on your backend.`;
+      replayBanner.hidden = false;
+    }
+  };
+
+  // Replay button: run EVERY saved python step in order, directly via
+  // the agent's execPythonOnLayers — no Custom Python dialog, no LLM
+  // call. Mirrors what the agent itself does internally when it runs
+  // python_on_layers. Results (new layers, ingested tables, plots,
+  // fly_to / highlight) land via the same callbacks an agent turn
+  // uses, into a single fresh '🔁 Replay' turn card. Each replayed
+  // step gets a synthetic trace item so the user can expand and see
+  // what code ran + what summary came back.
+  replayBtn.addEventListener("click", async () => {
+    // Walk every rendered card and collect every python step in
+    // order. Sequential execution matters: step N may produce a
+    // layer or table that step N+1 reads from.
+    interface PythonStep {
+      item: AgentTraceItem;
+      question: string;
+      index: number;
+    }
+    const pythonSteps: PythonStep[] = [];
+    for (const c of allCards) {
+      for (const it of c.traceItems) {
+        if (
+          it.tool === "python_on_layers" ||
+          it.tool === "run_python" ||
+          it.tool === "make_plot"
+        ) {
+          pythonSteps.push({ item: it, question: c.question, index: pythonSteps.length + 1 });
+        }
+      }
+    }
+    if (pythonSteps.length === 0) return;
+    const descriptor = ctx.getDescriptor();
+    if (!descriptor) return;
+
+    const card = createTurnCard(`🔁 Replay (${pythonSteps.length} step${pythonSteps.length === 1 ? "" : "s"})`);
+    setStatus(card, `Replaying step 1/${pythonSteps.length}…`, "pending");
+    replayBtn.disabled = true;
+    let stepsRun = 0;
+    let answeredOrFlew = false;
+    const turnStart = performance.now();
+    let lastError: Error | null = null;
+
+    for (const step of pythonSteps) {
+      setStatus(card, `Replaying step ${step.index}/${pythonSteps.length}: ${step.question}`, "pending");
+      // Append a synthetic trace item BEFORE running. The user sees
+      // the step's args (incl. saved Python code) immediately; the
+      // result populates after execPythonOnLayers returns.
+      const trace: AgentTraceItem = {
+        tool: step.item.tool,
+        args: step.item.args ?? {},
+      };
+      const stepStart = performance.now();
+      try {
+        const result = await runPythonOnLayersReplay(step.item.args ?? {}, {
+          db: ctx.getDB(),
+          setDB: ctx.setDB,
+          descriptor,
+          viewer: ctx.viewer,
+          backend: ctx.getBackend(),
+          callbacks: {
+            // Don't forward onTrace to the card — we'll append one
+            // synthetic trace per outer step after it completes.
+            // (execPythonOnLayers doesn't emit onTrace anyway, but
+            // future-proof.)
+            onProgress: (m) => setStatus(card, `Step ${step.index}/${pythonSteps.length}: ${m}`, "pending"),
+            onPlot: (png, code, title, explanation) => {
+              renderPlot(card, png, code, title, explanation);
+              answeredOrFlew = true;
+            },
+            onFly: (_pos, layer, id) => {
+              setStatus(card, `Flew to ${layer}${id ? ` ${id}` : ""}`, "ok");
+              answeredOrFlew = true;
+            },
+            onHighlight: (layer, ids) => {
+              setStatus(card, `Showing ${ids.length} segment${ids.length === 1 ? "" : "s"} in ${layer}`, "ok");
+              answeredOrFlew = true;
+            },
+            onTable: (tbl) => {
+              renderTable(card, tbl);
+              answeredOrFlew = true;
+            },
+            onMeta: (info) => appendMeta(card, info),
+          },
+        });
+        trace.result = result;
+        trace.toolMs = performance.now() - stepStart;
+        appendTrace(card, trace);
+        stepsRun++;
+      } catch (err) {
+        trace.error = (err as Error).message;
+        trace.toolMs = performance.now() - stepStart;
+        appendTrace(card, trace);
+        lastError = err as Error;
+        break;
+      }
+    }
+
+    const totalMs = performance.now() - turnStart;
+    const llmTotal = card.traceItems.reduce((s, t) => s + (t.llmMs ?? 0), 0);
+    const toolTotal = card.traceItems.reduce((s, t) => s + (t.toolMs ?? 0), 0);
+    const timing = formatTurnTiming(totalMs, llmTotal, toolTotal);
+    if (lastError) {
+      setStatus(
+        card,
+        `✗ Replay failed at step ${stepsRun + 1}/${pythonSteps.length}: ${lastError.message} ${timing}`,
+        "err",
+      );
+    } else {
+      setStatus(card, `✓ Replay done (${stepsRun}/${pythonSteps.length} steps) ${timing}`, "ok");
+      replayBanner.hidden = true;
+    }
+    // Add a session-turn entry so any follow-up live agent run
+    // inherits the replay as prior context.
+    sessionTurns.push({
+      question: `Replay (${stepsRun}/${pythonSteps.length} steps)`,
+      summary: lastError
+        ? `Replayed ${stepsRun} step(s); failed: ${lastError.message}`
+        : answeredOrFlew
+          ? `Replayed ${stepsRun} step(s); regenerated outputs`
+          : `Replayed ${stepsRun} step(s) successfully`,
+    });
+    replayBtn.disabled = false;
+  });
+
+  return { getSerializedSession, replaySerializedSession };
 }
 
 function escapeHtml(s: string): string {

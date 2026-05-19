@@ -22,7 +22,7 @@ import type { LLMBackend } from "./llm.js";
 import { loadSettings } from "./llm.js";
 import type { BundledViewer } from "./bundled_viewer.js";
 import { loadPromptHistory, recordPrompt } from "./prompt_history.js";
-import { consumePendingSession } from "./python_session.js";
+import { consumePendingSession, peekPendingSession } from "./python_session.js";
 import {
   fetchHealth,
   openBrowserTunnel,
@@ -311,8 +311,16 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
   };
 
   addLayerBtn.addEventListener("click", () => void addLayer());
-  // Start with one layer selected.
-  void addLayer();
+  // Start with one layer selected — UNLESS there's a pending session
+  // about to drain in. The pending-session block below wipes the slots
+  // and adds its own layers; if we let the default addLayer() fire
+  // first it kicks off an inspect that conflicts with the pending
+  // addLayer() calls ('Analysis already in progress' from the
+  // AnalysisClient single-flight lock). Skip the default when pending
+  // is queued.
+  if (peekPendingSession() === null) {
+    void addLayer();
+  }
 
   // --- Skeleton slots ------------------------------------------------------
 
@@ -462,6 +470,46 @@ export function openCustomAnalysisDialog(cb: CustomAnalysisUICallbacks): void {
         renderSkeletonSlot(slot);
       }
       if (pending.code) codeEl.value = pending.code;
+      // Share-link Replay path sets autorun:true so the recipient
+      // never has to interact with the dialog. We hide the modal
+      // visually for the duration — the analysis still runs, results
+      // still apply (new layers register, tables ingest, etc.) — and
+      // close the dialog on success. If the run errors, we un-hide
+      // so the user sees what went wrong instead of silent failure.
+      if (pending.autorun) {
+        overlay.classList.add("modal-headless");
+        const startedAt = Date.now();
+        const MAX_WAIT_MS = 120_000; // 2 min — generous for HF cold start
+        while (Date.now() - startedAt < MAX_WAIT_MS) {
+          const allReady = slots.every((s) => s.inspection && s.scaleIdx != null);
+          if (allReady) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        const allReady = slots.every((s) => s.inspection && s.scaleIdx != null);
+        if (allReady && !runBtn.disabled) {
+          // Watch for the run to finish. runBtn.disabled flips true
+          // while the run is in-flight and false when it returns. We
+          // poll because the runBtn handler is fire-and-forget from
+          // our perspective (event dispatcher doesn't await it).
+          runBtn.click();
+          const runStart = Date.now();
+          while (Date.now() - runStart < MAX_WAIT_MS && runBtn.disabled) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
+          // Run finished. If errorEl is showing, an error happened —
+          // un-hide so the user sees the message. Otherwise close.
+          const errorEl = overlay.querySelector<HTMLDivElement>("[data-error]");
+          const hasError = errorEl && !errorEl.hidden && errorEl.textContent?.trim();
+          if (hasError) {
+            overlay.classList.remove("modal-headless");
+          } else {
+            close();
+          }
+        } else {
+          // Inspect never settled. Un-hide so the user can investigate.
+          overlay.classList.remove("modal-headless");
+        }
+      }
     })();
   }
 

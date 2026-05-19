@@ -196,6 +196,14 @@ button {
   justify-content: center;
   z-index: 1000;
 }
+/* Headless mode: modal stays mounted (so its analysis runs through)
+   but is invisible. Used by share-link Replay so the recipient never
+   sees the Custom Python dialog flash open during autorun. If the
+   run errors, the dialog removes this class so the user sees what
+   went wrong. */
+.modal-overlay.modal-headless {
+  display: none;
+}
 
 .modal {
   background: var(--bg-elev);
@@ -816,6 +824,32 @@ input.api-key {
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   font-size: 0.78rem;
+}
+
+.replay-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.6rem 0;
+  padding: 0.55rem 0.7rem;
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  border-radius: 4px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+/* `display: flex` above otherwise overrides the `hidden` attribute's
+   UA `display: none`. Without this rule, the banner shows on every
+   page load — including non-share-link visits — even though the JS
+   side has it correctly hidden by attribute. */
+.replay-banner[hidden] {
+  display: none;
+}
+.replay-banner-text {
+  flex: 1;
+}
+.replay-banner-text strong {
+  color: var(--fg);
 }
 .session-toolbar .btn-link {
   margin-left: auto;

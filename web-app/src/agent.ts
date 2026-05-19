@@ -27,7 +27,7 @@ import {
   type PrecomputedVolumeInfo,
 } from "./precomputed_volume_loader.js";
 import { loadSettings } from "./llm.js";
-import { inspectSourceRemote, postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
+import { inspectSourceRemote, openBrowserTunnel, postAnalysisRequest, waitForBackendReady } from "./remote_analysis.js";
 
 export interface AgentTraceItem {
   tool: string;
@@ -1056,6 +1056,19 @@ _PLOT_PNG = base64.b64encode(_buf.getvalue()).decode("ascii")
 // has to think about scale paths. Errors back with an explicit message
 // when a requested layer isn't a zarr source (skeleton / precomputed
 // mesh layers aren't yet supported by the underlying engine).
+// Exposed for the share-link Replay path so it can run a saved python
+// step without going through the agent loop (no LLM call) or the
+// Custom Python dialog (no UI). Same execution surface as the agent
+// uses internally — table ingestion, layer registration, plot rendering,
+// fly_to / highlight, etc. all happen via applyCustomResult which
+// execPythonOnLayers calls before returning.
+export async function runPythonOnLayersReplay(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<{ summary: string; produced: string[] }> {
+  return await execPythonOnLayers(args, ctx);
+}
+
 async function execPythonOnLayers(
   args: Record<string, unknown>,
   ctx: AgentContext,
@@ -1640,32 +1653,48 @@ async function execPythonOnLayers(
         typeof crypto?.randomUUID === "function"
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      result = await postAnalysisRequest(
-        backendUrl,
-        {
-          layers: requestLayers,
-          // Backend reads precomputed via tensorstore's neuroglancer_precomputed
-          // driver. Slimmer shape than the worker uses (tensorstore re-reads
-          // the info file from baseUrl, so we don't ship chunk/encoding/
-          // sharding metadata). xyz axes are the precomputed convention.
-          precomputedVolumeLayers:
-            resolvedPrecomputedVolumes.length > 0
-              ? resolvedPrecomputedVolumes.map((pv) => ({
-                  varName: pv.varName,
-                  baseUrl: pv.baseUrl,
-                  scaleKey: pv.scale.key,
-                  axesOrder: ["x", "y", "z"],
-                  voxelNm: pv.scale.resolutionNm,
-                  offsetNm: pv.offsetNm ?? [0, 0, 0],
-                }))
-              : undefined,
-          tables,
-          code,
-          timeoutMs: 300_000,
-          sessionId,
-        },
-        ctx.signal,
-      );
+      // Local-folder layers (URLs containing `/local-data/`) need a
+      // WebSocket tunnel back to the browser so the backend can fetch
+      // their chunks. Mirrors what the Custom Python dialog does.
+      // Without this, the backend rejects the request with
+      // 'layer X is local but no browser tunnel is attached'.
+      const needsTunnel = requestLayers.some((l) => /\/local-data\//.test(l.url));
+      let tunnel: { close: () => void; ready: Promise<void> } | null = null;
+      if (needsTunnel) {
+        ctx.callbacks.onProgress?.("Opening tunnel to browser data…");
+        tunnel = openBrowserTunnel(backendUrl, sessionId);
+        await tunnel.ready;
+      }
+      try {
+        result = await postAnalysisRequest(
+          backendUrl,
+          {
+            layers: requestLayers,
+            // Backend reads precomputed via tensorstore's neuroglancer_precomputed
+            // driver. Slimmer shape than the worker uses (tensorstore re-reads
+            // the info file from baseUrl, so we don't ship chunk/encoding/
+            // sharding metadata). xyz axes are the precomputed convention.
+            precomputedVolumeLayers:
+              resolvedPrecomputedVolumes.length > 0
+                ? resolvedPrecomputedVolumes.map((pv) => ({
+                    varName: pv.varName,
+                    baseUrl: pv.baseUrl,
+                    scaleKey: pv.scale.key,
+                    axesOrder: ["x", "y", "z"],
+                    voxelNm: pv.scale.resolutionNm,
+                    offsetNm: pv.offsetNm ?? [0, 0, 0],
+                  }))
+                : undefined,
+            tables,
+            code,
+            timeoutMs: 300_000,
+            sessionId,
+          },
+          ctx.signal,
+        );
+      } finally {
+        tunnel?.close();
+      }
     } else {
       result = await client.customAnalyze(
         {

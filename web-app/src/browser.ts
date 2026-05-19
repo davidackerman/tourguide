@@ -46,6 +46,7 @@ export function renderStructuredBrowser(container: HTMLElement, ctx: BrowserCont
       </label>
       <span class="browser-count" data-count></span>
       <button class="btn-secondary btn-download" data-download title="Download current table as CSV">⬇ CSV</button>
+      <button class="btn-secondary btn-delete" data-delete title="Delete this table from the in-memory DB. Doesn't affect any source CSV or layer data — just clears it from the structured browser + agent context.">🗑️ Delete</button>
     </div>
     <div class="browser-table-wrap">
       <table class="browser-table">
@@ -71,6 +72,7 @@ export function renderStructuredBrowser(container: HTMLElement, ctx: BrowserCont
   const prevBtn = wrap.querySelector<HTMLButtonElement>("[data-prev]")!;
   const nextBtn = wrap.querySelector<HTMLButtonElement>("[data-next]")!;
   const downloadBtn = wrap.querySelector<HTMLButtonElement>("[data-download]")!;
+  const deleteBtn = wrap.querySelector<HTMLButtonElement>("[data-delete]")!;
 
   ctx.db.tables.forEach((t) => {
     const opt = document.createElement("option");
@@ -182,6 +184,27 @@ export function renderStructuredBrowser(container: HTMLElement, ctx: BrowserCont
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+  deleteBtn.addEventListener("click", () => {
+    const ok = confirm(
+      `Delete table "${currentTable.table_name}" (${currentTable.row_count.toLocaleString()} rows)?\n\n` +
+        `Drops it from the in-memory SQL DB and removes it from the structured browser. ` +
+        `Source CSVs and layer data are NOT affected. ` +
+        `Any future agent SQL queries that reference this table will error until you regenerate it.`,
+    );
+    if (!ok) return;
+    try {
+      runQuery(ctx.db.db, `DROP TABLE IF EXISTS "${currentTable.table_name}";`);
+    } catch (err) {
+      console.warn("DROP TABLE failed:", err);
+    }
+    // Remove from the in-memory table list. Use splice so callers that
+    // hold a reference to the same array (e.g. main.ts) see the change.
+    const idx = ctx.db.tables.findIndex((t) => t.table_name === currentTable.table_name);
+    if (idx >= 0) ctx.db.tables.splice(idx, 1);
+    // Re-render in place — picks up the new table list, defaults to
+    // the first remaining table, or shows the empty-state placeholder.
+    renderStructuredBrowser(container, ctx);
   });
   prevBtn.addEventListener("click", () => {
     if (page > 0) {

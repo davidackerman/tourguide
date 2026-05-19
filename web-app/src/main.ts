@@ -239,20 +239,37 @@ function updateBackendIndicator(): void {
   } else {
     backendIndicator.textContent = "No AI";
     backendIndicator.className = "backend-indicator";
-    backendIndicator.title = "Click to configure an AI backend (needed for Ask + Custom Python).";
+    backendIndicator.title = "Click to configure an AI backend (needed for Ask).";
   }
-  // Custom Python and Ask both depend on AI — visually dim Custom in
-  // the topbar when no backend is ready, and update its tooltip so
-  // users know why. Σ Analyze and the structured browser don't need
-  // AI, so we leave those alone.
-  customBtn.disabled = !ready;
+  // Custom Python only NEEDS AI for its 'ask in plain English' mode —
+  // running pasted code against the analysis backend works fine
+  // without it. Leave the button enabled regardless so share-link
+  // recipients (who typically don't have an AI key) can hit Replay
+  // and re-run the saved Python. Tooltip explains the partial gating.
   customBtn.title = ready
     ? "Plain-English Python on one or more layers"
-    : "Requires AI — set up in Settings";
+    : "Run Python on layers — plain-English mode requires AI (Settings)";
 }
 updateBackendIndicator();
 
-renderQueryBox(queryHost, {
+// Opportunistically warm the analysis backend on page load.
+// HF Spaces sleep after ~30 min idle; cold-start takes 30-60 s when
+// the first request hits. By firing a single /api/health ping in the
+// background as soon as tourguide opens, we kick off the wake-up so
+// the Space is responsive by the time the user clicks Share, runs an
+// analysis, or replays a shared session. Fire-and-forget — errors
+// are fine (page works without the backend), and 429s just mean
+// it's already busy serving someone, also fine.
+{
+  const warmUpUrl = loadSettings().analysisBackendUrl.trim();
+  if (warmUpUrl) {
+    void fetchHealth(warmUpUrl).catch(() => {
+      /* silent; just a warm-up ping */
+    });
+  }
+}
+
+const queryHandle = renderQueryBox(queryHost, {
   getDB: () => currentDB,
   setDB: (db) => {
     currentDB = db;
@@ -455,6 +472,19 @@ async function init(): Promise<void> {
   } catch (err) {
     console.error("Failed to ingest shared analysis tables:", err);
   }
+  // Embedded agent session — replay the sender's scrollback into the
+  // recipient's query thread. Plot PNGs aren't in the share; each
+  // plot turn renders a placeholder pointing the user at the matching
+  // python step's 🐍 Edit → Run to regenerate on their backend.
+  // Done after table ingestion so any DB-backed turn data is present
+  // by the time the replayed turn cards reference it.
+  try {
+    const { decodeSharedSessionFromUrl } = await import("./permalink.js");
+    const turns = await decodeSharedSessionFromUrl(window.location.search);
+    if (turns.length > 0) queryHandle.replaySerializedSession(turns);
+  } catch (err) {
+    console.error("Failed to replay shared agent session:", err);
+  }
 }
 
 // Add tables shipped in the permalink to the in-memory DB so the
@@ -607,15 +637,33 @@ shareBtn.addEventListener("click", async () => {
   let useCatalogIdx =
     !currentIsCustom && currentCatalogIndex !== null ? currentCatalogIndex : undefined;
   if (removed.length > 0) {
-    const reasons = removed.map((l) =>
-      /\.hf\.space\/api\/data\//.test(l.source)
-        ? `${l.name} (synthesized — expires when the analysis Space restarts)`
-        : `${l.name} (local-folder pick — only works on your machine)`,
-    ).join("\n  ");
+    // Distinguish synthesized (agent-created, regeneratable via Replay)
+    // from local-folder (truly stuck to one machine). Synthesized
+    // layers are the common case now that python_on_layers can create
+    // them — and the share-link replay flow does regenerate them on
+    // the recipient's backend, so they're not actually lost.
+    const synthesized = removed.filter((l) => /\.hf\.space\/api\/data\//.test(l.source));
+    const localOnly = removed.filter((l) => !/\.hf\.space\/api\/data\//.test(l.source));
+    const reasonLines: string[] = [];
+    if (synthesized.length > 0) {
+      reasonLines.push(
+        `Synthesized by analysis (can be regenerated):\n  ${synthesized.map((l) => l.name).join(", ")}`,
+      );
+    }
+    if (localOnly.length > 0) {
+      reasonLines.push(
+        `Local-folder (only works on your machine):\n  ${localOnly.map((l) => l.name).join(", ")}`,
+      );
+    }
+    const replayHint = synthesized.length > 0
+      ? "\n\nThe recipient can click 🔁 Replay in the shared link to rerun the analysis and recreate these layers on their backend."
+      : "";
     const ok = confirm(
-      `${removed.length} layer(s) won't survive a share link:\n  ${reasons}\n\n` +
-        `OK = strip those layers from the share link.\n` +
-        `Cancel = include them anyway (recipient will see errors).`,
+      `${removed.length} layer(s) can't be embedded directly in the share link:\n\n` +
+        reasonLines.join("\n\n") +
+        replayHint +
+        `\n\nOK = strip those layers from the share link.\n` +
+        `Cancel = include them anyway (URL will 404 for the recipient).`,
     );
     if (ok) {
       descriptorForShare = cleaned;
@@ -704,6 +752,12 @@ shareBtn.addEventListener("click", async () => {
   if (truncatedTableSummaries.length > 0) {
     console.info("[share] truncated tables to fit URL:", truncatedTableSummaries);
   }
+  // Snapshot the current agent thread so the recipient sees the same
+  // scrollback. Plot PNGs / large result blobs are dropped at the
+  // share boundary (see truncateSessionForShare); the recipient gets
+  // a placeholder for each plot and can hit Replay on the matching
+  // python step to regenerate it on their backend.
+  const sessionTurns = queryHandle.getSerializedSession();
   const url = await buildPermalinkURL({
     catalogIndex: useCatalogIdx,
     descriptor: useCatalogIdx === undefined ? descriptorForShare : undefined,
@@ -711,6 +765,7 @@ shareBtn.addEventListener("click", async () => {
     viewerState,
     analysisPrompts: analysisPrompts.length > 0 ? analysisPrompts : undefined,
     analysisTables: sharedTables.length > 0 ? sharedTables : undefined,
+    analysisSession: sessionTurns.length > 0 ? sessionTurns : undefined,
   });
   // Soft size warning — most browsers handle URLs up to ~32k chars
   // fine, beyond that gets sketchy (Safari truncates at 80k, etc.).
@@ -757,38 +812,114 @@ shareBtn.addEventListener("click", async () => {
       console.warn("[share] short-link failed, using long URL:", err);
     }
   }
-  try {
-    await navigator.clipboard.writeText(finalUrl);
-    const tablesHint = sharedTables.length > 0
-      ? ` (${sharedTables.length} table${sharedTables.length === 1 ? "" : "s"} embedded${truncatedTableSummaries.length > 0 ? `, ${truncatedTableSummaries.length} truncated` : ""})`
-      : "";
-    shareBtn.textContent = shortened
-      ? `✓ Copied short link${tablesHint}`
-      : `✓ Copied${tablesHint}`;
-    setTimeout(() => (shareBtn.textContent = "🔗 Share"), 2200);
-    // Combine ephemeral-link warning + truncation warning into one
-    // dialog so the user gets at most one modal interruption.
-    const warnings: string[] = [];
-    if (shortened && persistent === false) {
-      warnings.push(
-        "⚠ This link is stored in ephemeral memory on the analysis Space — " +
-          "it will stop working when the Space restarts (typically every few hours-to-days). " +
-          "Tell the recipient to open it soon. For persistent links, the Space owner can set " +
-          "HF_TOKEN + TG_SHARE_DATASET in the Space's secrets.",
-      );
-    }
-    if (truncatedTableSummaries.length > 0) {
-      warnings.push(
-        "Share link embedded a truncated view of some tables — recipients see only the top rows:\n  • " +
-          truncatedTableSummaries.join("\n  • ") +
-          "\n\nFor the full tables, send the CSV downloads (Custom → Download).",
-      );
-    }
-    if (warnings.length > 0) alert(warnings.join("\n\n"));
-  } catch {
-    prompt("Copy this URL:", finalUrl);
+  // navigator.clipboard.writeText needs transient user activation
+  // (a click within the last ~5 s). The share handler awaits
+  // waitForBackendReady + createShareLink before reaching the copy
+  // step, which on a cold start eats well over 5 s and consumes the
+  // activation from the original Share click. The browser then
+  // rejects the writeText and we'd fall to a native prompt() — ugly.
+  //
+  // Cleaner: show a small result modal with the URL in a read-only
+  // input and a Copy button. Clicking that button is a fresh user
+  // gesture, so clipboard.writeText works reliably. Warnings (ephemeral
+  // storage, truncated tables) render inline in the same modal.
+  const warnings: string[] = [];
+  if (shortened && persistent === false) {
+    warnings.push(
+      "⚠ This link is stored in ephemeral memory on the analysis Space — it stops working when the Space restarts (every few hours-to-days). For persistent links, set HF_TOKEN + TG_SHARE_DATASET in the Space's secrets.",
+    );
   }
+  if (truncatedTableSummaries.length > 0) {
+    warnings.push(
+      `Some tables embedded only their top rows: ${truncatedTableSummaries.join("; ")}. Send the CSV downloads (Custom → Download) for full tables.`,
+    );
+  }
+  showShareResult(finalUrl, {
+    shortened,
+    tablesEmbedded: sharedTables.length,
+    truncatedTables: truncatedTableSummaries.length,
+    warnings,
+  });
+  shareBtn.textContent = "🔗 Share";
 });
+
+interface ShareResultOpts {
+  shortened: boolean;
+  tablesEmbedded: number;
+  truncatedTables: number;
+  warnings: string[];
+}
+
+function showShareResult(url: string, opts: ShareResultOpts): void {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const tablesHint = opts.tablesEmbedded > 0
+    ? `${opts.tablesEmbedded} table${opts.tablesEmbedded === 1 ? "" : "s"} embedded${opts.truncatedTables > 0 ? `, ${opts.truncatedTables} truncated` : ""}`
+    : "";
+  const sublabel = [opts.shortened ? "Short link" : "Long inline URL", tablesHint]
+    .filter(Boolean)
+    .join(" · ");
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-label="Share link" style="max-width: 640px;">
+      <header class="modal-header">
+        <h2>🔗 Share link ready</h2>
+        <button class="modal-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="hint" data-sublabel></p>
+        <input type="text" readonly data-share-url style="width:100%; padding:0.5rem; font-family: monospace; font-size: 0.85rem;" />
+        <div class="form-actions" style="display:flex; gap:0.5rem; margin-top:0.6rem;">
+          <button class="btn-primary" data-action="copy">📋 Copy to clipboard</button>
+          <button class="btn-secondary" data-action="close">Close</button>
+          <span data-copy-status class="hint"></span>
+        </div>
+        <div data-warnings style="margin-top: 0.8rem; display: none;"></div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector<HTMLInputElement>("[data-share-url]")!;
+  const copyBtn = overlay.querySelector<HTMLButtonElement>("[data-action='copy']")!;
+  const closeBtn = overlay.querySelector<HTMLButtonElement>("[data-action='close']")!;
+  const closeX = overlay.querySelector<HTMLButtonElement>(".modal-close")!;
+  const status = overlay.querySelector<HTMLSpanElement>("[data-copy-status]")!;
+  const warningsEl = overlay.querySelector<HTMLDivElement>("[data-warnings]")!;
+  const sublabelEl = overlay.querySelector<HTMLParagraphElement>("[data-sublabel]")!;
+  input.value = url;
+  sublabelEl.textContent = sublabel;
+  if (opts.warnings.length > 0) {
+    warningsEl.style.display = "block";
+    warningsEl.innerHTML = opts.warnings
+      .map((w) => `<p class="hint warn" style="margin: 0.3rem 0;">${w.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</p>`)
+      .join("");
+  }
+  // Auto-select the input text so keyboard-savvy users can just hit
+  // Cmd+C / Ctrl+C without clicking the button. Microtask delay so
+  // the input is laid out before .select() runs.
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  const close = (): void => overlay.remove();
+  closeBtn.addEventListener("click", close);
+  closeX.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      status.textContent = "✓ Copied!";
+      status.className = "hint ok";
+      // Auto-close after a short success flash so the user doesn't
+      // have to also click Close. Long enough to read the confirmation.
+      setTimeout(close, 900);
+    } catch (err) {
+      status.textContent = `Copy failed: ${(err as Error).message}. Select the URL above and Cmd+C / Ctrl+C.`;
+      status.className = "hint err";
+    }
+  });
+}
 
 // Copy NG link — plain Neuroglancer permalink with just the viewer
 // state (camera + layers + selected segments). No tourguide DB, no
