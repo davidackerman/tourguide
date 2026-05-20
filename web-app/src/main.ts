@@ -258,14 +258,35 @@ updateBackendIndicator();
 // background as soon as tourguide opens, we kick off the wake-up so
 // the Space is responsive by the time the user clicks Share, runs an
 // analysis, or replays a shared session. Fire-and-forget — errors
-// are fine (page works without the backend), and 429s just mean
-// it's already busy serving someone, also fine.
+// are fine (page works without the backend).
+//
+// Throttled via localStorage to one warm-up per ~5 min per backend
+// URL. Without this, every refresh / new tab fires another health
+// ping, and a working session with a few reloads can easily add 10+
+// pings on top of the agent's own traffic — material when HF's free
+// tier has a tight per-IP rate budget across the whole *.hf.space
+// subdomain.
 {
   const warmUpUrl = loadSettings().analysisBackendUrl.trim();
   if (warmUpUrl) {
-    void fetchHealth(warmUpUrl).catch(() => {
-      /* silent; just a warm-up ping */
-    });
+    const WARM_UP_TTL_MS = 5 * 60 * 1000;
+    const key = `tourguide:warmup:${warmUpUrl}`;
+    let last = 0;
+    try {
+      last = Number(localStorage.getItem(key) || "0");
+    } catch {
+      /* private mode or storage blocked — fall through and warm up */
+    }
+    if (Date.now() - last > WARM_UP_TTL_MS) {
+      try {
+        localStorage.setItem(key, String(Date.now()));
+      } catch {
+        /* same — fine to ignore */
+      }
+      void fetchHealth(warmUpUrl).catch(() => {
+        /* silent; just a warm-up ping */
+      });
+    }
   }
 }
 

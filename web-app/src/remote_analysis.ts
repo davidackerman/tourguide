@@ -31,15 +31,16 @@ export async function fetchHealth(url: string, signal?: AbortSignal): Promise<Ba
       method: "GET",
       signal,
     });
-    if (!res.ok) {
-      // 429 = rate-limited (the Space is up but throttling us). Distinct
-      // from "Space is asleep" — tag the return so waitForBackendReady
-      // can stop hammering. We attach the status to a sentinel object
-      // via a non-enumerable property so callers that just check
-      // `h?.ok` still work.
+    // HF's gateway returns an HTML 429 page ("We had to rate limit you")
+    // for the whole subdomain — that comes through as either a 429 OR a
+    // 2xx with content-type: text/html (depends on path/CDN edge). Either
+    // way we want to bail, not loop. Tag as 429 so waitForBackendReady's
+    // existing 429 branch handles it.
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (!res.ok || ct.includes("text/html")) {
       const tagged = Object.assign(Object.create(null) as Record<string, unknown>, {
         ok: false,
-        __status: res.status,
+        __status: res.status === 200 && ct.includes("text/html") ? 429 : res.status,
       });
       return tagged as unknown as BackendHealth;
     }
@@ -60,10 +61,17 @@ export interface WaitForReadyOptions {
 export async function waitForBackendReady(url: string, opts: WaitForReadyOptions = {}): Promise<BackendHealth> {
   const { onProgress, maxMs = 90_000 } = opts;
   const started = Date.now();
-  let delay = 500;
+  // Slower start than before (500 ms): a brief network blip used to fan
+  // out into ~20+ /api/health pings inside 90 s, which contributes to
+  // tripping the HF gateway's per-IP rate limit. 1.5 s → 4 s gives the
+  // Space a real chance to come back without machine-gunning it.
+  let delay = 1500;
   let reportedWaking = false;
+  let attempts = 0;
+  const MAX_ATTEMPTS = 10;
 
   while (true) {
+    attempts += 1;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 5000);
     const h = await fetchHealth(url, ac.signal);
@@ -82,6 +90,12 @@ export async function waitForBackendReady(url: string, opts: WaitForReadyOptions
         `Backend at ${url} is rate-limited (HTTP 429). The HF Space is up but throttling requests — try again in a minute, or use your own forked Space.`,
       );
     }
+    if (attempts >= MAX_ATTEMPTS) {
+      onProgress?.("offline", "Backend did not respond.");
+      throw new Error(
+        `Backend at ${url} did not respond after ${MAX_ATTEMPTS} health probes (~${Math.round((Date.now() - started) / 1000)} s). The Space may be sleeping or down — try again in a minute.`,
+      );
+    }
     if (Date.now() - started > maxMs) {
       onProgress?.("offline", "Backend did not respond.");
       throw new Error(`Backend at ${url} did not respond within ${Math.round(maxMs / 1000)}s`);
@@ -93,7 +107,7 @@ export async function waitForBackendReady(url: string, opts: WaitForReadyOptions
       onProgress?.("waking", `Waking backend… ${Math.round((Date.now() - started) / 1000)} s`);
     }
     await sleep(delay);
-    delay = Math.min(delay * 1.4, 3000);
+    delay = Math.min(delay * 1.4, 4000);
   }
 }
 
