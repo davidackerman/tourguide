@@ -366,4 +366,7 @@ See [CLUSTER_TROUBLESHOOTING.md](CLUSTER_TROUBLESHOOTING.md) for detailed cluste
 
 ## License
 
-BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
+GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
+
+Tourguide depends on `zmesh`, `cc3d`, `fastmorph`, `edt`, and `kimimaro` from
+the Seung Lab, which are GPL-3.0; the combined work is therefore GPL-3.0.
