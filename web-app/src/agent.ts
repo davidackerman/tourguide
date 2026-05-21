@@ -415,7 +415,7 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
       2) python_on_layers (using the resolved radius)
       3) done
 
-  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], meshes?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend")
+  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], meshes?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend", scalePath?: string, maxBytes?: number)
     HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
     precomputed skeletons) loaded as numpy arrays — use this when the
     user asks you to OPERATE ON LAYERS (erode, dilate, threshold,
@@ -472,6 +472,21 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
                     when the user explicitly asks for full resolution
                     or you know the dataset is huge. Use "local" only
                     if you want to force Pyodide.
+      'scalePath' — pin every input layer to a specific multiscale level
+                    (e.g. "s0", "s1", "s2"). Use ONLY when the user is
+                    explicit ("use s1", "do this at s2", "at the
+                    coarsest scale"). Disables the auto-picker AND the
+                    "prefer backend for finer scale" rule — the user has
+                    committed to a scale. Errors clearly if the path
+                    doesn't exist for any input layer. Same string
+                    works for zarr and precomputed-volume layers.
+      'maxBytes'  — override the byte budget the auto-picker uses
+                    (default ~1.5 GB local, ~5 GB backend). Use when
+                    the user mentions a specific memory limit ("keep it
+                    under 500 MB", "use 2 GB max"). NOT clamped to the
+                    runtime ceiling — if you ask for more than the
+                    runtime can handle the analysis OOMs with a clear
+                    error rather than silently downsampling.
 
     RUNTIME AUTO-SELECTION (you don't usually need to think about this,
     but it shapes what code to write):
@@ -1392,6 +1407,31 @@ async function execPythonOnLayers(
   // fall through to backend when the input is too big for Pyodide's
   // ~4 GB WASM ceiling.
   const requestedRuntime = String(args.runtime ?? "auto").toLowerCase();
+  // Optional user-pinned scale and byte budget. When `scalePath` is
+  // supplied (e.g. "s1"), every input layer is opened at that exact
+  // multiscale path and the auto-picker is bypassed. When `maxBytes` is
+  // supplied, it overrides the runtime's default byte ceiling for scale
+  // selection. Accept several spellings the LLM/user might emit.
+  const requestedScalePath = (
+    (args.scalePath as unknown) ??
+    (args.scale_path as unknown) ??
+    (args.scale as unknown) ??
+    null
+  );
+  const explicitScalePath =
+    typeof requestedScalePath === "string" && requestedScalePath.trim().length > 0
+      ? requestedScalePath.trim()
+      : null;
+  const requestedMaxBytes = (
+    (args.maxBytes as unknown) ??
+    (args.max_bytes as unknown) ??
+    (args.budgetBytes as unknown) ??
+    null
+  );
+  const explicitMaxBytes =
+    typeof requestedMaxBytes === "number" && Number.isFinite(requestedMaxBytes) && requestedMaxBytes > 0
+      ? requestedMaxBytes
+      : null;
   const settings = loadSettings();
   const backendUrl = settings.analysisBackendUrl.trim();
   const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
@@ -1500,12 +1540,18 @@ async function execPythonOnLayers(
       }
       runtime = "backend";
       runtimeReason = "code uses Seung-lab packages or _TG_NEW_MESH_LAYER";
-    } else if (backendUrl && wouldBackendServeFinerScale(layerInspections, pendingPrecomputedVolumes, LOCAL_TARGET_BYTES, BACKEND_TARGET_BYTES)) {
+    } else if (
+      backendUrl &&
+      !explicitScalePath &&
+      wouldBackendServeFinerScale(layerInspections, pendingPrecomputedVolumes, LOCAL_TARGET_BYTES, BACKEND_TARGET_BYTES)
+    ) {
       // For analysis, finer resolution is usually worth the cold start.
       // If backend's 5 GB budget admits a strictly finer scale than
       // local's 1.5 GB budget for ANY input layer, route to backend.
       // Local still wins when local-pick is already the finest scale
-      // (no resolution gain to be had).
+      // (no resolution gain to be had). Skipped when the user has
+      // pinned a specific scalePath — they've committed to a scale, so
+      // there's no "finer" choice for the harness to upgrade to.
       runtime = "backend";
       runtimeReason = "backend can serve a finer scale than local";
     } else {
@@ -1521,13 +1567,33 @@ async function execPythonOnLayers(
         runtimeReason = "no backend URL configured; will downsample";
       }
     }
-    const targetBytes = runtime === "backend" ? BACKEND_TARGET_BYTES : LOCAL_TARGET_BYTES;
+    const defaultTargetBytes = runtime === "backend" ? BACKEND_TARGET_BYTES : LOCAL_TARGET_BYTES;
+    // User-pinned byte budget overrides the runtime default. We do NOT
+    // clamp to the runtime ceiling — if the user explicitly asks for a
+    // higher budget on local, that's their call (they may know their
+    // Pyodide build has more headroom, or they may want it to OOM with
+    // a clear error rather than silently downsampling).
+    const targetBytes = explicitMaxBytes ?? defaultTargetBytes;
 
     // Now that runtime + targetBytes are known, pick precomputed-volume
     // scales. Backend route → finer scales (up to 5 GB); local route →
-    // coarser scales (≤1.5 GB). Same picker the zarr path uses.
+    // coarser scales (≤1.5 GB). Same picker the zarr path uses. When
+    // the user has pinned an explicit scalePath, look it up by key
+    // (`scale.key` is the same "s0"/"s1"/… string the multiscale
+    // metadata uses for zarr's `scale.path`) and skip the auto-picker.
     for (const p of pendingPrecomputedVolumes) {
-      const scale = pickScaleForBudget(p.volumeInfo, targetBytes);
+      let scale: PrecomputedScale | null;
+      if (explicitScalePath) {
+        scale = p.volumeInfo.scales.find((s) => s.key === explicitScalePath) ?? null;
+        if (!scale) {
+          const available = p.volumeInfo.scales.map((s) => s.key).join(", ");
+          throw new Error(
+            `Layer '${p.layerName}' has no precomputed scale '${explicitScalePath}'. Available: ${available || "(none)"}.`,
+          );
+        }
+      } else {
+        scale = pickScaleForBudget(p.volumeInfo, targetBytes);
+      }
       if (!scale) {
         const finest = p.volumeInfo.scales[0];
         const coarsest = p.volumeInfo.scales[p.volumeInfo.scales.length - 1];
@@ -1561,12 +1627,23 @@ async function execPythonOnLayers(
       _shape: number[];
       _voxelNm: [number, number, number];
     }[] = [];
-    for (const { layer, url, insp } of layerInspections) {
-      let idx = insp.scales.length - 1; // coarsest fallback
-      for (let i = 0; i < insp.scales.length; i++) {
-        if (insp.scales[i].approxBytes <= targetBytes) {
-          idx = i;
-          break;
+    for (const { name: layerNm, layer, url, insp } of layerInspections) {
+      let idx: number;
+      if (explicitScalePath) {
+        idx = insp.scales.findIndex((s) => s.path === explicitScalePath);
+        if (idx < 0) {
+          const available = insp.scales.map((s) => s.path).join(", ");
+          throw new Error(
+            `Layer '${layerNm}' has no zarr scale '${explicitScalePath}'. Available: ${available || "(none)"}.`,
+          );
+        }
+      } else {
+        idx = insp.scales.length - 1; // coarsest fallback
+        for (let i = 0; i < insp.scales.length; i++) {
+          if (insp.scales[i].approxBytes <= targetBytes) {
+            idx = i;
+            break;
+          }
         }
       }
       const scale = insp.scales[idx];
