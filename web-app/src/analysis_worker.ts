@@ -69,6 +69,13 @@ export interface CustomRequest {
     axesOrder: string[];
     voxelNm: [number, number, number];
     offsetNm: [number, number, number];
+    // Optional ROI in voxel coordinates at the chosen scale, array-axis
+    // order (typically z, y, x). When present, only this sub-cube is
+    // read into memory and bound to Python. Coordinates are inclusive
+    // start, exclusive stop — i.e. arr[start[0]:stop[0], ...]. The
+    // emitted layer's offset is shifted to the ROI's world origin so
+    // Python sees correct absolute coords.
+    roiVoxel?: { start: number[]; stop: number[] };
   }[];
   // Precomputed-segmentation VOLUME inputs (parallel to `layers`).
   // The agent decides which scale to pull based on a memory budget and
@@ -942,25 +949,56 @@ async function readLayerArray(layerSpec: CustomRequest["layers"][number]): Promi
     : (root.kind === "array" ? root : await zarr.open(root.resolve(""), { kind: "array" }));
   const fullShape = arr.shape;
   const axisNames = layerSpec.axesOrder;
-  let sel: (null | number)[] = axisNames.map((a) =>
-    a === "x" || a === "y" || a === "z" ? null : 0,
+  // Build a per-axis selection. Spatial axes (x/y/z) get either a slice
+  // (when a roiVoxel is supplied) or `null` (read all); non-spatial axes
+  // are pinned to index 0.
+  const roi = layerSpec.roiVoxel;
+  // roi.start / roi.stop are in array-axis order matching fullShape
+  // (typically z, y, x). The caller computed them at this exact scale.
+  const sliceForSpatialAxis = (arrayAxisIdx: number): null | { start: number; stop: number } => {
+    if (!roi) return null;
+    return { start: roi.start[arrayAxisIdx], stop: roi.stop[arrayAxisIdx] };
+  };
+  let sel: (null | number | { start: number; stop: number })[] = axisNames.map((a, i) =>
+    a === "x" || a === "y" || a === "z" ? sliceForSpatialAxis(i) : 0,
   );
   if (sel.length !== fullShape.length) {
-    sel = fullShape.map((_, i) => (i >= fullShape.length - 3 ? null : 0));
+    sel = fullShape.map((_, i) => (i >= fullShape.length - 3 ? sliceForSpatialAxis(i) : 0));
   }
-  const surviving = axisNames.filter((_a, i) => sel[i] === null);
-  const axesForPython = surviving.length === fullShape.filter((_, i) => sel[i] === null).length
+  // Treat slice objects as spatial (same as null was). Surviving axes are
+  // those that returned anything other than a pinned integer.
+  const isSpatial = (s: typeof sel[number]): boolean => s === null || (typeof s === "object" && s !== null);
+  const surviving = axisNames.filter((_a, i) => isSpatial(sel[i]));
+  const axesForPython = surviving.length === fullShape.filter((_, i) => isSpatial(sel[i])).length
     ? surviving
-    : ["z", "y", "x"].slice(-fullShape.filter((_, i) => sel[i] === null).length);
+    : ["z", "y", "x"].slice(-fullShape.filter((_, i) => isSpatial(sel[i])).length);
   const axisScaleMap: Record<string, number> = {
     x: layerSpec.voxelNm[0], y: layerSpec.voxelNm[1], z: layerSpec.voxelNm[2],
   };
+  // When an ROI shifts the array origin, the emitted `offsets` must shift
+  // too so Python sees the cube's true world coords. Per-axis offset
+  // becomes (layer.offsetNm + roi.start * voxelNm).
   const axisOffsetMap: Record<string, number> = {
     x: layerSpec.offsetNm[0], y: layerSpec.offsetNm[1], z: layerSpec.offsetNm[2],
   };
+  if (roi) {
+    for (let i = 0; i < axisNames.length; i++) {
+      const a = axisNames[i];
+      if (a === "x" || a === "y" || a === "z") {
+        axisOffsetMap[a] = axisOffsetMap[a] + roi.start[i] * (axisScaleMap[a] ?? 1);
+      }
+    }
+  }
   const spacing = axesForPython.map((a) => axisScaleMap[a] ?? 1);
   const offsets = axesForPython.map((a) => axisOffsetMap[a] ?? 0);
-  const result = await zarr.get(arr, sel as any);
+  // zarrita accepts a `zarr.slice(start, stop)` for range selections;
+  // convert our { start, stop } objects right before the get() call.
+  const selForGet = sel.map((s) =>
+    s === null ? null
+      : typeof s === "object" ? zarr.slice(s.start, s.stop)
+      : s
+  );
+  const result = await zarr.get(arr, selForGet as any);
   return {
     data: (result as any).data,
     shape: (result as any).shape,

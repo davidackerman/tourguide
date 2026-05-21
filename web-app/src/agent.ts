@@ -415,7 +415,7 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
       2) python_on_layers (using the resolved radius)
       3) done
 
-  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], meshes?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend", scalePath?: string, maxBytes?: number)
+  python_on_layers(python: string, layers?: string[], skeletons?: [{layer: string, segment_ids: string[]}], meshes?: [{layer: string, segment_ids: string[]}], runtime?: "auto"|"local"|"backend", scalePath?: string, maxBytes?: number, roi?: {min_nm: [number, number, number], max_nm: [number, number, number]})
     HEAVY-LIFT path. Runs Python with the actual layer voxels (and/or
     precomputed skeletons) loaded as numpy arrays — use this when the
     user asks you to OPERATE ON LAYERS (erode, dilate, threshold,
@@ -487,6 +487,19 @@ ${db ? DB_TOOL_DOCS : "  (run_sql / make_plot / run_python omitted — they need
                     runtime ceiling — if you ask for more than the
                     runtime can handle the analysis OOMs with a clear
                     error rather than silently downsampling.
+      'roi'       — restrict analysis to a sub-cube in world nm.
+                    Shape: {min_nm:[a,b,c], max_nm:[a,b,c]} in
+                    ARRAY-AXIS ORDER (parallel to layers[var].spacing,
+                    typically z,y,x). When set, only this cube is
+                    loaded AND the auto-picker budgets against the
+                    ROI's voxel count — so a smaller ROI can unlock a
+                    finer scale. ALL SIX coords required; for axes the
+                    user didn't constrain, fill in the layer's full
+                    extent from describe_dataset (offset_nm and
+                    offset_nm + shape*voxel_size_nm). The Python-side
+                    'offset_nm' on the layer is auto-shifted to the
+                    ROI's world origin so positions reported by your
+                    code stay in absolute world coords.
 
     RUNTIME AUTO-SELECTION (you don't usually need to think about this,
     but it shapes what code to write):
@@ -1432,6 +1445,27 @@ async function execPythonOnLayers(
     typeof requestedMaxBytes === "number" && Number.isFinite(requestedMaxBytes) && requestedMaxBytes > 0
       ? requestedMaxBytes
       : null;
+  // Optional ROI in world nm, array-axis order (typically z, y, x).
+  // Shape: { min_nm: [z, y, x], max_nm: [z, y, x] }. When present, only
+  // this sub-cube is loaded — and the auto-picker computes byte budgets
+  // against the ROI's voxel count, so finer scales become reachable on
+  // small ROIs. All six values are required; the agent fills in full
+  // layer bounds for axes the user didn't constrain.
+  type RoiNm = { min_nm: [number, number, number]; max_nm: [number, number, number] };
+  const parseRoi = (raw: unknown): RoiNm | null => {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const min = (r.min_nm ?? r.minNm ?? r.min) as unknown;
+    const max = (r.max_nm ?? r.maxNm ?? r.max) as unknown;
+    if (!Array.isArray(min) || !Array.isArray(max)) return null;
+    if (min.length !== 3 || max.length !== 3) return null;
+    const m0 = min.map(Number);
+    const m1 = max.map(Number);
+    if (m0.some((v) => !Number.isFinite(v)) || m1.some((v) => !Number.isFinite(v))) return null;
+    if (m0.some((v, i) => v >= m1[i])) return null;
+    return { min_nm: m0 as [number, number, number], max_nm: m1 as [number, number, number] };
+  };
+  const roiNm = parseRoi(args.roi);
   const settings = loadSettings();
   const backendUrl = settings.analysisBackendUrl.trim();
   const codeImportsSeungLab = /\b(?:import|from)\s+(?:cc3d|fastmorph|fastremap|edt|kimimaro|zmesh)\b/.test(code);
@@ -1620,6 +1654,7 @@ async function execPythonOnLayers(
       axesOrder: string[];
       voxelNm: [number, number, number];
       offsetNm: [number, number, number];
+      roiVoxel?: { start: number[]; stop: number[] };
       // Diagnostics we surface in the result narration.
       _scalePath: string;
       _approxBytes: number;
@@ -1627,6 +1662,39 @@ async function execPythonOnLayers(
       _shape: number[];
       _voxelNm: [number, number, number];
     }[] = [];
+    // Compute the voxel ROI for a given scale + axes order. roiNm is in
+    // array-axis order parallel to `axes`; for each spatial axis we use
+    // the matching xyz entry in scale.voxelNm / scale.offsetNm.
+    const computeZarrRoiVoxel = (
+      scale: { shape: number[]; voxelNm: [number, number, number]; offsetNm: [number, number, number] },
+      axes: { name: string }[],
+    ): { start: number[]; stop: number[]; voxelCount: number } | null => {
+      if (!roiNm) return null;
+      const xyzIdx: Record<string, number> = { x: 0, y: 1, z: 2 };
+      const start: number[] = [];
+      const stop: number[] = [];
+      let any = false;
+      for (let i = 0; i < axes.length; i++) {
+        const ax = axes[i].name;
+        if (ax === "x" || ax === "y" || ax === "z") {
+          any = true;
+          const k = xyzIdx[ax];
+          const vox = scale.voxelNm[k];
+          const off = scale.offsetNm[k];
+          let s = Math.max(0, Math.floor((roiNm.min_nm[i] - off) / vox));
+          let e = Math.min(scale.shape[i], Math.ceil((roiNm.max_nm[i] - off) / vox));
+          if (e <= s) e = Math.min(scale.shape[i], s + 1);
+          start.push(s);
+          stop.push(e);
+        } else {
+          start.push(0);
+          stop.push(scale.shape[i]);
+        }
+      }
+      if (!any) return null;
+      const voxelCount = start.reduce((acc, sVal, i) => acc * (stop[i] - sVal), 1);
+      return { start, stop, voxelCount };
+    };
     for (const { name: layerNm, layer, url, insp } of layerInspections) {
       let idx: number;
       if (explicitScalePath) {
@@ -1640,7 +1708,19 @@ async function execPythonOnLayers(
       } else {
         idx = insp.scales.length - 1; // coarsest fallback
         for (let i = 0; i < insp.scales.length; i++) {
-          if (insp.scales[i].approxBytes <= targetBytes) {
+          // When a ROI is set, the auto-picker budgets against the ROI's
+          // voxel count at this scale rather than the full array — a
+          // smaller cube → finer scale reachable, which is the whole
+          // point of the feature.
+          let candidateBytes = insp.scales[i].approxBytes;
+          if (roiNm) {
+            const roi = computeZarrRoiVoxel(insp.scales[i], insp.axes);
+            if (roi) {
+              const bytesPerVoxel = insp.scales[i].approxBytes / Math.max(1, insp.scales[i].shape.reduce((a, b) => a * b, 1));
+              candidateBytes = roi.voxelCount * bytesPerVoxel;
+            }
+          }
+          if (candidateBytes <= targetBytes) {
             idx = i;
             break;
           }
@@ -1659,6 +1739,12 @@ async function execPythonOnLayers(
         scale.offsetNm[1] + tx[1],
         scale.offsetNm[2] + tx[2],
       ];
+      const roiVoxel = computeZarrRoiVoxel(scale, insp.axes);
+      // Report ROI-trimmed bytes in the blurb when a ROI is in play.
+      const reportedBytes = roiVoxel
+        ? (scale.approxBytes / Math.max(1, scale.shape.reduce((a, b) => a * b, 1))) * roiVoxel.voxelCount
+        : scale.approxBytes;
+      const reportedShape = roiVoxel ? roiVoxel.start.map((s, i) => roiVoxel.stop[i] - s) : scale.shape;
       layersForRequest.push({
         varName,
         url,
@@ -1666,10 +1752,11 @@ async function execPythonOnLayers(
         axesOrder: insp.axes.map((a) => a.name),
         voxelNm: scale.voxelNm,
         offsetNm: effectiveOffset,
+        ...(roiVoxel ? { roiVoxel: { start: roiVoxel.start, stop: roiVoxel.stop } } : {}),
         _scalePath: scale.path,
-        _approxBytes: scale.approxBytes,
+        _approxBytes: reportedBytes,
         _layerName: layer.name,
-        _shape: scale.shape,
+        _shape: reportedShape,
         _voxelNm: scale.voxelNm,
       });
     }
