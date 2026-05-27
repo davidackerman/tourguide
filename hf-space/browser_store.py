@@ -27,7 +27,7 @@ import asyncio
 import base64
 import logging
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import zarr.api.asynchronous as zarr_async
@@ -216,14 +216,18 @@ class TunnelStore(Store):
 async def read_zarr_scale(
     read: Callable[[str], Awaitable[Optional[bytes]]],
     scale_path: str,
+    selection: Optional[Tuple[Any, ...]] = None,
 ) -> np.ndarray:
     """Open the array at ``scale_path`` via a TunnelStore and materialize as numpy.
 
     Works for both zarr v2 (``.zarray`` + chunk files) and zarr v3
     (``zarr.json``, sharded chunks, arbitrary codec pipelines) —
-    zarr-python v3 auto-detects the format.
+    zarr-python v3 auto-detects the format. ``selection`` is the indexing
+    tuple passed to ``arr.getitem`` — pass ``Ellipsis`` (the default) to
+    read everything, or a tuple of ``slice``/int for an ROI read so only
+    the chunks intersecting the slice come back over the tunnel.
     """
     store = TunnelStore(read)
     arr = await zarr_async.open_array(store=store, path=scale_path or "")
-    data = await arr.getitem(Ellipsis)
+    data = await arr.getitem(selection if selection is not None else Ellipsis)
     return np.asarray(data)

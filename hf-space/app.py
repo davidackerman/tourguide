@@ -215,6 +215,16 @@ def get_tunnel(session_id: str) -> Optional[TunnelSession]:
 # --- Request / response schemas ---------------------------------------------
 
 
+class RoiVoxel(BaseModel):
+    """Sub-cube to load instead of the full array, in voxel coordinates at
+    the chosen scale, array-axis order (typically z, y, x). `start` is
+    inclusive, `stop` is exclusive — i.e. `arr[start[0]:stop[0], ...]`.
+    Mirrors what the local worker accepts so frontend code paths agree.
+    """
+    start: List[int]
+    stop: List[int]
+
+
 class LayerSpec(BaseModel):
     varName: str
     url: str
@@ -222,6 +232,11 @@ class LayerSpec(BaseModel):
     axesOrder: List[str] = Field(default_factory=list)
     voxelNm: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     offsetNm: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Optional ROI; when present, only this sub-cube is loaded. Both
+    # tensorstore (remote zarr/n5) and zarr-python (tunnel) honor this
+    # at chunk-fetch time, so the savings show up in network traffic
+    # AND memory, not just memory.
+    roiVoxel: Optional[RoiVoxel] = None
 
 
 class PrecomputedVolumeLayerSpec(BaseModel):
@@ -373,7 +388,30 @@ async def _load_layer(layer: LayerSpec, tunnel: Optional[TunnelSession]) -> np.n
             )
             return data
         log.info("loading layer %s via tunnel (scale=%s, session=%s)", layer.varName, layer.scalePath, tunnel.session_id)
-        arr = await read_zarr_scale(read_at_scale, layer.scalePath)
+        # If a ROI was supplied, build an indexing tuple so the tunnel
+        # only pulls chunks intersecting the sub-cube. We don't know the
+        # array's full rank up front from LayerSpec, so we infer it on
+        # the zarr-python side via the array we'll open; passing a
+        # purely-spatial slice tuple works for any rank because numpy/
+        # zarr-python broadcasts unspecified trailing axes with `:`.
+        # Here we honor axesOrder where available, defaulting to ZYX
+        # storage for the spatial axes.
+        roi = layer.roiVoxel
+        selection: Optional[Tuple[Any, ...]] = None
+        if roi is not None:
+            axes = list(layer.axesOrder) if layer.axesOrder else ["z", "y", "x"]
+            spatial_idxs = [i for i, a in enumerate(axes) if a in ("x", "y", "z")]
+            if len(spatial_idxs) == len(roi.start) == len(roi.stop):
+                slices: List[Any] = []
+                spatial_pos = 0
+                for i, a in enumerate(axes):
+                    if a in ("x", "y", "z"):
+                        slices.append(slice(int(roi.start[spatial_pos]), int(roi.stop[spatial_pos])))
+                        spatial_pos += 1
+                    else:
+                        slices.append(0)
+                selection = tuple(slices)
+        arr = await read_zarr_scale(read_at_scale, layer.scalePath, selection)
         log.info("loaded layer %s: shape=%s dtype=%s in %d reads", layer.varName, arr.shape, arr.dtype, n_reads)
         return arr
 
@@ -430,10 +468,15 @@ async def _load_via_zarr_python(layer: LayerSpec) -> np.ndarray:
             )
         rank = target.ndim
         axes = list(layer.axesOrder) if layer.axesOrder and len(layer.axesOrder) == rank else None
+        roi = layer.roiVoxel
+        def _axis_slice(arr_axis_idx: int) -> slice:
+            if roi is not None and arr_axis_idx < len(roi.start) and arr_axis_idx < len(roi.stop):
+                return slice(int(roi.start[arr_axis_idx]), int(roi.stop[arr_axis_idx]))
+            return slice(None)
         if axes is not None:
-            sel = tuple(slice(None) if a in ("x", "y", "z") else 0 for a in axes)
+            sel = tuple(_axis_slice(i) if a in ("x", "y", "z") else 0 for i, a in enumerate(axes))
         else:
-            sel = tuple(slice(None) if i >= rank - 3 else 0 for i in range(rank))
+            sel = tuple(_axis_slice(i) if i >= rank - 3 else 0 for i in range(rank))
         return np.asarray(target[sel])
 
     return await asyncio.get_event_loop().run_in_executor(None, _read)
@@ -548,10 +591,19 @@ async def _load_via_tensorstore(layer: LayerSpec) -> np.ndarray:
 
     rank = ts_arr.rank
     axes = list(layer.axesOrder) if layer.axesOrder and len(layer.axesOrder) == rank else None
+    # Per-axis spatial slice: a user-supplied roiVoxel (start/stop in
+    # array-axis order, parallel to axesOrder) overrides the default
+    # "read everything" slice for the matching spatial axes. Non-spatial
+    # axes still get pinned to index 0.
+    roi = layer.roiVoxel
+    def _axis_slice(arr_axis_idx: int) -> slice:
+        if roi is not None and arr_axis_idx < len(roi.start) and arr_axis_idx < len(roi.stop):
+            return slice(int(roi.start[arr_axis_idx]), int(roi.stop[arr_axis_idx]))
+        return slice(None)
     if axes is not None:
-        sel = tuple(slice(None) if a in ("x", "y", "z") else 0 for a in axes)
+        sel = tuple(_axis_slice(i) if a in ("x", "y", "z") else 0 for i, a in enumerate(axes))
     else:
-        sel = tuple(slice(None) if i >= rank - 3 else 0 for i in range(rank))
+        sel = tuple(_axis_slice(i) if i >= rank - 3 else 0 for i in range(rank))
 
     try:
         sliced = ts_arr[sel]
@@ -714,6 +766,17 @@ def _layer_to_globals(layer: LayerSpec, arr: np.ndarray) -> Dict[str, Any]:
         spatial_axes = ["z", "y", "x"][-arr.ndim:]
     axis_scale = {"x": layer.voxelNm[0], "y": layer.voxelNm[1], "z": layer.voxelNm[2]}
     axis_offset = {"x": layer.offsetNm[0], "y": layer.offsetNm[1], "z": layer.offsetNm[2]}
+    # When the array was ROI-sliced, shift the per-axis origin so user
+    # code reporting absolute world coords (centroids, fly_to targets)
+    # is correct against the original layer frame. roiVoxel is in
+    # array-axis order; for each spatial array axis we look up its
+    # voxel size in axis_scale.
+    roi = layer.roiVoxel
+    if roi is not None:
+        axes_full = list(layer.axesOrder) if layer.axesOrder else (["z", "y", "x"][-arr.ndim:])
+        for i, a in enumerate(axes_full):
+            if a in ("x", "y", "z") and i < len(roi.start):
+                axis_offset[a] = axis_offset[a] + int(roi.start[i]) * axis_scale[a]
     return {
         "array": arr,
         "spacing": tuple(axis_scale.get(a, 1.0) for a in spatial_axes),
