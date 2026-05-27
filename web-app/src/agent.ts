@@ -1516,6 +1516,17 @@ async function execPythonOnLayers(
     // Effective runtime resolution.
     let runtime: "local" | "backend";
     let runtimeReason: string;
+    // Up-front guard: an explicit runtime="local" is impossible to honor
+    // when any input layer is n5 (zarrita can't read n5; only the HF
+    // backend's tensorstore can). Without this, the worker fails later
+    // with a confusing "Failed to fetch (during custom)" — typically
+    // surfaced after the agent has already fallen back from a flaky
+    // backend, which burns retry budget for no possible gain.
+    if (requestedRuntime === "local" && anyLayerIsN5) {
+      throw new Error(
+        "Cannot run on local Pyodide: an input layer is N5, which only the HF backend can read (via tensorstore). Drop runtime='local' (or set it to 'backend'/'auto').",
+      );
+    }
     if (requestedRuntime === "local" || requestedRuntime === "backend") {
       runtime = requestedRuntime;
       runtimeReason = `requested explicitly`;
@@ -2602,6 +2613,12 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
   let deliveredOutput = false;
   let nudgedForAnswer = false;
 
+  // Track consecutive backend-network failures so we bail before
+  // burning the whole iteration budget against a down or rate-limited
+  // Space. Two in a row → stop and surface a clear message to the user.
+  let consecutiveBackendFailures = 0;
+  const BACKEND_FAILURE_RE =
+    /Failed to fetch|rate-limit(ing|ed)|Backend at .+ (did not respond|is rate-limiting|unreachable)|cold[- ]start retry/i;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const stepStart = performance.now();
     let tokenCount = 0;
@@ -2764,6 +2781,20 @@ export async function runAgent(question: string, ctx: AgentContext): Promise<voi
       // still emit it, but biasing toward retry-with-hint catches the
       // common 80%.
       const hint = synthesizeErrorHint(call.tool, call.args ?? {}, errMsg, ctx);
+      // Bail-fast for a sleeping/rate-limited backend. The agent has no
+      // way to "try harder" against a 429 page or a dead Space; letting
+      // it retry just burns the remaining iteration budget AND adds
+      // more requests to the rate-limit counter.
+      if (BACKEND_FAILURE_RE.test(errMsg)) {
+        consecutiveBackendFailures += 1;
+        if (consecutiveBackendFailures >= 2) {
+          throw new Error(
+            `Backend unreachable for two consecutive tool calls (last: ${errMsg}). The HF Space is sleeping, rate-limited, or down — try again in a minute, then retry the question.`,
+          );
+        }
+      } else {
+        consecutiveBackendFailures = 0;
+      }
       messages.push({
         role: "user",
         content: `tool_error: ${errMsg}${hint ? `\n\nHint: ${hint}` : ""}\n\nFix the call and try again. If you've tried twice with no progress, call answer() to explain what's blocking you.`,

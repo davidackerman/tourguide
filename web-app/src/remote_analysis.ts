@@ -257,6 +257,17 @@ export async function postAnalysisRequest(
       signal,
     }),
   );
+  // HF's gateway serves an HTML "We had to rate limit you" page for ALL
+  // requests to *.hf.space when the per-IP budget is exceeded, including
+  // /api/analysis/run. Without this branch, the user sees a 1500-char
+  // dump of HTML+CSS instead of "rate limited; try again". Same trick
+  // fetchHealth uses; centralized once we touch more endpoints.
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("text/html")) {
+    throw new Error(
+      `Backend at ${backendUrl} is rate-limiting (HTTP ${res.status}, HTML response). The HF Space is up but throttling requests — try again in a minute, or use your own forked Space.`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // Try to pull out the FastAPI 'detail' field — that's the
@@ -383,6 +394,15 @@ export async function inspectSourceRemote(
       signal,
     }),
   );
+  // Same HF gateway 429-HTML carve-out as postAnalysisRequest — without
+  // this, a rate-limited inspect comes back as "Remote inspect failed
+  // (200|429): <!DOCTYPE html>…".
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("text/html")) {
+    throw new Error(
+      `Backend at ${backendUrl} is rate-limiting (HTTP ${res.status}, HTML response). The HF Space is up but throttling requests — try again in a minute.`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     let message = text;
