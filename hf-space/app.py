@@ -1217,31 +1217,47 @@ async def _fetch_json(url: str) -> Optional[Dict[str, Any]]:
 
 
 def _extract_axes_order(root_attrs: Dict[str, Any]) -> List[str]:
-    """Read the axis order from N5 root attributes.
+    """Read the storage (array-axis) order from N5 root attributes.
 
-    CellMap N5 has TWO conventions for axis info:
-      - root 'axes' as list of strings or dicts with 'name'
-      - multiscales[0].axes (OME-NGFF) — list of dicts with 'name'
-    Both should be in the same array-axis order (i.e. matching
-    arr.shape positions). Returns lowercase axis names; falls back
-    to ['z','y','x'] if metadata is missing.
+    CellMap N5 carries axis info in several places, and they don't all
+    agree — root 'axes' is the *display* order (NG convention, xyz),
+    while every per-scale 'transform.axes' is the *storage* order (zyx,
+    matching arr.shape). pixelResolution.dimensions and transform.scale
+    are both in storage order, so we MUST return storage order here or
+    voxel sizes get mis-mapped to the wrong axes (visible as x↔z swaps
+    in datasets where y_res == z_res; the y leg masks the bug).
+
+    Preference order:
+      1. multiscales[0].datasets[0].transform.axes — per-scale,
+         authoritative on storage order (CellMap writes it for every
+         dataset entry).
+      2. multiscales[0].axes — OME-NGFF spec.
+      3. root 'axes' — only correct when it coincidentally matches
+         storage; kept as a last resort for non-CellMap N5s.
+      4. Default ['z', 'y', 'x'].
     """
-    names: List[str] = []
-    axes = root_attrs.get("axes")
-    if isinstance(axes, list):
-        for a in axes:
-            if isinstance(a, str):
-                names.append(a.lower())
-            elif isinstance(a, dict) and isinstance(a.get("name"), str):
-                names.append(a["name"].lower())
-    if not names:
-        ms = root_attrs.get("multiscales")
-        if isinstance(ms, list) and ms and isinstance(ms[0], dict):
-            ms_axes = ms[0].get("axes")
-            if isinstance(ms_axes, list):
-                for a in ms_axes:
-                    if isinstance(a, dict) and isinstance(a.get("name"), str):
-                        names.append(a["name"].lower())
+    def _coerce(raw: Any) -> List[str]:
+        names: List[str] = []
+        if isinstance(raw, list):
+            for a in raw:
+                if isinstance(a, str):
+                    names.append(a.lower())
+                elif isinstance(a, dict) and isinstance(a.get("name"), str):
+                    names.append(a["name"].lower())
+        return names
+    ms = root_attrs.get("multiscales")
+    if isinstance(ms, list) and ms and isinstance(ms[0], dict):
+        datasets = ms[0].get("datasets")
+        if isinstance(datasets, list) and datasets and isinstance(datasets[0], dict):
+            tr = datasets[0].get("transform")
+            if isinstance(tr, dict):
+                names = _coerce(tr.get("axes"))
+                if names:
+                    return names
+        names = _coerce(ms[0].get("axes"))
+        if names:
+            return names
+    names = _coerce(root_attrs.get("axes"))
     return names or ["z", "y", "x"]
 
 
