@@ -21,6 +21,9 @@ import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import { createShareLink, fetchHealth, fetchShareLink } from "./remote_analysis.js";
 import { openWelcomeDialog, hasSeenWelcome } from "./welcome_ui.js";
+import { resolveMode, applyModeToDocument, isWorkspaceMode } from "./mode.js";
+import { renderWorkspacePanel } from "./workspace_ui.js";
+import type { QueryUIHandle } from "./query_ui.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
 const CATALOG_URL = "./catalog.json";
@@ -290,18 +293,43 @@ updateBackendIndicator();
   }
 }
 
-const queryHandle = renderQueryBox(queryHost, {
-  getDB: () => currentDB,
-  setDB: (db) => {
-    currentDB = db;
-    if (browserHost && currentDB.tables.length > 0) {
-      void renderStructuredBrowser(browserHost, { db: currentDB, viewer });
-    }
-  },
-  getDescriptor: () => currentDescriptor,
-  getBackend: () => backend,
-  viewer,
-});
+// Mode selection. Workspace mode swaps the chat composer for the
+// agent-connection + action-history panel and hides chat-only chrome
+// (the AI provider indicator) via the body[data-mode] CSS gate. Tables,
+// plots, viewer, saved states and local-folder support all stay.
+const mode = resolveMode();
+applyModeToDocument(mode);
+
+// In chat mode the chat composer returns a real handle; in workspace mode
+// there is no chat thread, so share/replay paths get a no-op stub that
+// reports an empty session.
+let queryHandle: QueryUIHandle;
+if (isWorkspaceMode()) {
+  const workspacePanel = renderWorkspacePanel(queryHost);
+  // Expose for the Workspace API bridge (Phase 2) to drive.
+  (window as unknown as { __tg?: Record<string, unknown> }).__tg = {
+    ...((window as unknown as { __tg?: Record<string, unknown> }).__tg ?? {}),
+    viewer,
+    workspacePanel,
+  };
+  queryHandle = {
+    getSerializedSession: () => [],
+    replaySerializedSession: () => {},
+  };
+} else {
+  queryHandle = renderQueryBox(queryHost, {
+    getDB: () => currentDB,
+    setDB: (db) => {
+      currentDB = db;
+      if (browserHost && currentDB.tables.length > 0) {
+        void renderStructuredBrowser(browserHost, { db: currentDB, viewer });
+      }
+    },
+    getDescriptor: () => currentDescriptor,
+    getBackend: () => backend,
+    viewer,
+  });
+}
 
 async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
   let descriptor: DatasetDescriptor;

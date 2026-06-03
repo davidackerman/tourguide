@@ -2015,3 +2015,134 @@ input.api-key {
     background-position: -100% 0;
   }
 }
+
+/* ===========================================================================
+ * Workspace mode
+ * Agents drive Tourguide from outside; in workspace mode we hide chat-only
+ * chrome and show the agent connection + action history in the sidebar.
+ * ======================================================================== */
+
+/* Hide the AI provider indicator (model/provider/key entry point) — the
+ * external agent owns reasoning, so Tourguide doesn't need an AI backend. */
+body[data-mode="workspace"] #backend-indicator {
+  display: none;
+}
+
+.workspace-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-conn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.conn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-dim);
+  flex-shrink: 0;
+}
+.conn-dot.conn-connected {
+  background: #45c46a;
+  box-shadow: 0 0 6px #45c46a88;
+}
+.conn-dot.conn-disconnected {
+  background: var(--fg-dim);
+}
+.conn-dot.conn-reconnecting {
+  background: #e0a64a;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.conn-label {
+  font-weight: 600;
+}
+.conn-detail {
+  margin-left: auto;
+  font-size: 0.8rem;
+}
+
+.workspace-actions {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.workspace-actions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.8rem;
+  flex-shrink: 0;
+}
+.workspace-actions-header h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+}
+.btn-xs {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.45rem;
+}
+.workspace-actions-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0.6rem 0.6rem;
+}
+.action-entry {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 0.4rem 0.55rem;
+  margin-bottom: 0.4rem;
+  background: var(--bg-elev);
+}
+.action-entry.ok { border-left-color: var(--accent); }
+.action-entry.err { border-left-color: #e0574a; }
+.action-entry-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.action-name {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
+.action-source {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+}
+.action-time {
+  margin-left: auto;
+  font-size: 0.72rem;
+}
+.action-entry-body {
+  margin-top: 0.25rem;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  word-break: break-word;
+}
+.action-args {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.action-result.err { color: #e0574a; }
+.action-entry-actions {
+  margin-top: 0.35rem;
+}
