@@ -22,7 +22,11 @@ import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import { createShareLink, fetchHealth, fetchShareLink } from "./remote_analysis.js";
 import { openWelcomeDialog, hasSeenWelcome } from "./welcome_ui.js";
 import { resolveMode, applyModeToDocument, isWorkspaceMode } from "./mode.js";
-import { renderWorkspacePanel } from "./workspace_ui.js";
+import { renderWorkspacePanel, type WorkspacePanelHandle } from "./workspace_ui.js";
+import { SessionStore } from "./workspace_api/session_state.js";
+import { startWorkspaceBridge } from "./workspace_api/bridge.js";
+import type { WorkspaceContext } from "./workspace_api/handlers.js";
+import type { PlotArtifact } from "./workspace_api/protocol.js";
 import type { QueryUIHandle } from "./query_ui.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
@@ -304,14 +308,9 @@ applyModeToDocument(mode);
 // there is no chat thread, so share/replay paths get a no-op stub that
 // reports an empty session.
 let queryHandle: QueryUIHandle;
+let workspacePanel: WorkspacePanelHandle | null = null;
 if (isWorkspaceMode()) {
-  const workspacePanel = renderWorkspacePanel(queryHost);
-  // Expose for the Workspace API bridge (Phase 2) to drive.
-  (window as unknown as { __tg?: Record<string, unknown> }).__tg = {
-    ...((window as unknown as { __tg?: Record<string, unknown> }).__tg ?? {}),
-    viewer,
-    workspacePanel,
-  };
+  workspacePanel = renderWorkspacePanel(queryHost);
   queryHandle = {
     getSerializedSession: () => [],
     replaySerializedSession: () => {},
@@ -993,4 +992,82 @@ copyNgBtn.addEventListener("click", async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Workspace API bridge — in workspace mode, connect to the local bridge
+// server so external agents (MCP / Python SDK / local scripts) can drive
+// this session. The browser is the source of truth for workspace state;
+// the bridge just relays ops and streams the action history.
+// ---------------------------------------------------------------------------
+function startBridgeIfWorkspace(): void {
+  if (!isWorkspaceMode() || !workspacePanel) return;
+  const params = new URLSearchParams(window.location.search);
+  const port = params.get("bridgePort") || "7723";
+  const host = window.location.hostname || "localhost";
+  const bridgeWsUrl = `ws://${host}:${port}/browser`;
+
+  const sessionId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `session-${Date.now()}`;
+
+  const store = new SessionStore(
+    sessionId,
+    {
+      getViewerState: () => viewer.getNgState(),
+      applyViewerState: (s) => viewer.applyNgState(s as Record<string, unknown>),
+      getDescriptorState: () => currentDescriptor,
+      getTableIds: () => (currentDB?.tables ?? []).map((t) => t.table_name),
+      getPlotIds: () => [],
+    },
+    () => new Date().toISOString(),
+  );
+
+  const ctx: WorkspaceContext = {
+    sessionId,
+    mode: "workspace",
+    viewer,
+    store,
+    getDB: () => currentDB,
+    setDB: (db) => {
+      currentDB = db;
+    },
+    getDescriptor: () => currentDescriptor,
+    loadDescriptor: (d) => loadDescriptorDirect(d),
+    refreshBrowser: () => {
+      if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
+    },
+    displayPlot: (artifact) => showPlotModal(artifact),
+    getBackend: () => backend,
+  };
+
+  startWorkspaceBridge(ctx, workspacePanel, { bridgeWsUrl });
+}
+
+// Lightweight image modal for plots created via the Workspace API. Workspace
+// mode has no chat thread to render into, so show_plot pops the rendered
+// figure here; it's also persisted as a PlotArtifact in the session store.
+function showPlotModal(artifact: PlotArtifact): void {
+  if (!artifact.pngDataUrl) return;
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-label="Plot" style="max-width: 820px;">
+      <header class="modal-header">
+        <h2>${(artifact.title || "Plot").replace(/&/g, "&amp;").replace(/</g, "&lt;")}</h2>
+        <button class="modal-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <img alt="${(artifact.title || "plot").replace(/"/g, "&quot;")}" src="${artifact.pngDataUrl}" style="width:100%; height:auto; border-radius:4px;" />
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const close = (): void => overlay.remove();
+  overlay.querySelector(".modal-close")?.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+}
+
 void init();
+startBridgeIfWorkspace();
