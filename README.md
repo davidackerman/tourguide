@@ -4,6 +4,12 @@ A 3D microscopy viewer with built-in structured-data browsing, plain-English que
 
 > **This repo contains two flavors of tourguide.** Pick the one that fits your situation.
 
+> **🧭 Agent workspace mode (new):** Tourguide can run as an agent-controllable
+> visual workspace — open `?mode=workspace` and drive the viewer, tables, plots
+> and saved states from any MCP-capable agent or a Python script via the
+> **Workspace API**. See [`WORKSPACE.md`](WORKSPACE.md), [`mcp/`](mcp/), and
+> [`python/`](python/).
+
 ---
 
 ## 🌐 Web tourguide   `web-app/`
