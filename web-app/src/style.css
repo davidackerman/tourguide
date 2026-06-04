@@ -2102,6 +2102,36 @@ body[data-mode="workspace"] #backend-indicator {
   overflow-y: auto;
   padding: 0 0.6rem 0.6rem;
 }
+.workspace-plots-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0 0.6rem 0.6rem;
+  max-height: 40%;
+  overflow-y: auto;
+}
+.workspace-plot {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+  width: calc(50% - 0.2rem);
+  background: var(--surface, #1c1c1c);
+}
+.workspace-plot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.workspace-plot figcaption {
+  padding: 0.25rem 0.4rem;
+  font-size: 0.72rem;
+  color: var(--text-muted, #aaa);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .action-entry {
   border: 1px solid var(--border);
   border-left-width: 3px;

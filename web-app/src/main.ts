@@ -311,6 +311,8 @@ let queryHandle: QueryUIHandle;
 let workspacePanel: WorkspacePanelHandle | null = null;
 if (isWorkspaceMode()) {
   workspacePanel = renderWorkspacePanel(queryHost);
+  // Clicking a docked plot thumbnail enlarges it in the modal.
+  workspacePanel.onOpenPlot((artifact) => showPlotModal(artifact));
   queryHandle = {
     getSerializedSession: () => [],
     replaySerializedSession: () => {},
@@ -1036,7 +1038,7 @@ function startBridgeIfWorkspace(): void {
     refreshBrowser: () => {
       if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
     },
-    displayPlot: (artifact) => showPlotModal(artifact),
+    displayPlot: (artifact) => workspacePanel?.addPlot(artifact),
     getBackend: () => backend,
   };
 

@@ -14,6 +14,7 @@
 import type {
   ActionHistoryEntry,
   ConnectionStatus,
+  PlotArtifact,
 } from "./workspace_api/protocol.js";
 
 export interface WorkspacePanelHandle {
@@ -24,6 +25,10 @@ export interface WorkspacePanelHandle {
   clearActions(): void;
   /** Wire the "restore" affordance on entries that captured a saved state. */
   onRestoreSavedState(cb: (savedStateId: string) => void): void;
+  /** Dock a plot thumbnail into the panel (clicking it enlarges). */
+  addPlot(artifact: PlotArtifact): void;
+  /** Wire the enlarge action when a docked plot thumbnail is clicked. */
+  onOpenPlot(cb: (artifact: PlotArtifact) => void): void;
 }
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -43,6 +48,12 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
         <span class="conn-label" data-conn-label>No agent connected</span>
         <span class="conn-detail hint" data-conn-detail></span>
       </div>
+      <div class="workspace-plots" data-plots hidden>
+        <header class="workspace-actions-header">
+          <h3>Plots</h3>
+        </header>
+        <div class="workspace-plots-list" data-plots-list></div>
+      </div>
       <div class="workspace-actions">
         <header class="workspace-actions-header">
           <h3>Agent Actions</h3>
@@ -60,9 +71,12 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
   const detailEl = container.querySelector<HTMLSpanElement>("[data-conn-detail]")!;
   const list = container.querySelector<HTMLDivElement>("[data-actions-list]")!;
   const clearBtn = container.querySelector<HTMLButtonElement>("[data-clear-actions]")!;
+  const plotsSection = container.querySelector<HTMLDivElement>("[data-plots]")!;
+  const plotsList = container.querySelector<HTMLDivElement>("[data-plots-list]")!;
 
   let entries: ActionHistoryEntry[] = [];
   let restoreCb: ((id: string) => void) | null = null;
+  let openPlotCb: ((artifact: PlotArtifact) => void) | null = null;
 
   const renderEmpty = (): void => {
     list.innerHTML = `<p class="placeholder">No agent actions yet. Connect an agent (e.g. <code>tourguide-mcp</code>) to drive this workspace.</p>`;
@@ -145,6 +159,25 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
     },
     onRestoreSavedState(cb) {
       restoreCb = cb;
+    },
+    addPlot(artifact) {
+      if (!artifact.pngDataUrl) return;
+      plotsSection.hidden = false;
+      const fig = document.createElement("figure");
+      fig.className = "workspace-plot";
+      fig.title = "Click to enlarge";
+      const title = artifact.title || "Plot";
+      const img = document.createElement("img");
+      img.src = artifact.pngDataUrl;
+      img.alt = title;
+      const cap = document.createElement("figcaption");
+      cap.textContent = title;
+      fig.append(img, cap);
+      fig.addEventListener("click", () => openPlotCb?.(artifact));
+      plotsList.prepend(fig); // newest first
+    },
+    onOpenPlot(cb) {
+      openPlotCb = cb;
     },
   };
 }
