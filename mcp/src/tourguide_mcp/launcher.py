@@ -263,16 +263,45 @@ class Launcher:
                 f"Is port {port} free? (a stale server there will block --strictPort)."
             )
 
-    async def launch_or_attach(self, wait_for_session: float = 45.0) -> dict:
-        """Return the attached session record, launching the whole stack if
-        needed: bridge -> web app -> a workspace tab."""
+    async def launch_or_attach(
+        self,
+        wait_for_session: float = 45.0,
+        new: bool = False,
+        session: str | None = None,
+    ) -> dict:
+        """Bind this caller to a workspace tab, launching the stack as needed.
+
+        Selection — never silently guesses among multiple tabs:
+          - `session` given  → attach to that specific tab (error if it's gone).
+          - `new=True`       → open a fresh, dedicated tab and bind to it.
+          - exactly one live → attach to it.
+          - none live        → open one and attach.
+          - several live     → return an `{ambiguous: True, sessions: [...]}`
+                               payload so the caller asks the user which to use
+                               (or to pass `new=True`).
+        """
         await self.ensure_bridge()
 
-        running = await self._running_session()
-        if running:
-            return running
+        if session is not None:
+            chosen = await self._find_live(session)
+            if not chosen:
+                raise WorkspaceError(
+                    f"workspace tab '{session}' is not connected. "
+                    "Run launch_or_attach without a session to see what's open."
+                )
+            return chosen
 
-        # No session yet — make sure the web app is up, then open a tab.
+        if not new:
+            live = await self._live_sessions()
+            if len(live) == 1:
+                return live[0]
+            if len(live) > 1:
+                return self._ambiguous(live)
+
+        # new=True, or nothing live: open a fresh tab and bind to it. Track the
+        # tabs that already exist so we return the newly-opened one, not an
+        # existing one (important when `new` and others are already open).
+        before = {s["sessionId"] for s in await self._live_sessions()}
         await self.ensure_webapp()
         if self.config.auto_open:
             try:

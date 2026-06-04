@@ -29,19 +29,51 @@ const sessions = new Map();
 const agents = new Set();
 /** requestId -> { resolve, timer } */
 const pending = new Map();
+/** monotonic counter for human-readable tab labels (workspace-1, -2, …) */
+let labelCounter = 0;
 
 const now = () => new Date().toISOString();
 const log = (...a) => console.log(`[bridge ${new Date().toLocaleTimeString()}]`, ...a);
 
 // --- session selection (v0: most recently created running session) --------
 
+function isLive(s) {
+  // Running AND ponged within the staleness window: a tab that has gone away
+  // but isn't pruned yet would hit a dead socket if we routed to it.
+  return s.record.status === "running" && Date.now() - Date.parse(s.record.lastSeenAt) <= STALE_MS;
+}
+
+function liveSessions() {
+  return [...sessions.values()].filter(isLive);
+}
+
 function pickSession() {
   let best = null;
-  for (const s of sessions.values()) {
-    if (s.record.status !== "running") continue;
+  for (const s of liveSessions()) {
     if (!best || s.record.createdAt > best.record.createdAt) best = s;
   }
   return best;
+}
+
+// Choose the target tab for a relayed op. With an explicit sessionId we route
+// there (and only there). Without one we route to the sole live tab — but if
+// several are open we refuse to guess (that silent guess was the original
+// "drove the wrong/blank tab" bug); the caller must say which.
+function resolveTarget(sessionId) {
+  if (sessionId) {
+    const s = sessions.get(sessionId);
+    if (!s || !isLive(s)) return { error: `workspace tab '${sessionId}' is not connected` };
+    return { session: s };
+  }
+  const live = liveSessions();
+  if (live.length === 0) return { error: "no running Tourguide session" };
+  if (live.length === 1) return { session: live[0] };
+  const labels = live.map((s) => `${s.record.label} (${s.record.sessionId})`).join(", ");
+  return {
+    error:
+      `multiple workspace tabs are open: ${labels}. ` +
+      "Specify which to drive (pass `session`), or open a dedicated one.",
+  };
 }
 
 function sessionRecords() {
@@ -80,11 +112,12 @@ function sendJson(res, status, body) {
 
 function relayOp(request) {
   return new Promise((resolve) => {
-    const target = pickSession();
-    if (!target) {
-      resolve({ id: request.id, ok: false, error: { message: "no running Tourguide session" } });
+    const resolved = resolveTarget(request.session);
+    if (resolved.error) {
+      resolve({ id: request.id, ok: false, error: { message: resolved.error } });
       return;
     }
+    const target = resolved.session;
     const id = request.id || crypto.randomUUID();
     const timer = setTimeout(() => {
       pending.delete(id);
@@ -186,8 +219,13 @@ function handleBrowser(ws) {
     if (msg.kind === "register" && msg.session) {
       sessionId = msg.session.sessionId;
       const existing = sessions.get(sessionId);
+      // A label is assigned once per tab and reused across reconnects, so a
+      // tab keeps a stable human-readable name (for the "which tab?" choice
+      // and the browser title) even when the bridge restarts.
+      const label = existing?.record.label ?? `workspace-${++labelCounter}`;
       const record = {
         sessionId,
+        label,
         createdAt: existing?.record.createdAt ?? now(),
         lastSeenAt: now(),
         url: msg.session.url,
@@ -195,8 +233,8 @@ function handleBrowser(ws) {
         status: "running",
       };
       sessions.set(sessionId, { record, ws });
-      ws.send(JSON.stringify({ kind: "registered" }));
-      log(`browser session registered: ${sessionId} (${msg.session.mode})`);
+      ws.send(JSON.stringify({ kind: "registered", label }));
+      log(`browser session registered: ${label} ${sessionId} (${msg.session.mode})`);
       broadcastToAgents(connectionStatusEvent());
     } else if (msg.kind === "response" && msg.response) {
       const p = pending.get(msg.response.id);

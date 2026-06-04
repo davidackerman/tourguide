@@ -71,6 +71,13 @@ export function startWorkspaceBridge(
     bridgeWsUrl: opts.bridgeWsUrl,
     onStatus: (status: ConnectionStatus, detail) => panel.setConnectionStatus(status, detail),
     onRequest: (request) => void handle(request),
+    // Put the bridge-assigned label in the browser tab title so multiple
+    // open workspace tabs are distinguishable at a glance.
+    onRegistered: (label) => {
+      if (label && typeof document !== "undefined") {
+        document.title = `Tourguide — ${label}`;
+      }
+    },
   });
 
   // Let the user restore a saved state straight from a history entry.

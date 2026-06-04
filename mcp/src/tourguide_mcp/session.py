@@ -20,9 +20,24 @@ class WorkspaceSession:
         self.launcher = Launcher(self.client, self.config)
         self.record: dict[str, Any] | None = None
 
-    async def launch_or_attach(self) -> dict[str, Any]:
-        self.record = await self.launcher.launch_or_attach()
-        return self.record
+    async def launch_or_attach(
+        self, new: bool = False, session: str | None = None
+    ) -> dict[str, Any]:
+        result = await self.launcher.launch_or_attach(new=new, session=session)
+        # An ambiguous result (several tabs open, no choice made) is a prompt
+        # for the agent to pick — don't pin it as the bound tab.
+        if not result.get("ambiguous"):
+            self.record = result
+        # Surface a LAN-shareable URL so the agent can tell the user how others
+        # on the network can view this same workspace.
+        lan = self.launcher.lan_url()
+        if lan and isinstance(result, dict):
+            result.setdefault("lanUrl", lan)
+        return result
+
+    @property
+    def session_id(self) -> str | None:
+        return self.record.get("sessionId") if self.record else None
 
     async def call(self, op: str, params: dict[str, Any] | None = None) -> Any:
         # Lazily attach so the agent can call any tool without ceremony, but
@@ -34,4 +49,7 @@ class WorkspaceSession:
                 # Fall through: the op itself will raise the precise reason
                 # (e.g. "no running Tourguide session") from the bridge.
                 pass
-        return await self.client.call(op, params)
+        # Route to the bound tab so this caller keeps driving the same one even
+        # if other tabs are open; without a pin the bridge errors on ambiguity
+        # rather than guessing.
+        return await self.client.call(op, params, session=self.session_id)

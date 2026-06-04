@@ -18,11 +18,20 @@ from .session import WorkspaceSession
 
 def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
     @mcp.tool()
-    async def launch_or_attach() -> dict:
-        """Launch Tourguide if needed, or attach to a running workspace session.
-        Returns the session record. Call this first; other tools auto-attach
-        but this surfaces launch problems explicitly."""
-        return await session.launch_or_attach()
+    async def launch_or_attach(new: bool = False, session_id: str | None = None) -> dict:
+        """Launch Tourguide if needed, or attach to a workspace tab. Call this
+        first; other tools auto-attach but this surfaces launch problems and
+        the tab choice explicitly.
+
+        Returns the bound session record (includes `sessionId` and `label`).
+        Selection never silently guesses among multiple open tabs:
+          - default: attach to the sole live tab, or open one if none exist.
+          - if several tabs are open: returns `{ambiguous: true, sessions: […]}`
+            — show the labels, ask the user which, then call again with
+            `session_id` (or `new=true` for a fresh dedicated tab).
+          - `new=true`: open a fresh tab and bind to it (parallel workspace).
+          - `session_id="…"`: bind to that specific tab."""
+        return await session.launch_or_attach(new=new, session=session_id)
 
     @mcp.tool()
     async def get_session() -> dict:

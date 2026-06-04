@@ -28,6 +28,8 @@ export interface BrowserTransportOptions {
   bridgeWsUrl: string;
   onRequest: (request: WorkspaceRequest) => void;
   onStatus: (status: ConnectionStatus, detail?: string) => void;
+  /** Called with the bridge-assigned label for this tab (e.g. "workspace-2"). */
+  onRegistered?: (label: string | undefined) => void;
 }
 
 const MAX_BACKOFF_MS = 15_000;
@@ -99,6 +101,8 @@ export class BrowserWsTransport {
       }
       if (msg.kind === "request" && msg.request) {
         this.opts.onRequest(msg.request);
+      } else if (msg.kind === "registered") {
+        this.opts.onRegistered?.((msg as { label?: string }).label);
       } else if (msg.kind === "ping") {
         this.send({ kind: "pong" });
       }

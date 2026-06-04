@@ -42,14 +42,22 @@ class WorkspaceClient:
             r.raise_for_status()
             return r.json()
 
-    async def call(self, op: str, params: dict[str, Any] | None = None) -> Any:
-        """Issue one operation, returning its result or raising WorkspaceError."""
-        request = {
+    async def call(
+        self, op: str, params: dict[str, Any] | None = None, session: str | None = None
+    ) -> Any:
+        """Issue one operation, returning its result or raising WorkspaceError.
+
+        `session` pins the op to a specific workspace tab (by sessionId). When
+        omitted the bridge routes to the sole live tab, or errors if several
+        are open rather than guessing."""
+        request: dict[str, Any] = {
             "id": str(uuid.uuid4()),
             "op": op,
             "params": params,
             "source": self.source,
         }
+        if session is not None:
+            request["session"] = session
         try:
             async with httpx.AsyncClient(timeout=self.op_timeout) as c:
                 r = await c.post(f"{self.base_url}/op", json=request)
