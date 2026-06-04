@@ -122,24 +122,42 @@ class WorkspaceSession:
             ng.add_layer(p["layer"]); return {"ok": True}
         if op == "get_selection":
             return ng.get_selection()
-        if op == "get_session":
-            st = ng.get_state()
-            return {
-                "mode": "python-viewer",
-                "viewerUrl": ng.url(),
-                "viewer": {
-                    "layers": [{"name": l.get("name"), "type": l.get("type")}
-                               for l in st.get("layers", [])],
-                    "position": st.get("position"),
-                },
-            }
         raise WorkspaceError(f"viewer op {op!r} not supported in python-viewer mode")
 
+    async def _python_get_session(self) -> dict[str, Any]:
+        """get_session in python mode: the viewer summary from the in-process
+        viewer, merged with the workspace artifacts (tables/plots/saved states)
+        from the embedding web app — so the agent sees the WHOLE workspace, not
+        just the viewer."""
+        st = self.ng.get_state()
+        summary: dict[str, Any] = {
+            "mode": "python-embedded",
+            "viewerUrl": self.ng.url(),
+            "viewer": {
+                "layers": [{"name": l.get("name"), "type": l.get("type")}
+                           for l in st.get("layers", [])],
+                "position": st.get("position"),
+            },
+            "tables": [], "plots": [], "savedStates": [],
+        }
+        try:
+            ws = await self.client.call("get_session")
+            for k in ("tables", "plots", "savedStates"):
+                if isinstance(ws, dict) and ws.get(k):
+                    summary[k] = ws[k]
+        except Exception:
+            pass  # web app not up / no workspace yet — viewer summary still stands
+        return summary
+
     async def call(self, op: str, params: dict[str, Any] | None = None) -> Any:
-        # Python-viewer mode: serve viewer ops directly (workspace ops like
-        # ingest_table/show_plot still need the web app — out of scope here).
-        if self.ng is not None and op in _VIEWER_OPS:
-            return self._viewer_call(op, params or {})
+        # Python-viewer mode: serve viewer ops directly; get_session merges the
+        # viewer with the web app's tables/plots. Workspace ops (ingest_table/
+        # show_plot/run_sql) fall through to the bridge → embedding page.
+        if self.ng is not None:
+            if op == "get_session":
+                return await self._python_get_session()
+            if op in _VIEWER_OPS:
+                return self._viewer_call(op, params or {})
         # Lazily attach so the agent can call any tool without ceremony, but
         # surface a precise error if nothing is connectable.
         if self.record is None:
