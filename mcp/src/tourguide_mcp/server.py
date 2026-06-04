@@ -127,25 +127,22 @@ USE THE PRE-LOADED ANALYSIS ENVIRONMENT — do not pip-install:
   Run compute with:  uv run --project {analysis_dir} python your_script.py
   It's already synced — installing libraries yourself just wastes time.
 
-MEASURING PROPERTIES — default to the predesigned recipe:
+MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
   When asked to measure/quantify objects in a segmentation (volume, count,
-  centroid, …), DEFAULT TO RUNNING THE PREDESIGNED RECIPE rather than writing
-  analysis code from scratch — it's faster and consistent. Tell the user
-  you're using the predesigned measurement and that they can ask for a custom
-  one. Only write your own code if the user asks for something the recipes
-  don't cover. Do NOT substitute published/precomputed segment_properties or
-  meshes unless the user explicitly asks for the published values.
+  centroid, …), call the `measure` TOOL with the layer's source URL (from
+  get_session). It runs the predesigned recipe server-side and ingests the
+  table for you — fast, consistent coordinates, and (unlike shelling out
+  yourself) NO file-permission prompt and no Pyodide. Tell the user you used
+  the predesigned measurement and they can ask for a custom one.
 
-  Recipes (Python CLIs) live in:
-    {analysis_dir}/recipes        (built-in; measure_objects.py is the default)
-    ~/.tourguide/recipes          (the user's saved custom recipes)
-  Run the default:
-    uv run --project {analysis_dir} python {analysis_dir}/recipes/measure_objects.py \\
-        "<layer source URL from get_session>" --out objects.csv
-  When the user has a custom measure they'll reuse, SAVE it as a script in
-  ~/.tourguide/recipes/<name>.py so it's available as a predesigned option
-  next time (mention you've saved it). Check both dirs for a matching recipe
-  before writing new code.
+  For other/standard analyses, `list_recipes` shows what's available
+  (built-in + the user's templates in ~/.tourguide/recipes) and `run_recipe`
+  runs one by name over a source URL. When the user has a custom analysis
+  they'll reuse, save it as ~/.tourguide/recipes/<name>.py (a CLI taking a
+  source URL and writing a CSV via --out) so it shows up in list_recipes.
+  Only write throwaway analysis code yourself if no recipe fits and the user
+  asks. Do NOT substitute published/precomputed segment_properties or meshes
+  unless the user explicitly asks for the published values.
 
 LOADING WHAT THE USER DROPS IN — discern the type, don't demand a format:
   When the user says "open this in tourguide" / "load these", infer the type
@@ -169,10 +166,12 @@ INGEST BIG TABLES BY PATH — never stream rows through your tokens:
 
 The loop:
   1. get_session → the target layer's data source URL.
-  2. Run the predesigned recipe to write objects.csv (or a saved custom recipe;
-     surface area is resolution-sensitive and isn't measured — use the meshes).
-  3. ingest_table(name, path="objects.csv")  — it includes object_id and
-     com_x_nm/com_y_nm/com_z_nm so click-to-fly works.
+  2. measure(source=…) → measures every object and ingests the table
+     (object_id, volume_nm_3, com_x/y/z_nm for click-to-fly). For other
+     analyses use run_recipe. Surface area is resolution-sensitive and isn't
+     measured — use the meshes for that.
+  3. (measure/run_recipe already ingested the table; only call ingest_table
+     yourself for a table you computed with custom code — then prefer path=.)
   4. add_narration_note describing what you measured and how (source layer,
      scale, method, object count). Your measuring happens in your own env and
      is otherwise INVISIBLE in the workspace — this note is the record that

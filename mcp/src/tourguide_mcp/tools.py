@@ -9,15 +9,49 @@ anywhere, it belongs in the Workspace API, not here.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import csv
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .session import WorkspaceSession
+
+# Where analysis recipes live: built-ins ship with the repo; the user drops
+# their own templates in ~/.tourguide/recipes so they show up alongside.
+_ANALYSIS_DIR = Path(__file__).resolve().parents[3] / "analysis"
+_BUILTIN_RECIPES = _ANALYSIS_DIR / "recipes"
+_USER_RECIPES = Path.home() / ".tourguide" / "recipes"
+
+
+def _recipe_dirs() -> list[Path]:
+    return [_BUILTIN_RECIPES, _USER_RECIPES]
+
+
+def _find_recipe(name: str) -> Path | None:
+    """Resolve a recipe by name (with or without .py); user recipes shadow built-ins."""
+    stem = name[:-3] if name.endswith(".py") else name
+    for d in reversed(_recipe_dirs()):  # user dir first → user templates win
+        p = d / f"{stem}.py"
+        if p.is_file():
+            return p
+    return None
+
+
+def _recipe_doc(path: Path) -> str:
+    """First meaningful line of the recipe's module docstring, for listings."""
+    try:
+        for line in path.read_text().splitlines():
+            s = line.strip().strip('"').strip("'").strip()
+            if s and not s.startswith(("#", "import", "from", "#!")):
+                return s
+    except Exception:
+        pass
+    return ""
 
 
 def _coerce(v: Any) -> Any:
@@ -75,7 +109,84 @@ def _load_table(path: str) -> tuple[list[str], list[list]]:
     raise ValueError(f"ingest_table: unsupported file type '{suffix}' (use .csv or .json)")
 
 
+async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> str:
+    """Run a recipe in the pre-loaded analysis env, writing a CSV to a temp
+    file, and return its path. The MCP server (not the agent) runs it, so there
+    is no sandbox/Documents prompt and no Pyodide. Raises on failure."""
+    out = tempfile.NamedTemporaryFile(prefix="tg_recipe_", suffix=".csv", delete=False)
+    out.close()
+    cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(recipe),
+           *args, "--out", out.name]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"recipe {recipe.name} failed:\n{stderr.decode(errors='replace')[-2000:]}"
+        )
+    return out.name
+
+
 def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
+    async def _run_and_ingest(recipe: Path, source: str, name: str, extra: list[str]) -> dict:
+        csv_path = await _run_recipe_to_csv(recipe, [source, *extra])
+        columns, rows = _load_table(csv_path)
+        result = await session.call(
+            "ingest_table", {"name": name, "columns": columns, "rows": rows}
+        )
+        if isinstance(result, dict):
+            result["rowCount"] = len(rows)
+        return result
+
+    @mcp.tool()
+    async def list_recipes() -> dict:
+        """List the analysis recipes available to run server-side: the built-in
+        ones that ship with Tourguide plus any the user has added as templates
+        in ~/.tourguide/recipes. Each runs in the pre-loaded analysis env (no
+        Pyodide, no file-permission prompt) and ingests its result as a table."""
+        out = []
+        for d in _recipe_dirs():
+            kind = "builtin" if d == _BUILTIN_RECIPES else "user"
+            if not d.is_dir():
+                continue
+            for p in sorted(d.glob("*.py")):
+                if p.name.startswith("_"):
+                    continue
+                out.append({"name": p.stem, "source": kind, "description": _recipe_doc(p)})
+        return {"recipes": out, "userRecipeDir": str(_USER_RECIPES)}
+
+    @mcp.tool()
+    async def measure(source: str, name: str = "measurements", scale: str | None = None) -> dict:
+        """Measure every object in a segmentation layer and ingest the result as
+        a table (the predesigned `measure_objects` recipe). `source` is the
+        layer's data URL from get_session (e.g.
+        n5://s3://.../labels/mito_seg). Runs server-side in the analysis env —
+        fast, consistent coordinates, no Pyodide, no permission prompt. The
+        table has object_id, volume_nm_3, voxel_count, com_x/y/z_nm (click-to-
+        fly). Optional `scale` forces a multiscale level (e.g. "s2")."""
+        recipe = _find_recipe("measure_objects")
+        if recipe is None:
+            raise FileNotFoundError("measure_objects recipe not found in the analysis env")
+        extra = ["--scale", scale] if scale else []
+        return await _run_and_ingest(recipe, source, name, extra)
+
+    @mcp.tool()
+    async def run_recipe(
+        recipe: str, source: str, name: str | None = None, args: list[str] | None = None
+    ) -> dict:
+        """Run any recipe by name (see list_recipes) — a built-in or a user
+        template in ~/.tourguide/recipes — server-side over a layer `source`
+        URL, and ingest its CSV output as a table. `args` are extra CLI flags
+        passed to the recipe. Use this for meshes/contact-sites/custom recipes;
+        for the common object measurement, `measure` is the shortcut."""
+        path = _find_recipe(recipe)
+        if path is None:
+            raise FileNotFoundError(
+                f"recipe {recipe!r} not found. Call list_recipes to see available ones."
+            )
+        return await _run_and_ingest(path, source, name or recipe, args or [])
+
     @mcp.tool()
     async def launch_or_attach(new: bool = False, session_id: str | None = None) -> dict:
         """Launch Tourguide if needed, or attach to a workspace tab. Call this
