@@ -9,11 +9,69 @@ anywhere, it belongs in the Workspace API, not here.
 
 from __future__ import annotations
 
+import csv
+import json
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .session import WorkspaceSession
+
+
+def _coerce(v: Any) -> Any:
+    """CSV cells arrive as strings; turn numeric-looking ones into numbers so
+    columns like com_x_nm stay numeric (needed for SQL + click-to-fly)."""
+    if not isinstance(v, str):
+        return v
+    s = v.strip()
+    if s == "":
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        return v
+
+
+def _load_table(path: str) -> tuple[list[str], list[list]]:
+    """Read a table the agent wrote to disk into (columns, rows) — so large
+    tables flow server→bridge instead of through the model's tokens. Supports
+    .csv and .json (list-of-records, {columns, rows}, or list-of-lists)."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise FileNotFoundError(f"ingest_table: no file at {p}")
+    suffix = p.suffix.lower()
+    if suffix == ".csv":
+        with p.open(newline="") as f:
+            reader = csv.reader(f)
+            all_rows = [r for r in reader]
+        if not all_rows:
+            raise ValueError(f"ingest_table: {p} is empty")
+        columns = all_rows[0]
+        rows = [[_coerce(c) for c in r] for r in all_rows[1:]]
+        return columns, rows
+    if suffix in (".json", ".jsonl", ".ndjson"):
+        if suffix in (".jsonl", ".ndjson"):
+            records = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+        else:
+            records = json.loads(p.read_text())
+        # {columns, rows}
+        if isinstance(records, dict) and "columns" in records and "rows" in records:
+            return list(records["columns"]), list(records["rows"])
+        if not isinstance(records, list) or not records:
+            raise ValueError(f"ingest_table: {p} must be a non-empty list or {{columns, rows}}")
+        # list-of-records
+        if isinstance(records[0], dict):
+            columns = list(records[0].keys())
+            rows = [[rec.get(c) for c in columns] for rec in records]
+            return columns, rows
+        # list-of-lists — first row is the header
+        return list(records[0]), [list(r) for r in records[1:]]
+    raise ValueError(f"ingest_table: unsupported file type '{suffix}' (use .csv or .json)")
 
 
 def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
@@ -129,12 +187,28 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("run_sql", {"sql": sql})
 
     @mcp.tool()
-    async def ingest_table(name: str, columns: list[str], rows: list[list]) -> dict:
+    async def ingest_table(
+        name: str,
+        path: str | None = None,
+        columns: list[str] | None = None,
+        rows: list[list] | None = None,
+    ) -> dict:
         """Push a table YOU computed into Tourguide. This is the core of the
         workspace model: you read the data and compute in your OWN environment,
         then send the result here to display. The table appears in the
         structured browser with click-to-fly (include an 'object_id' column and
-        'com_x_nm'/'com_y_nm'/'com_z_nm' for navigation). Returns the table id."""
+        'com_x_nm'/'com_y_nm'/'com_z_nm' for navigation). Returns the table id.
+
+        PREFER `path` for anything beyond a few rows: write the table to a file
+        in your environment (.csv, or .json as list-of-records / {columns,rows})
+        and pass its path. The server reads + forwards it directly, so the data
+        never has to be serialized through your token stream — this is FAR
+        faster than passing `rows` inline (which makes you re-emit every value
+        as text). Use inline `columns`+`rows` only for tiny tables."""
+        if path is not None:
+            columns, rows = _load_table(path)
+        if not columns or rows is None:
+            raise ValueError("ingest_table: provide `path`, or both `columns` and `rows`")
         return await session.call("ingest_table", {"name": name, "columns": columns, "rows": rows})
 
     @mcp.tool()
