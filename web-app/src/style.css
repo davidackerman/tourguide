@@ -2102,6 +2102,19 @@ body[data-mode="workspace"] #backend-indicator {
   overflow-y: auto;
   padding: 0 0.6rem 0.6rem;
 }
+/* Agentic (workspace) mode: the external agent is the AI and the entry point
+ * for loading/analysis, so strip the manual chrome that doesn't apply —
+ * AI-backend settings + API keys, the "No AI" indicator, and the demo dataset
+ * selector. The agent drives everything else. */
+body[data-mode="workspace"] #settings-btn,
+body[data-mode="workspace"] #backend-indicator,
+body[data-mode="workspace"] #dataset-select,
+body[data-mode="workspace"] .topbar-label,
+body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="catalog"],
+body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="welcome"] {
+  display: none !important;
+}
+
 .workspace-plots-list {
   display: flex;
   flex-wrap: wrap;

@@ -178,7 +178,7 @@ function renderEmptyViewerState(): void {
     <div class="empty-viewer">
       <div class="empty-viewer-card">
         <h2>No dataset loaded</h2>
-        <p>Pick how you'd like to start:</p>
+        <p>${isWorkspaceMode() ? "Ask the agent to load data, or load it yourself:" : "Pick how you'd like to start:"}</p>
         <div class="empty-viewer-actions">
           <button class="btn-primary" data-empty-action="load">+ Load your data</button>
           <button class="btn-secondary" data-empty-action="catalog" ${entries.length === 0 ? "disabled" : ""}>Browse demo catalog</button>
@@ -484,9 +484,9 @@ async function init(): Promise<void> {
     // entry was confusing — users who wanted to start clean had to
     // wait for the demo to load before they could load their own.
     renderEmptyViewerState();
-    // Show the first-run Welcome modal automatically. Returns
-    // immediately if the user has dismissed it before.
-    void maybeShowWelcome();
+    // In agentic (workspace) mode the agent drives loading, so skip the
+    // first-run Welcome modal — it's chat-mode onboarding chrome.
+    if (!isWorkspaceMode()) void maybeShowWelcome();
   }
   if (permalinkState.query) {
     const input = document.querySelector<HTMLInputElement>(".query-input");
