@@ -1,4 +1,23 @@
-import { defineConfig } from "vite";
+import { defineConfig, type PluginOption } from "vite";
+
+// Content-hashed build assets never change for a given URL, so let the browser
+// cache them forever (and reuse its compiled-code cache). vite preview
+// otherwise sends `no-cache`, forcing every freshly-opened workspace tab to
+// re-download + re-parse ~9 MB of Neuroglancer — the bulk of new-tab latency.
+// index.html stays uncached so a rebuild's new hashes are picked up.
+function immutableAssets(): PluginOption {
+  return {
+    name: "immutable-assets",
+    configurePreviewServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url && req.url.startsWith("/assets/")) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
+        next();
+      });
+    },
+  };
+}
 
 // Neuroglancer uses Node-style "exports" conditions to gate which datasources,
 // kvstores, and layers get bundled. Enabling everything we care about for
@@ -30,6 +49,7 @@ const NG_CONDITIONS = [
 
 export default defineConfig({
   base: "./",
+  plugins: [immutableAssets()],
   resolve: {
     conditions: NG_CONDITIONS,
   },
