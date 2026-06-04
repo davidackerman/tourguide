@@ -18,6 +18,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { WebSocketServer } from "ws";
+import { saveState, listStates, getState, stateDir } from "./state_store.mjs";
 
 const PORT = Number(process.env.TG_BRIDGE_PORT || 7723);
 const VERSION = "0.1.0";
@@ -128,6 +129,48 @@ function relayOp(request) {
   });
 }
 
+// --- disk-backed saved states ----------------------------------------------
+//
+// Disk is the durable source of truth (the browser's localStorage is a
+// per-tab cache for its own panel). save → ask the browser to serialize the
+// full state, then write it; list/get → read disk; restore → read disk, hand
+// the full state to the browser to apply (works even in a fresh tab whose
+// localStorage is empty).
+
+const STATE_OPS = new Set(["save_session_state", "list_saved_states", "restore_session_state"]);
+
+async function handleStateOp(request) {
+  try {
+    if (request.op === "list_saved_states") {
+      return { id: request.id, ok: true, result: listStates() };
+    }
+    if (request.op === "save_session_state") {
+      // The browser owns the live viewer, so it serializes the full state;
+      // the bridge persists it and returns a trimmed result + its path.
+      const relayed = await relayOp(request);
+      if (!relayed.ok) return relayed;
+      const record = relayed.result;
+      if (!record || typeof record !== "object" || !record.id) {
+        return { id: request.id, ok: false, error: { message: "browser returned no serializable state to save" } };
+      }
+      return { id: request.id, ok: true, result: saveState(record) };
+    }
+    if (request.op === "restore_session_state") {
+      const wanted = request.params?.id;
+      const record = wanted ? getState(wanted) : null;
+      // Found on disk → apply it directly (pass the full state inline). Not on
+      // disk → fall through to the browser's own localStorage lookup by id.
+      const relayRequest = record
+        ? { ...request, params: { ...request.params, state: record } }
+        : request;
+      return await relayOp(relayRequest);
+    }
+  } catch (err) {
+    return { id: request.id, ok: false, error: { message: `state op failed: ${err.message}` } };
+  }
+  return { id: request.id, ok: false, error: { message: `unhandled state op: ${request.op}` } };
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === "OPTIONS") {
     res.writeHead(204, CORS);
@@ -166,6 +209,13 @@ const server = http.createServer((req, res) => {
         const s = pickSession();
         if (s) sendJson(res, 200, { id: request.id, ok: true, result: s.record });
         else sendJson(res, 200, { id: request.id, ok: false, error: { message: "no running session" } });
+        return;
+      }
+      // Saved states persist to disk here (the browser sandbox can't), so the
+      // bridge intercepts the three state ops instead of leaving them
+      // browser/localStorage-only.
+      if (STATE_OPS.has(request.op)) {
+        sendJson(res, 200, await handleStateOp(request));
         return;
       }
       const response = await relayOp(request);

@@ -94,6 +94,18 @@ export class SessionStore {
     return found;
   }
 
+  /** Apply a full state object (e.g. one the bridge loaded from disk, which
+   *  may not be in this tab's localStorage). Caches it locally too so the
+   *  panel reflects it. */
+  applyState(state: SavedTourguideState): SavedTourguideState {
+    this.hooks.applyViewerState(state.viewerState);
+    if (!this.savedStates.some((s) => s.id === state.id)) {
+      this.savedStates.push(state);
+      persistSavedStates(this.savedStates);
+    }
+    return state;
+  }
+
   listSavedStates(): SavedTourguideState[] {
     return this.savedStates.slice();
   }

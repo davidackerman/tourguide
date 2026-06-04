@@ -15,6 +15,7 @@ import { renderPlotFromCode, runPlotQuery } from "../plot.js";
 import { SessionStore } from "./session_state.js";
 import type {
   PlotArtifact,
+  SavedTourguideState,
   SessionSummary,
   WorkspaceAnnotation,
   WorkspaceOp,
@@ -328,11 +329,18 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
     },
 
     save_session_state: async (p: { name?: string; annotations?: WorkspaceAnnotation[] }) => {
-      const s = ctx.store.saveState(p?.name, p?.annotations);
-      return { id: s.id, name: s.name, createdAt: s.createdAt };
+      // Return the FULL serialized state: the bridge persists it to disk (the
+      // browser sandbox can't write files). localStorage stays a local cache.
+      return ctx.store.saveState(p?.name, p?.annotations);
     },
 
-    restore_session_state: async (p: { id: string }) => {
+    restore_session_state: async (p: { id?: string; state?: SavedTourguideState }) => {
+      // The bridge passes the full `state` when restoring from disk (works in a
+      // fresh tab); otherwise fall back to a local lookup by id.
+      if (p?.state) {
+        const s = ctx.store.applyState(p.state);
+        return { id: s.id, name: s.name };
+      }
       if (!p?.id) throw new Error("restore_session_state: missing 'id'");
       const s = ctx.store.restoreState(p.id);
       return { id: s.id, name: s.name };
