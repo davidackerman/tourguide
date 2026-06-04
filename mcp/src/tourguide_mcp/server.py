@@ -131,9 +131,13 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
   When asked to measure/quantify objects in a segmentation (volume, count,
   centroid, …), call the `measure` TOOL with the layer's source URL (from
   get_session). It runs the predesigned recipe server-side and ingests the
-  table for you — fast, consistent coordinates, and (unlike shelling out
-  yourself) NO file-permission prompt and no Pyodide. Tell the user you used
-  the predesigned measurement and they can ask for a custom one.
+  table for you — fast (it auto-picks a coarse/fast scale by default),
+  consistent coordinates, and (unlike shelling out yourself) NO file-permission
+  prompt and no Pyodide. ALWAYS tell the user the resolution it ran at — the
+  result's `ranAt` field ("chose scale s4 …") — and that they can ask for finer
+  (pass scale=). Reuse the result's `csvPath` for follow-up plots/analysis
+  instead of recomputing from S3 (that was slow). Tell the user you used the
+  predesigned measurement and they can ask for a custom one.
 
   For other/standard analyses, `list_recipes` shows what's available
   (built-in + the user's templates in ~/.tourguide/recipes) and `run_recipe`

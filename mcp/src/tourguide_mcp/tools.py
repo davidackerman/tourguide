@@ -150,10 +150,10 @@ def _load_table(path: str) -> tuple[list[str], list[list]]:
     raise ValueError(f"ingest_table: unsupported file type '{suffix}' (use .csv or .json)")
 
 
-async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> str:
-    """Run a recipe in the pre-loaded analysis env, writing a CSV to a temp
-    file, and return its path. The MCP server (not the agent) runs it, so there
-    is no sandbox/Documents prompt and no Pyodide. Raises on failure."""
+async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> tuple[str, str]:
+    """Run a recipe in the pre-loaded analysis env, writing a CSV to a temp file.
+    Returns (csv_path, stderr_text). The MCP server (not the agent) runs it, so
+    there is no sandbox/Documents prompt and no Pyodide. Raises on failure."""
     out = tempfile.NamedTemporaryFile(prefix="tg_recipe_", suffix=".csv", delete=False)
     out.close()
     cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(recipe),
@@ -162,22 +162,27 @@ async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> str:
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
+    text = stderr.decode(errors="replace")
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"recipe {recipe.name} failed:\n{stderr.decode(errors='replace')[-2000:]}"
-        )
-    return out.name
+        raise RuntimeError(f"recipe {recipe.name} failed:\n{text[-2000:]}")
+    return out.name, text
 
 
 def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
     async def _run_and_ingest(recipe: Path, source: str, name: str, extra: list[str]) -> dict:
-        csv_path = await _run_recipe_to_csv(recipe, [source, *extra])
+        csv_path, stderr = await _run_recipe_to_csv(recipe, [source, *extra])
         columns, rows = _load_table(csv_path)
         result = await session.call(
             "ingest_table", {"name": name, "columns": columns, "rows": rows}
         )
         if isinstance(result, dict):
             result["rowCount"] = len(rows)
+            result["csvPath"] = csv_path  # reuse for plots/more analysis — no recompute
+            # Surface the recipe's "chose scale …" line so the user sees the
+            # resolution it ran at (and can ask for finer), like the web app did.
+            ran = [ln for ln in stderr.splitlines() if ln.lower().startswith("chose scale")]
+            if ran:
+                result["ranAt"] = ran[-1]
         return result
 
     async def _deliver_share_link(url: str, label: str, kind: str) -> dict:

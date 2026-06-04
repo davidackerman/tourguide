@@ -104,8 +104,9 @@ def main() -> None:
     ap.add_argument("source", help="layer source URL, e.g. n5://s3://bucket/path/to/seg")
     ap.add_argument("--out", default="objects.csv", help="output CSV path")
     ap.add_argument("--scale", default=None, help="force a multiscale level, e.g. s2")
-    ap.add_argument("--max-voxels", type=float, default=5e8,
-                    help="auto-pick the finest level under this voxel budget")
+    ap.add_argument("--max-voxels", type=float, default=1e8,
+                    help="auto-pick the finest level under this voxel budget "
+                         "(default favors speed; lower=faster/coarser, pass --scale for finer)")
     ap.add_argument("--no-anon", action="store_true", help="use AWS credentials instead of anonymous")
     args = ap.parse_args()
     anon = not args.no_anon
@@ -127,8 +128,11 @@ def main() -> None:
 
     spec = {"driver": fmt, "kvstore": s3_kv(bucket, f"{group_key}/{scale_path}", anon)}
     arr = ts.open(spec).result()
-    print(f"measuring {group_key} @ {scale_path}  shape={tuple(arr.shape)}  "
-          f"array_axes={arr_axes}  voxel(x,y,z)={sc['x']}x{sc['y']}x{sc['z']} nm",
+    mvox = int(np.prod(arr.shape)) / 1e6
+    # "chose scale" line — surfaced to the user so they know the resolution
+    # (and can ask for finer). Picked for speed by default, like the web app.
+    print(f"chose scale {scale_path} ({sc['x']:g}x{sc['y']:g}x{sc['z']:g} nm/voxel, "
+          f"{mvox:.0f}M voxels) — coarser=faster; pass scale=s2/s1/s0 for finer.",
           file=sys.stderr)
     labels = np.asarray(arr.read().result())
 
