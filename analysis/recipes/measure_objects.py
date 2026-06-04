@@ -68,10 +68,15 @@ def read_json(bucket: str, key: str, anon: bool) -> dict | None:
     return json.loads(bytes(res.value))
 
 
-def pick_scale(fmt, bucket, group_key, anon, want_scale, max_voxels):
-    """Return (scale_path, scale, translate, axes) for a tractable level.
-    `scale`/`translate`/`axes` come from the COSEM multiscale transform and are
-    aligned with each other (axes[i] names scale[i]); axes is e.g. ['z','y','x'].
+_DTYPE_BYTES = {"uint8": 1, "int8": 1, "uint16": 2, "int16": 2, "uint32": 4,
+                "int32": 4, "uint64": 8, "int64": 8, "float32": 4, "float64": 8}
+
+
+def pick_scale(fmt, bucket, group_key, anon, want_scale, max_bytes, work_mult=4.0):
+    """Pick the finest multiscale level whose in-memory working set fits a
+    MEMORY budget (like the web app) — accounts for dtype bytes and the
+    operation's working multiplier, not just voxel count. Returns
+    (scale_path, scale, translate, axes, est_bytes).
     """
     attrs = read_json(bucket, f"{group_key}/attributes.json", anon) or {}
     datasets = (attrs.get("multiscales") or [{}])[0].get("datasets")
@@ -84,16 +89,19 @@ def pick_scale(fmt, bucket, group_key, anon, want_scale, max_voxels):
         axes = tf.get("axes")              # e.g. ['z', 'y', 'x']
         scale = tf.get("scale")            # nm per voxel, aligned with axes
         translate = tf.get("translate", [0, 0, 0])
-        dims = (read_json(bucket, f"{group_key}/{path}/attributes.json", anon) or {}).get("dimensions")
+        meta = read_json(bucket, f"{group_key}/{path}/attributes.json", anon) or {}
+        dims = meta.get("dimensions")
         if not dims:
             continue
-        voxels = int(np.prod(dims))
+        bpv = _DTYPE_BYTES.get(str(meta.get("dataType", "uint16")), 2)
+        est = int(np.prod(dims)) * bpv * work_mult
+        rec = (path, scale, translate, axes, est)
         if want_scale:
             if path == want_scale:
-                return path, scale, translate, axes
-        elif voxels <= max_voxels:
-            return path, scale, translate, axes
-        chosen = (path, scale, translate, axes)  # remember coarsest as fallback
+                return rec
+        elif est <= max_bytes:
+            return rec
+        chosen = rec  # remember coarsest as fallback
     if want_scale:
         sys.exit(f"measure_objects: scale {want_scale!r} not found.")
     return chosen  # everything exceeded the budget → coarsest level
@@ -104,16 +112,17 @@ def main() -> None:
     ap.add_argument("source", help="layer source URL, e.g. n5://s3://bucket/path/to/seg")
     ap.add_argument("--out", default="objects.csv", help="output CSV path")
     ap.add_argument("--scale", default=None, help="force a multiscale level, e.g. s2")
-    ap.add_argument("--max-voxels", type=float, default=1e8,
-                    help="auto-pick the finest level under this voxel budget "
-                         "(default favors speed; lower=faster/coarser, pass --scale for finer)")
+    ap.add_argument("--max-mem-gb", type=float, default=0.5,
+                    help="memory budget for the in-memory working set; auto-picks "
+                         "the finest scale that fits. Small default = fast/coarse "
+                         "(like the web app); raise it (or --scale) for finer.")
     ap.add_argument("--no-anon", action="store_true", help="use AWS credentials instead of anonymous")
     args = ap.parse_args()
     anon = not args.no_anon
 
     fmt, bucket, group_key = parse_source(args.source)
-    scale_path, scale, translate, axes = pick_scale(
-        fmt, bucket, group_key, anon, args.scale, args.max_voxels)
+    scale_path, scale, translate, axes, est_bytes = pick_scale(
+        fmt, bucket, group_key, anon, args.scale, args.max_mem_gb * 1e9, work_mult=4.0)
     if not axes or sorted(axes) != ["x", "y", "z"]:
         sys.exit(f"measure_objects: unexpected transform axes {axes!r}; ask for a custom recipe.")
     # Map physical axes BY NAME, never by position. The transform lists
@@ -130,9 +139,10 @@ def main() -> None:
     arr = ts.open(spec).result()
     mvox = int(np.prod(arr.shape)) / 1e6
     # "chose scale" line — surfaced to the user so they know the resolution
-    # (and can ask for finer). Picked for speed by default, like the web app.
+    # (and can ask for finer). Picked by MEMORY budget, like the web app.
     print(f"chose scale {scale_path} ({sc['x']:g}x{sc['y']:g}x{sc['z']:g} nm/voxel, "
-          f"{mvox:.0f}M voxels) — coarser=faster; pass scale=s2/s1/s0 for finer.",
+          f"{mvox:.0f}M voxels, ~{est_bytes/1e9:.1f}GB working set) — "
+          f"fits the memory budget; pass scale=s2/s1/s0 for finer.",
           file=sys.stderr)
     labels = np.asarray(arr.read().result())
 
