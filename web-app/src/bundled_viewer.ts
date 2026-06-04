@@ -68,6 +68,11 @@ export class BundledViewer {
 
   private ensureViewer(): NgViewer {
     if (this.viewer) return this.viewer;
+    // Clear any placeholder DOM (e.g. the "No dataset loaded" empty-state card
+    // that main.ts puts in #ng-host) before mounting, or Neuroglancer ends up
+    // rendered *underneath* it — which looked like set_viewer_state did
+    // nothing until a second load cleared the card.
+    while (this.container.firstChild) this.container.removeChild(this.container.firstChild);
     // Neuroglancer mounts inside a target element. We give it our container.
     this.viewer = setupDefaultViewer({ target: this.container });
     return this.viewer;
