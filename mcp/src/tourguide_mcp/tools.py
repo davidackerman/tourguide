@@ -43,6 +43,31 @@ def _find_recipe(name: str) -> Path | None:
     return None
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Best-effort copy to the OS clipboard (so a long share URL never has to be
+    pasted into the chat). Returns True on success."""
+    import shutil
+    import subprocess
+    import sys
+
+    if sys.platform == "darwin":
+        cmds = [["pbcopy"]]
+    elif sys.platform.startswith("win"):
+        cmds = [["clip"]]
+    else:
+        cmds = [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for cmd in cmds:
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            p = subprocess.run(cmd, input=text.encode(), timeout=5)
+            if p.returncode == 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _parse_ng_state(url: str) -> dict | None:
     """Decode a Neuroglancer state from a URL/fragment/JSON. Handles the
     `#!{...}` (often percent-encoded) fragment, a bare `{...}` blob, or a
@@ -157,18 +182,38 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def share_view() -> dict:
-        """Get a shareable Neuroglancer link to the CURRENT view, for a coworker
+        """Make a shareable Neuroglancer link to the CURRENT view, for a coworker
         who does NOT have Tourguide — it opens in the public Neuroglancer in
-        their browser (works because the data sources are public URLs). It's a
-        snapshot of the layers + camera + selected segments; Tourguide-only
-        tables/plots are not included (for those, export_session a file). The
-        viewer host is configurable via TG_NEUROGLANCER_URL. Returns {url}."""
+        their browser (the data sources are public URLs). Snapshot of layers +
+        camera + selected segments; Tourguide-only tables/plots are not included
+        (use export_session for those). Host configurable via TG_NEUROGLANCER_URL.
+
+        The link is a VERY long URL (the whole state is encoded). It is copied
+        to the clipboard and saved to a file; this returns only a short summary.
+        Do NOT paste the full URL into chat — just tell the user it's on their
+        clipboard (ready to send to a coworker). Returns {copiedToClipboard,
+        file, length}."""
         import os
 
         state = await session.call("get_viewer_state")
         host = os.environ.get("TG_NEUROGLANCER_URL", "https://neuroglancer-demo.appspot.com").rstrip("/")
         url = f"{host}/#!" + urllib.parse.quote(json.dumps(state))
-        return {"url": url}
+        d = Path.home() / ".tourguide"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "share-link.txt"
+        f.write_text(url)
+        copied = _copy_to_clipboard(url)
+        where = "copied to your clipboard" if copied else f"saved to {f}"
+        return {
+            "copiedToClipboard": copied,
+            "file": str(f),
+            "length": len(url),
+            "message": (
+                f"Neuroglancer share link {where} — paste it to a coworker; it "
+                "opens the current view in their browser without Tourguide. "
+                "(Long URL; not shown here.)"
+            ),
+        }
 
     @mcp.tool()
     async def load_url(url: str) -> dict:
