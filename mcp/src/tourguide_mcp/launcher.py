@@ -20,7 +20,7 @@ import asyncio
 import os
 import subprocess
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 import httpx
@@ -31,11 +31,25 @@ DEFAULT_BRIDGE_URL = "http://localhost:7723"
 DEFAULT_WORKSPACE_URL = "http://localhost:5173/?mode=workspace"
 
 
+def _detect_webapp_dir() -> str | None:
+    """Find the sibling web-app/ from the installed package location, so the
+    MCP server can auto-start it without TOURGUIDE_WEBAPP_DIR being set or any
+    assumption about the client's working directory. This file lives at
+    <repo>/mcp/src/tourguide_mcp/launcher.py → <repo>/web-app."""
+    env = os.environ.get("TOURGUIDE_WEBAPP_DIR")
+    if env:
+        return env
+    from pathlib import Path
+
+    candidate = Path(__file__).resolve().parents[3] / "web-app"
+    return str(candidate) if (candidate / "package.json").exists() else None
+
+
 @dataclass
 class LauncherConfig:
     bridge_url: str = os.environ.get("TOURGUIDE_BRIDGE_URL", DEFAULT_BRIDGE_URL)
     workspace_url: str = os.environ.get("TOURGUIDE_WORKSPACE_URL", DEFAULT_WORKSPACE_URL)
-    webapp_dir: str | None = os.environ.get("TOURGUIDE_WEBAPP_DIR")
+    webapp_dir: str | None = field(default_factory=_detect_webapp_dir)
     auto_open: bool = os.environ.get("TOURGUIDE_AUTO_OPEN", "1") != "0"
     # "preview" serves the production build (renders data correctly);
     # "dev" uses the Vite dev server (fast/hot-reload, but its worker/codec
