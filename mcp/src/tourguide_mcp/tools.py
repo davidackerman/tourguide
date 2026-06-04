@@ -225,32 +225,27 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
     async def show_plot(
         png_path: str | None = None,
         png: str | None = None,
-        code: str | None = None,
-        question: str | None = None,
         title: str | None = None,
         kind: str | None = None,
         source_table: str | None = None,
     ) -> dict:
-        """Display a plot in Tourguide. PREFERRED: render the figure in YOUR own
+        """Display a plot in Tourguide. Render the figure YOURSELF in your own
         environment (matplotlib savefig) to a .png file and pass its `png_path`
         — the server reads + encodes it, so the image never goes through your
         token stream (do NOT read the file or a base64 string into your context;
         that's slow and cost minutes in testing). `png` (an inline base64/data
-        URL) also works for small images. Alternatively pass matplotlib `code`
-        (runs in-browser against df_<class> tables) or a `question` (needs
-        Tourguide's AI backend). Returns the plot artifact id."""
+        URL) also works for small images. There is intentionally no in-browser
+        (Pyodide) code path: do all compute + rendering in your environment.
+        Returns the plot artifact id."""
         params: dict[str, Any] = {}
         if png_path is not None:
             p = Path(png_path).expanduser()
             if not p.is_file():
                 raise FileNotFoundError(f"show_plot: no file at {p}")
             png = "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()
-        if png is not None:
-            params["png"] = png
-        if code is not None:
-            params["code"] = code
-        if question is not None:
-            params["question"] = question
+        if png is None:
+            raise ValueError("show_plot: provide png_path (preferred) or png")
+        params["png"] = png
         if title is not None:
             params["title"] = title
         if kind is not None:

@@ -184,8 +184,8 @@ PLOTS — render to a .png file, pass show_plot(png_path=…):
   show_plot(png_path="fig.png"). The server reads + encodes the file, so the
   image never goes through your tokens. Do NOT base64-encode it yourself, and
   do NOT read the png/base64 back into your context (that cost ~2 minutes in
-  testing). Also avoid show_plot's `code` path: it runs in the browser's
-  Pyodide, a separate environment without your DataFrame (fails with NameError).
+  testing). Do ALL compute and rendering in your own environment — there is no
+  in-browser (Pyodide) path, by design.
 
 Other notes:
   - Call launch_or_attach first. If it returns a `shareUrl`, tell the user —
