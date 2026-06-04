@@ -69,9 +69,10 @@ def read_json(bucket: str, key: str, anon: bool) -> dict | None:
 
 
 def pick_scale(fmt, bucket, group_key, anon, want_scale, max_voxels):
-    """Return (scale_path, scale_nm[z,y,x], translate_nm[z,y,x]). Reads the
-    COSEM multiscale transform list, then each level's dimensions to choose a
-    tractable level."""
+    """Return (scale_path, scale, translate, axes) for a tractable level.
+    `scale`/`translate`/`axes` come from the COSEM multiscale transform and are
+    aligned with each other (axes[i] names scale[i]); axes is e.g. ['z','y','x'].
+    """
     attrs = read_json(bucket, f"{group_key}/attributes.json", anon) or {}
     datasets = (attrs.get("multiscales") or [{}])[0].get("datasets")
     if not datasets:
@@ -80,7 +81,8 @@ def pick_scale(fmt, bucket, group_key, anon, want_scale, max_voxels):
     for ds in datasets:
         path = ds["path"]
         tf = ds.get("transform", {})
-        scale = tf.get("scale")            # [z, y, x] nm
+        axes = tf.get("axes")              # e.g. ['z', 'y', 'x']
+        scale = tf.get("scale")            # nm per voxel, aligned with axes
         translate = tf.get("translate", [0, 0, 0])
         dims = (read_json(bucket, f"{group_key}/{path}/attributes.json", anon) or {}).get("dimensions")
         if not dims:
@@ -88,10 +90,10 @@ def pick_scale(fmt, bucket, group_key, anon, want_scale, max_voxels):
         voxels = int(np.prod(dims))
         if want_scale:
             if path == want_scale:
-                return path, scale, translate
+                return path, scale, translate, axes
         elif voxels <= max_voxels:
-            return path, scale, translate
-        chosen = (path, scale, translate)  # remember coarsest as fallback
+            return path, scale, translate, axes
+        chosen = (path, scale, translate, axes)  # remember coarsest as fallback
     if want_scale:
         sys.exit(f"measure_objects: scale {want_scale!r} not found.")
     return chosen  # everything exceeded the budget → coarsest level
@@ -109,35 +111,45 @@ def main() -> None:
     anon = not args.no_anon
 
     fmt, bucket, group_key = parse_source(args.source)
-    scale_path, scale_nm, translate_nm = pick_scale(
+    scale_path, scale, translate, axes = pick_scale(
         fmt, bucket, group_key, anon, args.scale, args.max_voxels)
-    sz, sy, sx = scale_nm           # nm per voxel, array axis order z,y,x
-    tz, ty, tx = translate_nm
-    voxel_vol = sz * sy * sx
+    if not axes or sorted(axes) != ["x", "y", "z"]:
+        sys.exit(f"measure_objects: unexpected transform axes {axes!r}; ask for a custom recipe.")
+    # Map physical axes BY NAME, never by position. The transform lists
+    # axes/scale/translate together (e.g. axes=['z','y','x']); the array's axis
+    # order is the reverse of that (n5/COSEM convention) — so centroid axis i
+    # is the physical axis reversed(axes)[i]. (Verified: getting this wrong
+    # swapped x and z and put centroids out of bounds.)
+    sc = {ax: scale[i] for i, ax in enumerate(axes)}
+    tr = {ax: translate[i] for i, ax in enumerate(axes)}
+    arr_axes = list(reversed(axes))                  # array axis 0,1,2 -> name
+    voxel_vol = sc["x"] * sc["y"] * sc["z"]
 
     spec = {"driver": fmt, "kvstore": s3_kv(bucket, f"{group_key}/{scale_path}", anon)}
     arr = ts.open(spec).result()
     print(f"measuring {group_key} @ {scale_path}  shape={tuple(arr.shape)}  "
-          f"voxel={sx}x{sy}x{sz} nm", file=sys.stderr)
+          f"array_axes={arr_axes}  voxel(x,y,z)={sc['x']}x{sc['y']}x{sc['z']} nm",
+          file=sys.stderr)
     labels = np.asarray(arr.read().result())
 
     stats = cc3d.statistics(labels.astype(np.uint32, copy=False))
     counts = stats["voxel_counts"]          # [n_labels+1]
-    centroids = stats["centroids"]          # [n_labels+1, 3] in (z,y,x) voxel coords
+    centroids = stats["centroids"]          # [n_labels+1, 3] in array-axis order
 
     rows = []
     for obj_id in range(1, len(counts)):
         n = int(counts[obj_id])
         if n == 0:
             continue
-        cz, cy, cx = centroids[obj_id]
+        cen = centroids[obj_id]
+        pos = {arr_axes[i]: cen[i] for i in range(len(arr_axes))}  # name -> voxel idx
         rows.append([
             obj_id,
-            round(n * voxel_vol, 3),                 # volume_nm_3
-            n,                                       # voxel_count
-            round(cx * sx + tx, 1),                  # com_x_nm
-            round(cy * sy + ty, 1),                  # com_y_nm
-            round(cz * sz + tz, 1),                  # com_z_nm
+            round(n * voxel_vol, 3),                          # volume_nm_3
+            n,                                                # voxel_count
+            round(pos["x"] * sc["x"] + tr["x"], 1),           # com_x_nm
+            round(pos["y"] * sc["y"] + tr["y"], 1),           # com_y_nm
+            round(pos["z"] * sc["z"] + tr["z"], 1),           # com_z_nm
         ])
     rows.sort(key=lambda r: r[1], reverse=True)      # largest first
 
