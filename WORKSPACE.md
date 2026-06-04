@@ -56,6 +56,23 @@ use, then deprecate chat.
 
 ## Run it
 
+### Zero terminals (recommended)
+
+Configure your MCP client with `TOURGUIDE_WEBAPP_DIR` (see `mcp/README.md`),
+then just tell the agent to *"attach to Tourguide."* `launch_or_attach` starts
+the bridge **and** the Vite dev server **and** opens the workspace tab — you
+launch nothing by hand.
+
+### One terminal
+
+```bash
+cd web-app && npm install
+npm run workspace      # runs the bridge + Vite together; Ctrl-C stops both
+# then open http://localhost:5173/?mode=workspace
+```
+
+### Two terminals (explicit)
+
 ```bash
 # 1. web app
 cd web-app && npm install

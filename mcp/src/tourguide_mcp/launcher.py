@@ -21,6 +21,9 @@ import os
 import subprocess
 import webbrowser
 from dataclasses import dataclass
+from urllib.parse import urlparse
+
+import httpx
 
 from .client import WorkspaceClient, WorkspaceError
 
@@ -53,6 +56,7 @@ class Launcher:
         self.client = client
         self.config = config or LauncherConfig()
         self._bridge_proc: subprocess.Popen | None = None
+        self._webapp_proc: subprocess.Popen | None = None
 
     async def ensure_bridge(self, timeout: float = 20.0) -> None:
         if await self.client.is_healthy():
@@ -63,12 +67,15 @@ class Launcher:
                 "TOURGUIDE_WEBAPP_DIR is not set, so it can't be auto-started. "
                 "Start it manually: `cd web-app && npm run bridge`."
             )
-        # Spawn `npm run bridge` detached; it self-reports readiness via /health.
+        # Spawn `npm run bridge` in its own session so it outlives this MCP
+        # process (e.g. when the client restarts the server); it self-reports
+        # readiness via /health.
         self._bridge_proc = subprocess.Popen(
             ["npm", "run", "bridge"],
             cwd=self.config.webapp_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         ok = await _wait_for(self.client.is_healthy, timeout=timeout)
         if not ok:
@@ -76,15 +83,53 @@ class Launcher:
                 f"started the bridge but it never became healthy at {self.config.bridge_url}."
             )
 
-    async def launch_or_attach(self, wait_for_session: float = 30.0) -> dict:
-        """Return the attached session record, launching a tab if needed."""
+    async def _webapp_reachable(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as c:
+                r = await c.get(self.config.workspace_url)
+                return r.status_code < 500
+        except Exception:
+            return False
+
+    async def ensure_webapp(self, timeout: float = 90.0) -> None:
+        """Start the Vite web app if it isn't already serving. Idempotent: if a
+        server is already up at the workspace URL we skip (covers a manually
+        run `npm run dev` and repeated launch calls)."""
+        if await self._webapp_reachable():
+            return
+        if not self.config.webapp_dir:
+            raise WorkspaceError(
+                f"Tourguide web app is not reachable at {self.config.workspace_url} "
+                "and TOURGUIDE_WEBAPP_DIR is not set, so it can't be auto-started. "
+                "Start it manually: `cd web-app && npm run dev`."
+            )
+        # Pin the port so the URL we open matches the server we start.
+        port = str(urlparse(self.config.workspace_url).port or 5173)
+        self._webapp_proc = subprocess.Popen(
+            ["npm", "run", "dev", "--", "--port", port, "--strictPort"],
+            cwd=self.config.webapp_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        ok = await _wait_for(self._webapp_reachable, timeout=timeout)
+        if not ok:
+            raise WorkspaceError(
+                f"started the web app but it never came up at {self.config.workspace_url}. "
+                f"Is port {port} free? (a stale dev server there will block --strictPort)."
+            )
+
+    async def launch_or_attach(self, wait_for_session: float = 45.0) -> dict:
+        """Return the attached session record, launching the whole stack if
+        needed: bridge -> web app -> a workspace tab."""
         await self.ensure_bridge()
 
         running = await self._running_session()
         if running:
             return running
 
-        # No session yet — open the workspace URL so a tab connects.
+        # No session yet — make sure the web app is up, then open a tab.
+        await self.ensure_webapp()
         if self.config.auto_open:
             try:
                 webbrowser.open(self.config.workspace_url)

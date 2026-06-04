@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "bridge": "node bridge/server.mjs",
+    "workspace": "node scripts/workspace.mjs",
     "test:smoke": "node tests/workspace_smoke.mjs"
   },
   "dependencies": {
