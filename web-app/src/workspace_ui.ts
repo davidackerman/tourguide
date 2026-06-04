@@ -29,6 +29,8 @@ export interface WorkspacePanelHandle {
   addPlot(artifact: PlotArtifact): void;
   /** Wire the enlarge action when a docked plot thumbnail is clicked. */
   onOpenPlot(cb: (artifact: PlotArtifact) => void): void;
+  /** Show a clickable share link at the top of the panel (Open + Copy). */
+  addShareLink(url: string, label?: string): void;
 }
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -48,6 +50,7 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
         <span class="conn-label" data-conn-label>No agent connected</span>
         <span class="conn-detail hint" data-conn-detail></span>
       </div>
+      <div class="workspace-share" data-share hidden></div>
       <div class="workspace-plots" data-plots hidden>
         <header class="workspace-actions-header">
           <h3>Plots</h3>
@@ -73,6 +76,7 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
   const clearBtn = container.querySelector<HTMLButtonElement>("[data-clear-actions]")!;
   const plotsSection = container.querySelector<HTMLDivElement>("[data-plots]")!;
   const plotsList = container.querySelector<HTMLDivElement>("[data-plots-list]")!;
+  const shareSection = container.querySelector<HTMLDivElement>("[data-share]")!;
 
   let entries: ActionHistoryEntry[] = [];
   let restoreCb: ((id: string) => void) | null = null;
@@ -178,6 +182,26 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
     },
     onOpenPlot(cb) {
       openPlotCb = cb;
+    },
+    addShareLink(url, label) {
+      const name = label || "Open share link";
+      shareSection.hidden = false;
+      shareSection.innerHTML = `
+        <header class="workspace-actions-header"><h3>Share link</h3></header>
+        <div class="workspace-share-row">
+          <a class="workspace-share-open" target="_blank" rel="noopener"></a>
+          <button class="btn-secondary btn-xs" data-share-copy>Copy</button>
+        </div>`;
+      const a = shareSection.querySelector<HTMLAnchorElement>(".workspace-share-open")!;
+      a.href = url;
+      a.textContent = name;
+      const btn = shareSection.querySelector<HTMLButtonElement>("[data-share-copy]")!;
+      btn.addEventListener("click", () => {
+        void navigator.clipboard?.writeText(url).then(
+          () => { btn.textContent = "Copied"; },
+          () => { btn.textContent = "Copy failed"; },
+        );
+      });
     },
   };
 }

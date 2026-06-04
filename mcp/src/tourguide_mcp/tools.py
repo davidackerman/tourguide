@@ -180,40 +180,67 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
             result["rowCount"] = len(rows)
         return result
 
-    @mcp.tool()
-    async def share_view() -> dict:
-        """Make a shareable Neuroglancer link to the CURRENT view, for a coworker
-        who does NOT have Tourguide — it opens in the public Neuroglancer in
-        their browser (the data sources are public URLs). Snapshot of layers +
-        camera + selected segments; Tourguide-only tables/plots are not included
-        (use export_session for those). Host configurable via TG_NEUROGLANCER_URL.
-
-        The link is a VERY long URL (the whole state is encoded). It is copied
-        to the clipboard and saved to a file; this returns only a short summary.
-        Do NOT paste the full URL into chat — just tell the user it's on their
-        clipboard (ready to send to a coworker). Returns {copiedToClipboard,
-        file, length}."""
-        import os
-
-        state = await session.call("get_viewer_state")
-        host = os.environ.get("TG_NEUROGLANCER_URL", "https://neuroglancer-demo.appspot.com").rstrip("/")
-        url = f"{host}/#!" + urllib.parse.quote(json.dumps(state))
+    async def _deliver_share_link(url: str, label: str, kind: str) -> dict:
+        """Hand a (long) share URL to the user WITHOUT pasting it through chat:
+        show it as a clickable link in the workspace panel, copy it to the
+        clipboard, and save it to a file. Returns a short summary only."""
         d = Path.home() / ".tourguide"
         d.mkdir(parents=True, exist_ok=True)
         f = d / "share-link.txt"
         f.write_text(url)
         copied = _copy_to_clipboard(url)
-        where = "copied to your clipboard" if copied else f"saved to {f}"
+        shown = False
+        try:
+            await session.call("show_share_link", {"url": url, "label": label})
+            shown = True
+        except Exception:
+            pass
         return {
+            "shownInWorkspace": shown,
             "copiedToClipboard": copied,
             "file": str(f),
             "length": len(url),
             "message": (
-                f"Neuroglancer share link {where} — paste it to a coworker; it "
-                "opens the current view in their browser without Tourguide. "
-                "(Long URL; not shown here.)"
+                f"{kind} share link is "
+                + ("clickable in the workspace panel" if shown else f"saved to {f}")
+                + (" and copied to your clipboard" if copied else "")
+                + ". Don't paste the full URL into chat (it's very long)."
             ),
         }
+
+    @mcp.tool()
+    async def share_session() -> dict:
+        """Share the CURRENT view as a TOURGUIDE link — opens this view in
+        Tourguide (for a coworker who has/uses Tourguide). The link carries the
+        viewer state; it's shown as a clickable link in the workspace panel and
+        copied to the clipboard (it's long, so it is NOT pasted into chat). For
+        a coworker WITHOUT Tourguide use share_view; for a portable file with
+        tables/plots use export_session."""
+        import os
+
+        state = await session.call("get_viewer_state")
+        base = (
+            session.launcher.lan_url()
+            or os.environ.get("TOURGUIDE_WORKSPACE_URL", "http://localhost:5173/?mode=workspace")
+        )
+        url = base + "#!" + urllib.parse.quote(json.dumps(state))
+        return await _deliver_share_link(url, "Open in Tourguide", "Tourguide")
+
+    @mcp.tool()
+    async def share_view() -> dict:
+        """Share the CURRENT view as a NEUROGLANCER link, for a coworker who does
+        NOT have Tourguide — it opens in the public Neuroglancer in their browser
+        (the data sources are public URLs). Snapshot of layers + camera +
+        selected segments; Tourguide-only tables/plots are not included (use
+        export_session for those). Host configurable via TG_NEUROGLANCER_URL.
+        Shown as a clickable link in the workspace panel + copied to clipboard;
+        the long URL is NOT pasted into chat."""
+        import os
+
+        state = await session.call("get_viewer_state")
+        host = os.environ.get("TG_NEUROGLANCER_URL", "https://neuroglancer-demo.appspot.com").rstrip("/")
+        url = f"{host}/#!" + urllib.parse.quote(json.dumps(state))
+        return await _deliver_share_link(url, "Open in Neuroglancer", "Neuroglancer")
 
     @mcp.tool()
     async def load_url(url: str) -> dict:

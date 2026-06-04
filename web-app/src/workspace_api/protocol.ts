@@ -24,6 +24,7 @@ export type WorkspaceOp =
   | "load_descriptor"
   | "get_viewer_state"
   | "set_viewer_state"
+  | "show_share_link"
   | "get_selection"
   | "select_segments"
   | "fly_to"
@@ -49,6 +50,7 @@ export const WORKSPACE_OPS: readonly WorkspaceOp[] = [
   "load_descriptor",
   "get_viewer_state",
   "set_viewer_state",
+  "show_share_link",
   "get_selection",
   "select_segments",
   "fly_to",

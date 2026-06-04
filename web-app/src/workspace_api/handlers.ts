@@ -35,6 +35,9 @@ export interface WorkspaceContext {
   refreshBrowser: () => void;
   /** Display a rendered plot artifact in the workspace UI. */
   displayPlot: (artifact: PlotArtifact) => void;
+  /** Show a clickable share link in the workspace UI (avoids pasting a long
+   *  URL through the agent's chat). */
+  displayShareLink: (url: string, label?: string) => void;
   /** AI backend — only needed for the question-based show_plot path. */
   getBackend: () => LLMBackend;
 }
@@ -159,6 +162,12 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
     set_viewer_state: async (p: { state: Record<string, unknown> }) => {
       if (!p?.state) throw new Error("set_viewer_state: missing 'state'");
       ctx.viewer.applyNgState(p.state);
+      return { ok: true };
+    },
+
+    show_share_link: async (p: { url: string; label?: string }) => {
+      if (!p?.url) throw new Error("show_share_link: missing 'url'");
+      ctx.displayShareLink(p.url, p.label);
       return { ok: true };
     },
 

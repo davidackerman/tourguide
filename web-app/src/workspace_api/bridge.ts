@@ -30,6 +30,7 @@ const READ_ONLY_OPS = new Set<string>([
   "list_saved_states",
   "export_session_summary",
   "launch_or_attach",
+  "show_share_link",
 ]);
 
 export interface WorkspaceBridgeHandle {

@@ -1039,6 +1039,7 @@ function startBridgeIfWorkspace(): void {
       if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
     },
     displayPlot: (artifact) => workspacePanel?.addPlot(artifact),
+    displayShareLink: (url, label) => workspacePanel?.addShareLink(url, label),
     getBackend: () => backend,
   };
 

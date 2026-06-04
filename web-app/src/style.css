@@ -2115,6 +2115,19 @@ body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="welcome"] 
   display: none !important;
 }
 
+.workspace-share-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.6rem 0.6rem;
+}
+.workspace-share-open {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent, #4aa3ff);
+}
 .workspace-plots-list {
   display: flex;
   flex-wrap: wrap;
