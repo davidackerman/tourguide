@@ -93,6 +93,23 @@ async function main() {
     const saved = await postOp("save_session_state", { name: "smoke" });
     assert(saved.ok === true && typeof saved.result?.id === "string", "save_session_state returned an id");
 
+    // ingest_table: push agent-computed rows in, then prove they landed in the
+    // real in-browser DB by querying them back.
+    const ing = await postOp("ingest_table", {
+      name: "smoke_mito",
+      columns: ["object_id", "volume_nm_3"],
+      rows: [[1, 100], [2, 200], [3, 300]],
+    });
+    assert(ing.ok === true && ing.result?.tableId === "smoke_mito", "ingest_table returned the table id");
+    const q = await postOp("run_sql", { sql: "SELECT COUNT(*) AS n, SUM(volume_nm_3) AS s FROM smoke_mito" });
+    assert(q.ok === true && q.result?.rows?.[0]?.[0] === 3, "ingested rows are queryable (count=3)");
+    assert(q.result?.rows?.[0]?.[1] === 600, "ingested values are correct (sum=600)");
+    const gs2 = await postOp("get_session");
+    assert(
+      (gs2.result?.tables ?? []).some((t) => t.id === "smoke_mito"),
+      "ingested table shows up in get_session",
+    );
+
     // The Agent Actions panel should show the write op (read-only ops like
     // get_session are intentionally NOT logged).
     await page.waitForFunction(

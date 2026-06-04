@@ -66,6 +66,12 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
   }
   const db = ctx.getDB();
   const descriptor = ctx.getDescriptor();
+  // Index descriptor layers by name so we can hand the agent each layer's
+  // data source URL + organelle class — it reads/computes on the raw data
+  // itself; the workspace doesn't run the compute.
+  const descLayers = new Map(
+    (descriptor?.layers ?? []).map((l) => [l.name, l]),
+  );
   return {
     sessionId: ctx.sessionId,
     mode: ctx.mode,
@@ -74,14 +80,21 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
           id: descriptor.name,
           name: descriptor.display_name ?? descriptor.name,
           source: firstSource(descriptor.layers?.[0]?.source),
+          voxelSizeNm: descriptor.voxel_size_nm,
         }
       : undefined,
     viewer: {
-      layers: ngLayers.map((l) => ({
-        name: String(l.name ?? ""),
-        type: l.type ? String(l.type) : undefined,
-        visible: l.visible === undefined ? true : Boolean(l.visible),
-      })),
+      layers: ngLayers.map((l) => {
+        const name = String(l.name ?? "");
+        const dl = descLayers.get(name);
+        return {
+          name,
+          type: l.type ? String(l.type) : undefined,
+          visible: l.visible === undefined ? true : Boolean(l.visible),
+          source: dl ? firstSource(dl.source) : undefined,
+          organelleClass: dl?.organelle_class,
+        };
+      }),
       selectedSegmentsByLayer,
       position: state?.position,
     },
@@ -229,6 +242,29 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       };
     },
 
+    // Push a table the AGENT computed (in its own environment) into the
+    // workspace. This is the core of the model: the agent owns compute, the
+    // workspace displays the result. Shows in the structured browser with
+    // click-to-fly. Creates the DB if the dataset had no tables yet.
+    ingest_table: async (p: { name: string; columns: string[]; rows: unknown[][] }) => {
+      if (!p?.name) throw new Error("ingest_table: missing 'name'");
+      if (!Array.isArray(p.columns) || p.columns.length === 0) {
+        throw new Error("ingest_table: 'columns' must be a non-empty string array");
+      }
+      if (!Array.isArray(p.rows)) throw new Error("ingest_table: 'rows' must be an array of rows");
+      const name = p.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+      const rows = p.rows.map((r) =>
+        (r ?? []).map((v) => (v === undefined || v === null ? null : (v as number | string))),
+      );
+      await ingestTableIntoDB(
+        { getDB: ctx.getDB, setDB: ctx.setDB },
+        { name, columns: p.columns, rows },
+        (ctx.getDescriptor()?.layers ?? []).map((l) => l.name),
+      );
+      ctx.refreshBrowser();
+      return { tableId: name, name, rowCount: rows.length, columns: p.columns };
+    },
+
     show_table: async (p: { sql: string; name?: string }) => {
       if (!p?.sql) throw new Error("show_table: missing 'sql'");
       const db = requireDB(ctx);
@@ -247,6 +283,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
     },
 
     show_plot: async (p: {
+      png?: string;
       code?: string;
       question?: string;
       title?: string;
@@ -254,13 +291,17 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       sourceTable?: string;
       linkedSelection?: boolean;
     }) => {
-      const db = requireDB(ctx);
       let pngDataUrl: string;
       let usedCode = p.code ?? "";
-      if (p.code) {
-        const r = await renderPlotFromCode(p.code, db);
+      // Preferred path: the agent rendered the figure in its OWN environment
+      // and hands us the image. No Pyodide, no AI backend — just display it.
+      if (p.png) {
+        pngDataUrl = p.png.startsWith("data:") ? p.png : `data:image/png;base64,${p.png}`;
+      } else if (p.code) {
+        const r = await renderPlotFromCode(p.code, requireDB(ctx));
         pngDataUrl = r.png_data_url;
       } else if (p.question) {
+        const db = requireDB(ctx);
         const backend = ctx.getBackend();
         if (!backend.isReady()) {
           throw new Error("show_plot: 'question' path needs an AI backend; pass 'code' instead.");
@@ -269,7 +310,10 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
         pngDataUrl = r.png_data_url;
         usedCode = r.code;
       } else {
-        throw new Error("show_plot: provide 'code' (matplotlib) or 'question' (needs AI backend).");
+        throw new Error(
+          "show_plot: provide 'png' (an image the agent rendered — preferred), " +
+            "'code' (matplotlib, runs in-browser), or 'question' (needs AI backend).",
+        );
       }
       const artifact = ctx.store.addPlot({
         title: p.title,

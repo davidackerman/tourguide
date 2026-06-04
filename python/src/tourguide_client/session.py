@@ -136,6 +136,11 @@ class TourguideSession:
     def run_sql(self, sql: str) -> dict:
         return self.call("run_sql", {"sql": sql})
 
+    def ingest_table(self, name: str, columns: list[str], rows: list[list]) -> dict:
+        """Push a table you computed into Tourguide (the core artifact-sink op).
+        Include 'object_id' + 'com_x_nm'/'com_y_nm'/'com_z_nm' for click-to-fly."""
+        return self.call("ingest_table", {"name": name, "columns": columns, "rows": rows})
+
     def show_table(self, sql: str, name: str | None = None) -> dict:
         params: dict[str, Any] = {"sql": sql}
         if name is not None:
@@ -144,6 +149,7 @@ class TourguideSession:
 
     def show_plot(
         self,
+        png: str | None = None,
         code: str | None = None,
         question: str | None = None,
         title: str | None = None,
@@ -152,6 +158,7 @@ class TourguideSession:
     ) -> dict:
         params: dict[str, Any] = {}
         for k, v in (
+            ("png", png),
             ("code", code),
             ("question", question),
             ("title", title),

@@ -22,6 +22,7 @@ WORKSPACE_OPS = (
     "list_tables",
     "get_table_schema",
     "run_sql",
+    "ingest_table",
     "show_table",
     "show_plot",
     "save_session_state",

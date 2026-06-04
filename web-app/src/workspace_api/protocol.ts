@@ -32,6 +32,7 @@ export type WorkspaceOp =
   | "list_tables"
   | "get_table_schema"
   | "run_sql"
+  | "ingest_table"
   | "show_table"
   | "show_plot"
   | "save_session_state"
@@ -56,6 +57,7 @@ export const WORKSPACE_OPS: readonly WorkspaceOp[] = [
   "list_tables",
   "get_table_schema",
   "run_sql",
+  "ingest_table",
   "show_table",
   "show_plot",
   "save_session_state",
@@ -100,12 +102,19 @@ export interface SessionSummary {
     id?: string;
     name?: string;
     source?: string;
+    /** Dataset voxel size in nm [x, y, z] — agents need this to read voxels. */
+    voxelSizeNm?: number[];
   };
   viewer: {
     layers: Array<{
       name: string;
       type?: string;
       visible?: boolean;
+      /** Data source URL (zarr/n5/precomputed) so the agent can read it
+       *  directly in its own environment — the workspace is a sink/source,
+       *  not a compute runtime. */
+      source?: string;
+      organelleClass?: string;
     }>;
     selectedSegmentsByLayer: Record<string, string[]>;
     position?: number[];

@@ -107,9 +107,18 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("run_sql", {"sql": sql})
 
     @mcp.tool()
+    async def ingest_table(name: str, columns: list[str], rows: list[list]) -> dict:
+        """Push a table YOU computed into Tourguide. This is the core of the
+        workspace model: you read the data and compute in your OWN environment,
+        then send the result here to display. The table appears in the
+        structured browser with click-to-fly (include an 'object_id' column and
+        'com_x_nm'/'com_y_nm'/'com_z_nm' for navigation). Returns the table id."""
+        return await session.call("ingest_table", {"name": name, "columns": columns, "rows": rows})
+
+    @mcp.tool()
     async def show_table(sql: str, name: str | None = None) -> dict:
-        """Run SQL and open the result as a Tourguide table in the structured
-        browser. Returns the new table id."""
+        """Run SQL against tables already in Tourguide and open the result as a
+        new table. (To display a table you computed yourself, use ingest_table.)"""
         params: dict[str, Any] = {"sql": sql}
         if name is not None:
             params["name"] = name
@@ -117,16 +126,21 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def show_plot(
+        png: str | None = None,
         code: str | None = None,
         question: str | None = None,
         title: str | None = None,
         kind: str | None = None,
         source_table: str | None = None,
     ) -> dict:
-        """Create a plot inside Tourguide. Provide matplotlib `code` (preferred;
-        tables are preloaded as df_<class> DataFrames) or a natural-language
-        `question` (needs Tourguide's AI backend). Returns the plot artifact id."""
+        """Display a plot in Tourguide. Preferred: render the figure in YOUR own
+        environment and pass it as `png` (a base64 PNG or data URL) — no runtime
+        needed in Tourguide. Alternatively pass matplotlib `code` (runs
+        in-browser against df_<class> tables) or a `question` (needs Tourguide's
+        AI backend). Returns the plot artifact id."""
         params: dict[str, Any] = {}
+        if png is not None:
+            params["png"] = png
         if code is not None:
             params["code"] = code
         if question is not None:

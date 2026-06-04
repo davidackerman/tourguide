@@ -113,13 +113,34 @@ auto-start the bridge. See `mcp/README.md`.
 
 `launch_or_attach`, `get_session`, `load_descriptor`, `get_viewer_state`,
 `set_viewer_state`, `get_selection`, `select_segments`, `fly_to`, `add_layer`,
-`add_annotations`, `list_tables`, `get_table_schema`, `run_sql`, `show_table`,
-`show_plot`, `save_session_state`, `restore_session_state`, `list_saved_states`,
-`start_recording`, `stop_recording`, `add_narration_note`,
+`add_annotations`, `list_tables`, `get_table_schema`, `run_sql`, `ingest_table`,
+`show_table`, `show_plot`, `save_session_state`, `restore_session_state`,
+`list_saved_states`, `start_recording`, `stop_recording`, `add_narration_note`,
 `export_session_summary`.
 
 Prefer the semantic viewer ops (`select_segments`, `fly_to`, `add_layer`);
 `set_viewer_state` is the escape hatch for raw Neuroglancer blobs.
+
+### The agent computes; the workspace displays
+
+The agent (Claude, a script, …) runs analysis **in its own environment** —
+full Python, full RAM, the real data — and the workspace is the **sink** for
+the results and the **source** of state. Tourguide is not a compute runtime.
+
+- `get_session` hands back each layer's **data source URL** + voxel size, so
+  the agent can read the zarr/n5 directly and compute (regionprops, meshing,
+  …) itself.
+- **`ingest_table(name, columns, rows)`** pushes a computed table in — it shows
+  in the structured browser with click-to-fly (include `object_id` +
+  `com_x_nm`/`com_y_nm`/`com_z_nm`).
+- **`show_plot(png=…)`** displays a figure the agent already rendered — no
+  in-browser matplotlib needed.
+
+So *"measure mito"* is: `get_session` → read `mito_seg`'s source → compute
+regionprops locally → `ingest_table(...)`. No Pyodide, no HuggingFace, no AI
+key. (The legacy in-browser Pyodide / cloud-backend compute paths remain for
+the deprecated chat mode and as fallbacks, but the agent flow doesn't use
+them.)
 
 ## Status by phase
 
