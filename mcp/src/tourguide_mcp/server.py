@@ -8,6 +8,9 @@ bridge and exposes high-level workspace tools to any MCP-capable agent.
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -15,6 +18,56 @@ from mcp.server.fastmcp import FastMCP
 from .launcher import LauncherConfig
 from .session import WorkspaceSession
 from .tools import register_tools
+
+
+def _ancestors(pid: int) -> set[int]:
+    """Walk up the parent chain (our uv-run / Desktop wrappers) so we never
+    kill a process that launched us."""
+    chain: set[int] = set()
+    cur = pid
+    for _ in range(20):
+        try:
+            ppid = int(
+                subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(cur)],
+                    capture_output=True, text=True, timeout=3,
+                ).stdout.strip()
+                or 0
+            )
+        except Exception:
+            break
+        if ppid <= 1 or ppid in chain:
+            break
+        chain.add(ppid)
+        cur = ppid
+    return chain
+
+
+def _reap_stale_servers() -> None:
+    """Kill other tourguide-mcp server processes on startup so an orphan from a
+    previous Desktop session can't linger and serve stale code. The newest
+    instance (this one) wins. Opt out with TG_MCP_NO_REAP=1."""
+    if os.environ.get("TG_MCP_NO_REAP"):
+        return
+    me = os.getpid()
+    keep = {me} | _ancestors(me)
+    try:
+        pids = subprocess.run(
+            ["pgrep", "-f", "tourguide-mcp"], capture_output=True, text=True, timeout=3
+        ).stdout.split()
+    except Exception:
+        return
+    for raw in pids:
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        if pid in keep:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass  # already gone / not ours to kill
 
 # Surfaced to the model by MCP clients (e.g. Claude Desktop, which — unlike a
 # coding agent — never reads the repo's CLAUDE.md). This is where the
@@ -54,6 +107,19 @@ MEASURING PROPERTIES — default to the predesigned recipe:
   ~/.tourguide/recipes/<name>.py so it's available as a predesigned option
   next time (mention you've saved it). Check both dirs for a matching recipe
   before writing new code.
+
+LOADING WHAT THE USER DROPS IN — discern the type, don't demand a format:
+  When the user says "open this in tourguide" / "load these", infer the type
+  from the content or extension and route it — don't require a yaml descriptor:
+  - Neuroglancer URL (has a '#!{...}' state fragment, often URL-encoded):
+    decode the JSON state from the fragment and apply it with set_viewer_state
+    (or add individual layers with add_layer). A bare state JSON works too.
+  - Data source (zarr / n5 / precomputed over s3/gcs/http): add_layer with that
+    source — segmentation vs image by dtype/intent.
+  - Table file (.csv / .json): ingest_table(name, path="…").
+  - Tourguide descriptor (.yaml / .json with layers + voxel size):
+    load_descriptor.
+  Only ask the user if the type is genuinely ambiguous.
 
 INGEST BIG TABLES BY PATH — never stream rows through your tokens:
   Re-emitting hundreds of rows as a tool argument is the single slowest thing
@@ -102,6 +168,7 @@ def build_server() -> FastMCP:
 
 
 def main() -> None:
+    _reap_stale_servers()  # evict orphaned older instances first
     build_server().run()  # stdio transport by default
 
 
