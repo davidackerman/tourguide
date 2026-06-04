@@ -43,10 +43,46 @@ def _ancestors(pid: int) -> set[int]:
     return chain
 
 
+def _proc_age_seconds(pid: int) -> int | None:
+    """Elapsed seconds since `pid` started, or None if unknown. Uses `ps -o
+    etime` ([[DD-]hh:]mm:ss), which works on both macOS and Linux (etimes is
+    Linux-only)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+    except Exception:
+        return None
+    if not out:
+        return None
+    days = 0
+    if "-" in out:
+        d, out = out.split("-", 1)
+        days = int(d)
+    try:
+        parts = [int(p) for p in out.split(":")]
+    except ValueError:
+        return None
+    secs = 0
+    for p in parts:  # mm:ss or hh:mm:ss
+        secs = secs * 60 + p
+    return days * 86400 + secs
+
+
+# Only reap processes clearly older than any concurrent Desktop spawn. Claude
+# Desktop sometimes launches a second server seconds after the first (and
+# briefly runs both); reaping those siblings makes Desktop report a spurious
+# "Server disconnected". A genuine orphan from a previous session is minutes-to-
+# hours old, so an age gate cleanly separates the two.
+_REAP_MIN_AGE_S = int(os.environ.get("TG_MCP_REAP_MIN_AGE", "600"))
+
+
 def _reap_stale_servers() -> None:
-    """Kill other tourguide-mcp server processes on startup so an orphan from a
-    previous Desktop session can't linger and serve stale code. The newest
-    instance (this one) wins. Opt out with TG_MCP_NO_REAP=1."""
+    """Kill clearly-orphaned older tourguide-mcp processes on startup so one from
+    a previous Desktop session can't linger and serve stale code. Skips its own
+    process chain and any process younger than _REAP_MIN_AGE_S (likely a sibling
+    Desktop just spawned). Opt out entirely with TG_MCP_NO_REAP=1."""
     if os.environ.get("TG_MCP_NO_REAP"):
         return
     me = os.getpid()
@@ -64,6 +100,9 @@ def _reap_stale_servers() -> None:
             continue
         if pid in keep:
             continue
+        age = _proc_age_seconds(pid)
+        if age is None or age < _REAP_MIN_AGE_S:
+            continue  # too young to be a stale orphan — leave Desktop's spawns alone
         try:
             os.kill(pid, signal.SIGTERM)
         except Exception:
