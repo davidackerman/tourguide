@@ -147,9 +147,10 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
 LOADING WHAT THE USER DROPS IN — discern the type, don't demand a format:
   When the user says "open this in tourguide" / "load these", infer the type
   from the content or extension and route it — don't require a yaml descriptor:
-  - Neuroglancer URL (has a '#!{...}' state fragment, often URL-encoded):
-    decode the JSON state from the fragment and apply it with set_viewer_state
-    (or add individual layers with add_layer). A bare state JSON works too.
+  - Neuroglancer URL (has a '#!{...}' state fragment, often URL-encoded): call
+    load_url(url) — ONE step, the server decodes + applies it. Do NOT decode or
+    percent-unescape it yourself in a shell or read it into context (that's the
+    slow path; load_url is instant).
   - Data source (zarr / n5 / precomputed over s3/gcs/http): add_layer with that
     source — segmentation vs image by dtype/intent.
   - Table file (.csv / .json): ingest_table(name, path="…").

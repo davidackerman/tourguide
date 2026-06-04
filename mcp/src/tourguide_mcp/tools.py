@@ -14,6 +14,7 @@ import base64
 import csv
 import json
 import tempfile
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,21 @@ def _find_recipe(name: str) -> Path | None:
         if p.is_file():
             return p
     return None
+
+
+def _parse_ng_state(url: str) -> dict | None:
+    """Decode a Neuroglancer state from a URL/fragment/JSON. Handles the
+    `#!{...}` (often percent-encoded) fragment, a bare `{...}` blob, or a
+    `#!middleauth+...` / json_url style left for the browser. Returns the state
+    dict, or None if no inline state is present."""
+    s = url.strip()
+    frag = s.split("#!", 1)[1] if "#!" in s else (s if s.startswith(("{", "%7B")) else None)
+    if frag is None:
+        return None
+    frag = urllib.parse.unquote(frag)
+    if not frag.startswith("{"):
+        return None  # e.g. a json_url/state-server reference, not inline JSON
+    return json.loads(frag)
 
 
 def _recipe_doc(path: Path) -> str:
@@ -138,6 +154,22 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         if isinstance(result, dict):
             result["rowCount"] = len(rows)
         return result
+
+    @mcp.tool()
+    async def load_url(url: str) -> dict:
+        """Load a Neuroglancer state URL into the viewer in ONE step. Pass the
+        full link (or just its '#!...' fragment); the server decodes the state
+        and applies it. Do NOT decode/percent-unescape it yourself in a shell or
+        read it into your context — that's slow; this is instant. For a data
+        source URL (zarr/n5/precomputed) use add_layer; for a .csv use measure/
+        ingest_table."""
+        state = _parse_ng_state(url)
+        if state is None:
+            raise ValueError(
+                "load_url: no inline Neuroglancer '#!{...}' state in that URL. "
+                "If it's a data source, use add_layer instead."
+            )
+        return await session.call("set_viewer_state", {"state": state})
 
     @mcp.tool()
     async def list_recipes() -> dict:
