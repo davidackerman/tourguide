@@ -51,6 +51,10 @@ export default defineConfig({
   preview: {
     port: 4173,
     host: true,
+    // Allow access via the machine's LAN IP/hostname, not just localhost, so
+    // others on the same network can open the workspace. Vite preview
+    // otherwise rejects unknown Host headers ("host not allowed").
+    allowedHosts: true,
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "credentialless",
