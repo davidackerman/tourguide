@@ -318,9 +318,19 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("get_viewer_state")
 
     @mcp.tool()
-    async def set_viewer_state(state: dict) -> dict:
+    async def set_viewer_state(state: dict | None = None, path: str | None = None) -> dict:
         """Apply a raw Neuroglancer viewer-state blob (escape hatch). Prefer
-        select_segments / fly_to / add_layer for routine work."""
+        select_segments / fly_to / add_layer for routine work, and load_url for a
+        Neuroglancer link. For a large state, write it to a .json file and pass
+        `path` instead of inlining `state` — that keeps the blob out of your
+        token stream."""
+        if path is not None:
+            p = Path(path).expanduser()
+            if not p.is_file():
+                raise FileNotFoundError(f"set_viewer_state: no file at {p}")
+            state = json.loads(p.read_text())
+        if state is None:
+            raise ValueError("set_viewer_state: provide state or path")
         return await session.call("set_viewer_state", {"state": state})
 
     @mcp.tool()
@@ -354,10 +364,22 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("add_layer", {"layer": layer})
 
     @mcp.tool()
-    async def add_annotations(annotations: list[dict], layer_name: str | None = None) -> dict:
+    async def add_annotations(
+        annotations: list[dict] | None = None,
+        layer_name: str | None = None,
+        path: str | None = None,
+    ) -> dict:
         """Add annotations to an annotation layer. Each is one of:
         {type:'point', position:[x,y,z], label?}, {type:'line', points:[[x,y,z],...], label?},
-        {type:'bbox', min:[x,y,z], max:[x,y,z], label?}. Coordinates in nm."""
+        {type:'bbox', min:[x,y,z], max:[x,y,z], label?}. Coordinates in nm. For
+        MANY annotations, write them to a .json file (a list, or {annotations:[…]})
+        and pass `path` instead of inlining them — keeps the blob out of your
+        token stream."""
+        if path is not None:
+            data = json.loads(Path(path).expanduser().read_text())
+            annotations = data.get("annotations") if isinstance(data, dict) else data
+        if not annotations:
+            raise ValueError("add_annotations: provide annotations or path")
         params: dict[str, Any] = {"annotations": annotations}
         if layer_name is not None:
             params["layerName"] = layer_name
@@ -375,11 +397,21 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("get_table_schema", {"table": table})
 
     @mcp.tool()
-    async def run_sql(sql: str) -> dict:
+    async def run_sql(sql: str, max_rows: int = 50) -> dict:
         """Run a read-only SQL query against the workspace's in-memory tables.
-        Returns columns + rows (capped); for a persisted, browsable result use
-        show_table instead."""
-        return await session.call("run_sql", {"sql": sql})
+        Returns columns + rows, but only the first `max_rows` reach you (the
+        full result already lives in the workspace) — so a broad SELECT doesn't
+        dump hundreds of rows into your context. Prefer aggregates/LIMIT; for a
+        persisted, browsable full result use show_table. `rowCount` is the true
+        total; `returnedRows` is what's included."""
+        result = await session.call("run_sql", {"sql": sql})
+        rows = result.get("rows") if isinstance(result, dict) else None
+        if isinstance(rows, list) and len(rows) > max_rows:
+            result["rows"] = rows[:max_rows]
+            result["returnedRows"] = max_rows
+            result["truncatedForAgent"] = True
+            result.setdefault("rowCount", len(rows))
+        return result
 
     @mcp.tool()
     async def ingest_table(

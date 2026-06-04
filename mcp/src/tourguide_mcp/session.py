@@ -13,6 +13,19 @@ from .client import WorkspaceClient, WorkspaceError
 from .launcher import Launcher, LauncherConfig
 
 
+def _trim_session_urls(result: dict[str, Any]) -> None:
+    """Drop the '#!{...}' viewer-state fragment from any session URL in a
+    launch_or_attach result (a single record or an ambiguous {sessions:[…]}),
+    so thousands of chars of encoded state never reach the agent's context."""
+    def trim(rec: Any) -> None:
+        if isinstance(rec, dict) and isinstance(rec.get("url"), str):
+            rec["url"] = rec["url"].split("#!", 1)[0]
+
+    trim(result)
+    for s in result.get("sessions", []) or []:
+        trim(s)
+
+
 class WorkspaceSession:
     def __init__(self, config: LauncherConfig | None = None):
         self.config = config or LauncherConfig()
@@ -28,6 +41,10 @@ class WorkspaceSession:
         # for the agent to pick — don't pin it as the bound tab.
         if not result.get("ambiguous"):
             self.record = result
+        # Strip the giant '#!{...}' Neuroglancer state out of session URLs
+        # before they reach the agent — it can be thousands of chars per record
+        # and the agent never needs it (it's the encoded viewer state).
+        _trim_session_urls(result)
         # NB: deliberately do NOT advertise the LAN workspace URL as a "share"
         # here — opening it gives a fresh BLANK workspace, not this view. To
         # share the actual view use share_view (a Neuroglancer link that
