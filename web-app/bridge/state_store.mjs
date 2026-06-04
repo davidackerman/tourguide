@@ -90,6 +90,39 @@ export function listStates() {
   return { savedStates, dir };
 }
 
+// --- share states: small state blobs served by id for short LAN links -------
+// A Tourguide short link (…?state=<id>) points here instead of carrying the
+// whole encoded state in the URL. The recipient's browser fetches it from the
+// bridge over the LAN (http→http, same network) — no public hosting needed.
+
+function shareDir() {
+  const override = process.env.TG_SHARE_STATE_DIR;
+  return override && override.trim()
+    ? path.resolve(override)
+    : path.join(os.homedir(), ".tourguide", "shared-states");
+}
+
+/** Reject ids that aren't plain tokens (no path traversal in the GET handler). */
+export function isValidShareId(id) {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+}
+
+export function saveShareState(id, state) {
+  if (!isValidShareId(id)) throw new Error("bad share id");
+  const dir = shareDir();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(state));
+}
+
+export function getShareState(id) {
+  if (!isValidShareId(id)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(shareDir(), `${id}.json`), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 /** Full record for a saved id, or null if not on disk. */
 export function getState(id) {
   for (const { record } of readAll()) {

@@ -173,6 +173,26 @@ let currentIsCustom = false;
 // loaded. Replaces what used to be an auto-loaded demo. Gives the user
 // big obvious next-step buttons instead of waiting for a load they
 // didn't ask for.
+// Fetch a shared viewer state from the bridge by id (`?state=<id>`) and apply
+// it. Returns true if it loaded. Lets a short Tourguide link carry the view
+// without the whole state in the URL — the bridge serves it over the LAN.
+async function maybeLoadSharedState(): Promise<boolean> {
+  const params = new URLSearchParams(window.location.search);
+  const id = params.get("state");
+  if (!id) return false;
+  const port = params.get("bridgePort") || "7723";
+  const host = window.location.hostname || "localhost";
+  try {
+    const res = await fetch(`http://${host}:${port}/share-state/${encodeURIComponent(id)}`);
+    if (!res.ok) return false;
+    viewer.applyNgState((await res.json()) as Record<string, unknown>);
+    return true;
+  } catch (err) {
+    console.warn("[share-state] failed to load:", (err as Error).message);
+    return false;
+  }
+}
+
 function renderEmptyViewerState(): void {
   ngHost.innerHTML = `
     <div class="empty-viewer">
@@ -468,6 +488,10 @@ async function init(): Promise<void> {
   // user on the page.
   await maybeExpandShareId();
 
+  // Short Tourguide share link (`?state=<id>`): the viewer state lives in the
+  // bridge's share store, fetched over the LAN. Apply it and skip empty state.
+  const sharedStateLoaded = await maybeLoadSharedState();
+
   const permalinkState = decodeState(window.location.search, window.location.hash);
   if (permalinkState.descriptor) {
     loadDescriptorDirect(permalinkState.descriptor);
@@ -477,7 +501,7 @@ async function init(): Promise<void> {
   ) {
     select.value = String(permalinkState.catalogIndex);
     await loadEntry(entries[permalinkState.catalogIndex], permalinkState.catalogIndex);
-  } else {
+  } else if (!sharedStateLoaded) {
     // No permalink → don't auto-load anything. The empty state in
     // #ng-host gives the user clear next-step buttons (Load / pick
     // from catalog / open Welcome). Auto-loading the first catalog

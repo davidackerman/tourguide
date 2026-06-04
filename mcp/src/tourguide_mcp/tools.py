@@ -210,20 +210,19 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def share_session() -> dict:
-        """Share the CURRENT view as a TOURGUIDE link — opens this view in
-        Tourguide (for a coworker who has/uses Tourguide). The link carries the
-        viewer state; it's shown as a clickable link in the workspace panel and
-        copied to the clipboard (it's long, so it is NOT pasted into chat). For
-        a coworker WITHOUT Tourguide use share_view; for a portable file with
-        tables/plots use export_session."""
-        import os
-
+        """Share the CURRENT view as a SHORT Tourguide link (LAN). The viewer
+        state is stored on the bridge and the link (…?state=<id>) opens this
+        view in Tourguide for anyone on your network — no long URL, no hosting.
+        Shown as a clickable link in the workspace panel + copied to clipboard.
+        For a coworker WITHOUT Tourguide use share_view; for a portable file
+        with tables/plots use export_session."""
         state = await session.call("get_viewer_state")
-        base = (
-            session.launcher.lan_url()
-            or os.environ.get("TOURGUIDE_WORKSPACE_URL", "http://localhost:5173/?mode=workspace")
-        )
-        url = base + "#!" + urllib.parse.quote(json.dumps(state))
+        base = session.launcher.lan_url() or session.config.workspace_url
+        sep = "&" if "?" in base else "?"
+        url = f"{base}{sep}state={await session.client.share_state(state)}"
+        port = urllib.parse.urlparse(session.config.bridge_url).port
+        if port and port != 7723:
+            url += f"&bridgePort={port}"
         return await _deliver_share_link(url, "Open in Tourguide", "Tourguide")
 
     @mcp.tool()

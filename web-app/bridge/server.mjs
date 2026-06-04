@@ -18,7 +18,15 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { WebSocketServer } from "ws";
-import { saveState, listStates, getState, stateDir } from "./state_store.mjs";
+import {
+  saveState,
+  listStates,
+  getState,
+  stateDir,
+  saveShareState,
+  getShareState,
+  isValidShareId,
+} from "./state_store.mjs";
 
 const PORT = Number(process.env.TG_BRIDGE_PORT || 7723);
 const VERSION = "0.1.0";
@@ -186,6 +194,43 @@ const server = http.createServer((req, res) => {
 
   if (req.method === "GET" && url.pathname === "/sessions") {
     sendJson(res, 200, sessionRecords());
+    return;
+  }
+
+  // Share-state store for short LAN Tourguide links (…?state=<id>). POST a
+  // viewer state, get an id; the recipient's browser GETs it back over the LAN.
+  if (req.method === "POST" && url.pathname === "/share-state") {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+      if (raw.length > 16 * 1024 * 1024) req.destroy();
+    });
+    req.on("end", () => {
+      let state;
+      try {
+        state = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { ok: false, error: { message: "invalid JSON" } });
+        return;
+      }
+      const id = crypto.randomUUID().slice(0, 12);
+      try {
+        saveShareState(id, state);
+        sendJson(res, 200, { ok: true, id });
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: { message: err.message } });
+      }
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/share-state/")) {
+    const id = url.pathname.slice("/share-state/".length);
+    const state = isValidShareId(id) ? getShareState(id) : null;
+    if (state == null) {
+      sendJson(res, 404, { ok: false, error: { message: "share state not found" } });
+    } else {
+      sendJson(res, 200, state);
+    }
     return;
   }
 

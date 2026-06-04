@@ -42,6 +42,18 @@ class WorkspaceClient:
             r.raise_for_status()
             return r.json()
 
+    async def share_state(self, state: Any) -> str:
+        """Store a viewer state on the bridge for a short LAN link; returns its
+        id (the recipient's browser fetches it back via /share-state/<id>)."""
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(f"{self.base_url}/share-state", json=state)
+        if r.status_code >= 400:
+            raise WorkspaceError(f"share-state failed: HTTP {r.status_code}")
+        body = r.json()
+        if not body.get("ok") or not body.get("id"):
+            raise WorkspaceError("share-state: bridge returned no id")
+        return body["id"]
+
     async def call(
         self, op: str, params: dict[str, Any] | None = None, session: str | None = None
     ) -> Any:
