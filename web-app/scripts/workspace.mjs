@@ -54,6 +54,31 @@ function shutdown(code) {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-console.log("Starting Tourguide workspace (bridge + Vite). Ctrl-C to stop.\n");
-run("bridge", "node", ["bridge/server.mjs"]);
-run("vite", VITE, []);
+// --preview serves the production build (renders Neuroglancer image data
+// correctly); plain dev is faster + hot-reloads but can leave image chunks
+// black on some setups.
+const preview = process.argv.includes("--preview");
+
+function startServers() {
+  run("bridge", "node", ["bridge/server.mjs"]);
+  if (preview) {
+    run("preview", VITE, ["preview", "--port", "5173", "--strictPort"]);
+  } else {
+    run("vite", VITE, []);
+  }
+}
+
+if (preview) {
+  console.log("Building production bundle, then serving preview + bridge. Ctrl-C to stop.\n");
+  const build = spawn("npm", ["run", "build"], { cwd: WEB_APP, stdio: "inherit" });
+  build.on("exit", (code) => {
+    if (code !== 0) {
+      console.error(`[build] failed with code ${code}`);
+      process.exit(code ?? 1);
+    }
+    startServers();
+  });
+} else {
+  console.log("Starting Tourguide workspace (bridge + Vite dev). Ctrl-C to stop.\n");
+  startServers();
+}

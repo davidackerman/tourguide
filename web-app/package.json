@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "bridge": "node bridge/server.mjs",
     "workspace": "node scripts/workspace.mjs",
+    "workspace:preview": "node scripts/workspace.mjs --preview",
     "test:smoke": "node tests/workspace_smoke.mjs"
   },
   "dependencies": {

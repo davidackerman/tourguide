@@ -67,9 +67,17 @@ launch nothing by hand.
 
 ```bash
 cd web-app && npm install
-npm run workspace      # runs the bridge + Vite together; Ctrl-C stops both
+npm run workspace:preview   # builds, then serves the bridge + preview together
 # then open http://localhost:5173/?mode=workspace
 ```
+
+> **dev vs preview:** `npm run workspace` (Vite dev server) is faster and
+> hot-reloads, but on some setups the Vite **dev** server mis-handles
+> Neuroglancer's chunk-decoder workers and **image data renders black**
+> (metadata still resolves). The **production build** (`workspace:preview`,
+> or `npm run build && npm run preview`) renders correctly. Use dev for UI
+> hacking, preview for actually looking at data. The MCP launcher defaults to
+> the preview build for this reason (`TOURGUIDE_WEBAPP_MODE=dev` to override).
 
 ### Two terminals (explicit)
 

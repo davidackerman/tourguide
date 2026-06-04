@@ -37,6 +37,10 @@ class LauncherConfig:
     workspace_url: str = os.environ.get("TOURGUIDE_WORKSPACE_URL", DEFAULT_WORKSPACE_URL)
     webapp_dir: str | None = os.environ.get("TOURGUIDE_WEBAPP_DIR")
     auto_open: bool = os.environ.get("TOURGUIDE_AUTO_OPEN", "1") != "0"
+    # "preview" serves the production build (renders data correctly);
+    # "dev" uses the Vite dev server (fast/hot-reload, but its worker/codec
+    # handling leaves Neuroglancer image chunks black on some setups).
+    webapp_mode: str = os.environ.get("TOURGUIDE_WEBAPP_MODE", "preview")
 
 
 async def _wait_for(predicate, timeout: float, interval: float = 0.5):
@@ -91,22 +95,43 @@ class Launcher:
         except Exception:
             return False
 
-    async def ensure_webapp(self, timeout: float = 90.0) -> None:
-        """Start the Vite web app if it isn't already serving. Idempotent: if a
+    async def ensure_webapp(self, timeout: float = 240.0) -> None:
+        """Start the web app if it isn't already serving. Idempotent: if a
         server is already up at the workspace URL we skip (covers a manually
-        run `npm run dev` and repeated launch calls)."""
+        run server and repeated launch calls).
+
+        Defaults to the production build (`npm run build` + `npm run preview`)
+        because the Vite dev server can leave Neuroglancer image chunks black
+        on some setups. Set TOURGUIDE_WEBAPP_MODE=dev to use the dev server."""
         if await self._webapp_reachable():
             return
         if not self.config.webapp_dir:
             raise WorkspaceError(
                 f"Tourguide web app is not reachable at {self.config.workspace_url} "
                 "and TOURGUIDE_WEBAPP_DIR is not set, so it can't be auto-started. "
-                "Start it manually: `cd web-app && npm run dev`."
+                "Start it manually: `cd web-app && npm run preview` (after `npm run build`)."
             )
         # Pin the port so the URL we open matches the server we start.
         port = str(urlparse(self.config.workspace_url).port or 5173)
+        if self.config.webapp_mode == "dev":
+            cmd = ["npm", "run", "dev", "--", "--port", port, "--strictPort"]
+        else:
+            # Build once, then serve the static output via Vite preview.
+            build = await asyncio.create_subprocess_exec(
+                "npm", "run", "build",
+                cwd=self.config.webapp_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if await build.wait() != 0:
+                raise WorkspaceError(
+                    "`npm run build` failed, so the preview server can't start. "
+                    "Run it manually in web-app to see the error, or set "
+                    "TOURGUIDE_WEBAPP_MODE=dev to use the dev server instead."
+                )
+            cmd = ["npm", "run", "preview", "--", "--port", port, "--strictPort"]
         self._webapp_proc = subprocess.Popen(
-            ["npm", "run", "dev", "--", "--port", port, "--strictPort"],
+            cmd,
             cwd=self.config.webapp_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -116,7 +141,7 @@ class Launcher:
         if not ok:
             raise WorkspaceError(
                 f"started the web app but it never came up at {self.config.workspace_url}. "
-                f"Is port {port} free? (a stale dev server there will block --strictPort)."
+                f"Is port {port} free? (a stale server there will block --strictPort)."
             )
 
     async def launch_or_attach(self, wait_for_session: float = 45.0) -> dict:
