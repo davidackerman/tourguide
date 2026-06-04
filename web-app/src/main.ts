@@ -193,6 +193,18 @@ async function maybeLoadSharedState(): Promise<boolean> {
   }
 }
 
+// Embed an external Neuroglancer viewer (the in-process Python NG instance)
+// as an iframe filling the viewer pane. Viewer control comes from the agent
+// via the MCP (direct), not from this page.
+function renderEmbeddedViewer(url: string): void {
+  ngHost.innerHTML = "";
+  const frame = document.createElement("iframe");
+  frame.src = url;
+  frame.className = "embedded-viewer";
+  frame.setAttribute("allow", "cross-origin-isolated");
+  ngHost.appendChild(frame);
+}
+
 function renderEmptyViewerState(): void {
   ngHost.innerHTML = `
     <div class="empty-viewer">
@@ -487,6 +499,16 @@ async function init(): Promise<void> {
   // permalink. We don't trigger a navigation — pushState keeps the
   // user on the page.
   await maybeExpandShareId();
+
+  // Embedded-viewer mode (`?ngViewer=<url>`): the viewer is an external
+  // (in-process Python Neuroglancer) instance — show it in an iframe instead
+  // of mounting the bundled JS viewer. The workspace panel (tables/plots) and
+  // the bridge keep working; the agent drives the viewer directly via the MCP.
+  const embedUrl = new URLSearchParams(window.location.search).get("ngViewer");
+  if (embedUrl) {
+    renderEmbeddedViewer(embedUrl);
+    return;
+  }
 
   // Short Tourguide share link (`?state=<id>`): the viewer state lives in the
   // bridge's share store, fetched over the LAN. Apply it and skip empty state.
