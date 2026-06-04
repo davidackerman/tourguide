@@ -156,6 +156,21 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return result
 
     @mcp.tool()
+    async def share_view() -> dict:
+        """Get a shareable Neuroglancer link to the CURRENT view, for a coworker
+        who does NOT have Tourguide — it opens in the public Neuroglancer in
+        their browser (works because the data sources are public URLs). It's a
+        snapshot of the layers + camera + selected segments; Tourguide-only
+        tables/plots are not included (for those, export_session a file). The
+        viewer host is configurable via TG_NEUROGLANCER_URL. Returns {url}."""
+        import os
+
+        state = await session.call("get_viewer_state")
+        host = os.environ.get("TG_NEUROGLANCER_URL", "https://neuroglancer-demo.appspot.com").rstrip("/")
+        url = f"{host}/#!" + urllib.parse.quote(json.dumps(state))
+        return {"url": url}
+
+    @mcp.tool()
     async def load_url(url: str) -> dict:
         """Load a Neuroglancer state URL into the viewer in ONE step. Pass the
         full link (or just its '#!...' fragment); the server decodes the state
@@ -400,15 +415,46 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
     @mcp.tool()
     async def save_session_state(name: str | None = None) -> dict:
         """Save the current workspace state (viewer + descriptor + table/plot
-        refs) as a named, restorable saved state. Returns its id."""
+        refs) as a named, restorable saved state on disk. Returns its id and the
+        file `path` — that file is portable (see export_session)."""
         params: dict[str, Any] = {}
         if name is not None:
             params["name"] = name
         return await session.call("save_session_state", params)
 
     @mcp.tool()
-    async def restore_session_state(id: str) -> dict:
-        """Restore a previously saved workspace state by id."""
+    async def export_session(name: str | None = None) -> dict:
+        """Save the current session to a portable file and report its path, to
+        share with a coworker who HAS Tourguide — they load it with
+        restore_session_state(path=…) to get their own copy (they can't change
+        yours). For someone WITHOUT Tourguide, use share_view (a Neuroglancer
+        link). Returns {id, name, path, shareHint}."""
+        params: dict[str, Any] = {}
+        if name is not None:
+            params["name"] = name
+        result = await session.call("save_session_state", params)
+        if isinstance(result, dict) and result.get("path"):
+            result["shareHint"] = (
+                f"Send this file to share the session: {result['path']} — "
+                "the recipient restores it with restore_session_state(path=…)."
+            )
+        return result
+
+    @mcp.tool()
+    async def restore_session_state(id: str | None = None, path: str | None = None) -> dict:
+        """Restore a saved workspace state — by `id` (one you saved here) or by
+        `path` to a state file someone shared with you. Loading a shared file
+        gives you your own copy of their view/tables; it doesn't touch their
+        session."""
+        if path is not None:
+            p = Path(path).expanduser()
+            if not p.is_file():
+                raise FileNotFoundError(f"restore_session_state: no file at {p}")
+            return await session.call(
+                "restore_session_state", {"state": json.loads(p.read_text())}
+            )
+        if id is None:
+            raise ValueError("restore_session_state: provide id or path")
         return await session.call("restore_session_state", {"id": id})
 
     @mcp.tool()

@@ -187,9 +187,17 @@ PLOTS — render to a .png file, pass show_plot(png_path=…):
   testing). Do ALL compute and rendering in your own environment — there is no
   in-browser (Pyodide) path, by design.
 
+SHARING A SESSION:
+  - Coworker WITHOUT Tourguide who just wants to see the view → share_view
+    returns a Neuroglancer link that opens in their browser (layers + camera;
+    no Tourguide-only tables/plots).
+  - Coworker WITH Tourguide who wants the full session to run themselves →
+    export_session writes a portable file; they load it with
+    restore_session_state(path=…) and get their own copy (read-only to yours).
+
 Other notes:
   - Call launch_or_attach first. If it returns a `shareUrl`, tell the user —
-    it's how others on their network view the same workspace.
+    it's how others on the same network view this live workspace.
   - Keep to one workspace tab unless the user wants parallel ones; when
     several are open, launch_or_attach asks which to drive.
 """
