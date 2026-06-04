@@ -160,7 +160,9 @@ def _analysis_dir() -> str:
 
 
 def build_server() -> FastMCP:
-    instructions = INSTRUCTIONS_TEMPLATE.format(analysis_dir=_analysis_dir())
+    # Plain replace, NOT str.format: the template is full of literal braces
+    # ({...}, {columns, rows}, '#!{...}') that .format would misparse.
+    instructions = INSTRUCTIONS_TEMPLATE.replace("{analysis_dir}", _analysis_dir())
     mcp = FastMCP("tourguide", instructions=instructions)
     session = WorkspaceSession(LauncherConfig())
     register_tools(mcp, session)
