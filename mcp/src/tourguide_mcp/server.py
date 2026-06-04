@@ -196,10 +196,12 @@ SHARING A SESSION:
     restore_session_state(path=…) and get their own copy (read-only to yours).
 
 Other notes:
-  - Call launch_or_attach first. If it returns a `shareUrl`, tell the user —
-    it's how others on the same network view this live workspace.
+  - Call launch_or_attach first. Do NOT offer the workspace URL as a "share"
+    link — opening it is a fresh blank workspace, not the current view. Share
+    via share_view / export_session (above).
   - Keep to one workspace tab unless the user wants parallel ones; when
-    several are open, launch_or_attach asks which to drive.
+    several are open, launch_or_attach asks which to drive. Opening a NEW tab
+    each time is slow (it must load + connect) — prefer reusing the bound tab.
 """
 
 

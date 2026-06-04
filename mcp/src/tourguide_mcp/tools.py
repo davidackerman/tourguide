@@ -249,19 +249,10 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
           - `new=true`: open a fresh tab and bind to it (parallel workspace).
           - `session_id="…"`: bind to that specific tab.
 
-        When the result has a `shareUrl`, ALWAYS report it to the user: it is
-        the address others on the same network can open to view this same
-        workspace in their own browser."""
-        result = await session.launch_or_attach(new=new, session=session_id)
-        # Make the network-shareable address impossible to miss: a live tab's
-        # `url` is localhost-only, so promote the LAN URL to `shareUrl` with a
-        # human-facing note the agent relays verbatim.
-        if isinstance(result, dict) and result.get("lanUrl"):
-            result["shareUrl"] = result["lanUrl"]
-            result["shareNote"] = (
-                f"Others on your network can view this workspace at {result['lanUrl']}"
-            )
-        return result
+        Do NOT present the workspace URL as a way to "share this view" — opening
+        it just gives a fresh blank workspace. To share the current view use
+        share_view (a Neuroglancer link) or export_session (a portable file)."""
+        return await session.launch_or_attach(new=new, session=session_id)
 
     @mcp.tool()
     async def get_session() -> dict:

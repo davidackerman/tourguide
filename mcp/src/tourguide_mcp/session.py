@@ -28,11 +28,10 @@ class WorkspaceSession:
         # for the agent to pick — don't pin it as the bound tab.
         if not result.get("ambiguous"):
             self.record = result
-        # Surface a LAN-shareable URL so the agent can tell the user how others
-        # on the network can view this same workspace.
-        lan = self.launcher.lan_url()
-        if lan and isinstance(result, dict):
-            result.setdefault("lanUrl", lan)
+        # NB: deliberately do NOT advertise the LAN workspace URL as a "share"
+        # here — opening it gives a fresh BLANK workspace, not this view. To
+        # share the actual view use share_view (a Neuroglancer link that
+        # carries the state) or export_session (a portable file).
         return result
 
     @property
