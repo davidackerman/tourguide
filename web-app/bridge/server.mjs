@@ -222,13 +222,44 @@ function handleBrowser(ws) {
   });
 }
 
-// Heartbeat: ping browsers, prune long-dead sessions.
+// Heartbeat: ping browsers, and actually prune dead sessions so a new
+// thread never attaches to a tab that has quietly gone away.
+//
+//  - A tab that closes cleanly fires ws "close" and is marked disconnected
+//    immediately (see handleBrowser). But a tab that dies WITHOUT a clean
+//    close — laptop sleep, killed browser, half-open TCP — never fires it,
+//    so without this it would read "running" forever and `pickSession`
+//    would hand it to the next agent. We catch those by staleness: a live
+//    tab pongs every interval, so no pong for STALE_MS means it's gone.
+//  - Disconnected records are dropped after DROP_MS so they don't pile up
+//    (we had 16 stale sessions accumulate before this existed).
+const PING_INTERVAL_MS = 20_000;
+const STALE_MS = Number(process.env.TG_BRIDGE_STALE_MS || 70_000); // ~3 missed pongs
+const DROP_MS = Number(process.env.TG_BRIDGE_DROP_MS || 300_000); // forget after 5 min
+
 setInterval(() => {
-  for (const s of sessions.values()) {
+  const nowMs = Date.now();
+  let changed = false;
+  for (const [id, s] of sessions) {
     if (s.ws.readyState === s.ws.OPEN) s.ws.send(JSON.stringify({ kind: "ping" }));
+    const idleMs = nowMs - Date.parse(s.record.lastSeenAt);
+    if (s.record.status === "running" && idleMs > STALE_MS) {
+      s.record.status = "disconnected";
+      changed = true;
+      log(`session pruned (no pong for ${Math.round(idleMs / 1000)}s): ${id}`);
+      try {
+        s.ws.terminate();
+      } catch {
+        /* already gone */
+      }
+    }
+    if (s.record.status === "disconnected" && idleMs > DROP_MS) {
+      sessions.delete(id);
+    }
   }
+  if (changed) broadcastToAgents(connectionStatusEvent());
   broadcastToAgents({ type: "heartbeat", at: now() });
-}, 20_000);
+}, PING_INTERVAL_MS);
 
 server.listen(PORT, () => {
   log(`Tourguide Workspace bridge v${VERSION} listening on http://localhost:${PORT}`);
