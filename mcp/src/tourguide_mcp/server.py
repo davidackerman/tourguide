@@ -179,11 +179,13 @@ The loop:
      the measurement was done, and it shows in the Agent Actions panel.
   5. Optionally fly_to the largest object, select_segments, or show a figure.
 
-PLOTS — render them yourself, pass a PNG:
-  show_plot's `code` runs in the browser's Pyodide, a SEPARATE environment
-  that does NOT have your variables/data (passing code that references your
-  DataFrame fails with NameError). Instead, render the figure in the analysis
-  env (matplotlib savefig) and call show_plot(png=<base64/data-url>).
+PLOTS — render to a .png file, pass show_plot(png_path=…):
+  Render the figure in the analysis env (matplotlib savefig to a .png) and call
+  show_plot(png_path="fig.png"). The server reads + encodes the file, so the
+  image never goes through your tokens. Do NOT base64-encode it yourself, and
+  do NOT read the png/base64 back into your context (that cost ~2 minutes in
+  testing). Also avoid show_plot's `code` path: it runs in the browser's
+  Pyodide, a separate environment without your DataFrame (fails with NameError).
 
 Other notes:
   - Call launch_or_attach first. If it returns a `shareUrl`, tell the user —

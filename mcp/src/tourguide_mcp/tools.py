@@ -9,6 +9,7 @@ anywhere, it belongs in the Workspace API, not here.
 
 from __future__ import annotations
 
+import base64
 import csv
 import json
 from pathlib import Path
@@ -222,6 +223,7 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def show_plot(
+        png_path: str | None = None,
         png: str | None = None,
         code: str | None = None,
         question: str | None = None,
@@ -229,12 +231,20 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         kind: str | None = None,
         source_table: str | None = None,
     ) -> dict:
-        """Display a plot in Tourguide. Preferred: render the figure in YOUR own
-        environment and pass it as `png` (a base64 PNG or data URL) — no runtime
-        needed in Tourguide. Alternatively pass matplotlib `code` (runs
-        in-browser against df_<class> tables) or a `question` (needs Tourguide's
-        AI backend). Returns the plot artifact id."""
+        """Display a plot in Tourguide. PREFERRED: render the figure in YOUR own
+        environment (matplotlib savefig) to a .png file and pass its `png_path`
+        — the server reads + encodes it, so the image never goes through your
+        token stream (do NOT read the file or a base64 string into your context;
+        that's slow and cost minutes in testing). `png` (an inline base64/data
+        URL) also works for small images. Alternatively pass matplotlib `code`
+        (runs in-browser against df_<class> tables) or a `question` (needs
+        Tourguide's AI backend). Returns the plot artifact id."""
         params: dict[str, Any] = {}
+        if png_path is not None:
+            p = Path(png_path).expanduser()
+            if not p.is_file():
+                raise FileNotFoundError(f"show_plot: no file at {p}")
+            png = "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()
         if png is not None:
             params["png"] = png
         if code is not None:
