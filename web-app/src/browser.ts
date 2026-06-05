@@ -256,7 +256,21 @@ function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<str
   const pz = row.com_z_nm ?? row.position_z_nm ?? row.position_z ?? row.com_z;
   const id = row.object_id;
   if (typeof px === "number" && typeof py === "number" && typeof pz === "number") {
-    viewer.flyTo([px, py, pz], id !== undefined ? String(id) : undefined, table.layer_name);
+    const segmentId = id !== undefined ? String(id) : undefined;
+    // Embedded-viewer mode (?ngViewer): the viewer lives in another process, so
+    // post the target to the bridge's control channel; the viewer-holder polls
+    // it and flies. Otherwise drive the in-page bundled viewer directly.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("ngViewer")) {
+      const port = params.get("bridgePort") || "7723";
+      void fetch(`http://${window.location.hostname}:${port}/viewer-fly`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ position: [px, py, pz], layer: table.layer_name, segmentId }),
+      }).catch(() => {});
+    } else {
+      viewer.flyTo([px, py, pz], segmentId, table.layer_name);
+    }
   } else {
     console.warn(`Row missing position columns; cannot fly. Row:`, row);
   }

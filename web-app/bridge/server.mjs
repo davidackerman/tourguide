@@ -40,6 +40,9 @@ const agents = new Set();
 const pending = new Map();
 /** monotonic counter for human-readable tab labels (workspace-1, -2, …) */
 let labelCounter = 0;
+/** latest viewer-fly target (for the embedded Python viewer control channel) */
+let lastFly = null;
+let flySeq = 0;
 
 const now = () => new Date().toISOString();
 const log = (...a) => console.log(`[bridge ${new Date().toLocaleTimeString()}]`, ...a);
@@ -221,6 +224,27 @@ const server = http.createServer((req, res) => {
         sendJson(res, 500, { ok: false, error: { message: err.message } });
       }
     });
+    return;
+  }
+  // Viewer-fly control channel for the embedded Python NG viewer. The browser
+  // (click-to-fly) and the agent POST a target; the viewer-holder polls GET and
+  // applies it. Decouples "who wants to fly" from "who owns the viewer".
+  if (req.method === "POST" && url.pathname === "/viewer-fly") {
+    let raw = "";
+    req.on("data", (c) => { raw += c; if (raw.length > 64 * 1024) req.destroy(); });
+    req.on("end", () => {
+      try {
+        const body = JSON.parse(raw);
+        lastFly = { seq: ++flySeq, ...body };
+        sendJson(res, 200, { ok: true, seq: flySeq });
+      } catch {
+        sendJson(res, 400, { ok: false, error: { message: "invalid JSON" } });
+      }
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/viewer-fly") {
+    sendJson(res, 200, lastFly || { seq: 0 });
     return;
   }
   if (req.method === "GET" && url.pathname.startsWith("/share-state/")) {

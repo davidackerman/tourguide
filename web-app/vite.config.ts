@@ -19,6 +19,23 @@ function immutableAssets(): PluginOption {
   };
 }
 
+// The bundled JS Neuroglancer needs cross-origin isolation (COOP/COEP) for
+// SharedArrayBuffer — but that isolation BLOCKS embedding a cross-origin
+// Python-NG viewer in an iframe. In embedded mode (?ngViewer=…) we don't use
+// the bundled viewer, so serve that page WITHOUT COEP so the iframe can load.
+function crossOriginIsolationExceptEmbedded(): PluginOption {
+  const apply = (server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => {
+    server.middlewares.use((req, res, next) => {
+      if (!(req.url && req.url.includes("ngViewer"))) {
+        res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+        res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+      }
+      next();
+    });
+  };
+  return { name: "coi-except-embedded", configureServer: apply, configurePreviewServer: apply };
+}
+
 // Neuroglancer uses Node-style "exports" conditions to gate which datasources,
 // kvstores, and layers get bundled. Enabling everything we care about for
 // CellMap-style data: zarr/n5/precomputed sources over s3/http with the usual
@@ -49,7 +66,7 @@ const NG_CONDITIONS = [
 
 export default defineConfig({
   base: "./",
-  plugins: [immutableAssets()],
+  plugins: [immutableAssets(), crossOriginIsolationExceptEmbedded()],
   resolve: {
     conditions: NG_CONDITIONS,
   },
@@ -63,10 +80,8 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "credentialless",
-    },
+    // COOP/COEP are applied conditionally by crossOriginIsolationExceptEmbedded
+    // (skipped for the ?ngViewer embed page so its cross-origin iframe loads).
   },
   preview: {
     port: 4173,
@@ -75,10 +90,6 @@ export default defineConfig({
     // others on the same network can open the workspace. Vite preview
     // otherwise rejects unknown Host headers ("host not allowed").
     allowedHosts: true,
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "credentialless",
-    },
   },
   build: {
     outDir: "dist",

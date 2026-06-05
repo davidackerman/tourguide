@@ -23,8 +23,12 @@ from typing import Any
 
 
 class NgViewer:
-    def __init__(self, bind: str | None = None):
+    def __init__(self, bind: str | None = None, port: int | None = None):
         self._bind = bind or os.environ.get("TG_NG_BIND", "127.0.0.1")
+        # A fixed port (TG_NG_PORT) is important for remote-dev (VS Code port
+        # forwarding / LAN access): the viewer's default random port can't be
+        # reached from a different machine without forwarding it each time.
+        self._port = port if port is not None else int(os.environ.get("TG_NG_PORT", "0"))
         self._ng = None
         self._viewer = None
 
@@ -32,7 +36,7 @@ class NgViewer:
         if self._viewer is None:
             import neuroglancer  # imported lazily so the dep is only needed in this mode
 
-            neuroglancer.set_server_bind_address(self._bind)
+            neuroglancer.set_server_bind_address(self._bind, bind_port=self._port)
             self._ng = neuroglancer
             self._viewer = neuroglancer.Viewer()
         return self._viewer
@@ -72,6 +76,36 @@ class NgViewer:
         layers.append(spec)
         st["layers"] = layers
         self.set_state(st)
+
+    def start_fly_listener(self, bridge_url: str, interval: float = 0.25) -> None:
+        """Poll the bridge's /viewer-fly control channel and apply targets to
+        this viewer — so the browser's click-to-fly (and the agent) can move the
+        viewer even though it lives in a different process. Runs in a daemon
+        thread; the viewer is the source of truth, this just drives it."""
+        import json
+        import threading
+        import time
+        import urllib.request
+
+        url = bridge_url.rstrip("/") + "/viewer-fly"
+
+        def loop() -> None:
+            seen = 0
+            while True:
+                try:
+                    with urllib.request.urlopen(url, timeout=2) as r:
+                        d = json.loads(r.read())
+                    if d.get("seq", 0) > seen:
+                        seen = d["seq"]
+                        if d.get("position"):
+                            self.fly_to(d["position"])
+                        if d.get("layer") and d.get("segmentId") is not None:
+                            self.select_segments(d["layer"], [d["segmentId"]])
+                except Exception:
+                    pass
+                time.sleep(interval)
+
+        threading.Thread(target=loop, daemon=True).start()
 
     def get_selection(self) -> dict:
         st = self.get_state()
