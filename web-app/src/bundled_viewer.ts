@@ -138,6 +138,11 @@ export class BundledViewer {
   ): void {
     const viewer = this.ensureViewer();
     if (!this.currentState) return;
+    // An explicit camera move wins over any in-flight per-layer camera holds
+    // (from recent add_layer calls) — otherwise their restore() would drag the
+    // camera straight back to the pre-add position. Snapshot the set first;
+    // each cancel mutates it.
+    for (const cancel of [...this.cameraHolds]) cancel();
     // NG's `navigationState.position.value` is in *output dim units*, not nm.
     // Even though we declare dimensions at 1 nm/unit, NG often inherits the
     // source zarr's native scale (e.g. z at 2.62 nm/unit). So we must:
@@ -335,6 +340,10 @@ export class BundledViewer {
   // for paths that bypass the signal), re-apply by reading the *new*
   // coord space and converting nm → new-NG-units. This way the camera
   // lands at the same physical place even if the units shifted.
+  // Active per-layer camera "holds" (see lockCamera). An explicit flyTo cancels
+  // them so a deliberate navigation isn't dragged back to the pre-add position.
+  private cameraHolds = new Set<() => void>();
+
   private lockCamera(): (holdMs?: number) => void {
     const viewer = this.ensureViewer();
     const navState = viewer.navigationState as any;
@@ -381,9 +390,17 @@ export class BundledViewer {
                 : 1;
             return scale > 0 ? (nm * nmToBase) / scale : nm;
           });
+          // Compare in Float32. NG stores position as a Float32Array, so the
+          // readback `cur` is float32-rounded; `ordered` is float64. For a
+          // non-trivial position those are NEVER strictly equal, so restore
+          // would re-set position.value on every fire — and the assignment
+          // re-fires position.changed, recursing into restore: a synchronous
+          // storm that freezes the page. Rounding `ordered` to Float32 first
+          // makes the compare idempotent so it settles after one correction.
+          const orderedF32 = Float32Array.from(ordered);
           const cur = navState.position.value as Float32Array | undefined;
-          if (!cur || !sameArray(cur, ordered)) {
-            navState.position.value = Float32Array.from(ordered);
+          if (!cur || !sameArray(cur, orderedF32)) {
+            navState.position.value = orderedF32;
           }
         }
         if (csScaleBefore !== undefined && navState?.zoomFactor && navState.zoomFactor.value !== csScaleBefore) {
@@ -409,17 +426,21 @@ export class BundledViewer {
     sub(navState?.depthRange?.changed);
     sub(navState?.coordinateSpace?.changed);
 
+    const teardown = (): void => {
+      if (!active) return;
+      active = false;
+      for (const u of subs) u();
+      this.cameraHolds.delete(teardown);
+    };
+    this.cameraHolds.add(teardown);
+
     return (holdMs = 2000): void => {
       restore();
       requestAnimationFrame(restore);
       setTimeout(restore, 100);
       setTimeout(restore, 400);
       setTimeout(restore, 1000);
-      setTimeout(() => {
-        restore();
-        active = false;
-        for (const u of subs) u();
-      }, holdMs);
+      setTimeout(teardown, holdMs);
     };
   }
 
