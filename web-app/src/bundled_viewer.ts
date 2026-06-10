@@ -314,6 +314,29 @@ export class BundledViewer {
       console.warn("[viewer] addLayerFromSpec: layer spec has no name", layer);
       return;
     }
+    // First data load establishes NG's global coordinate space. The makeLayer
+    // path below does NOT set it up — so as the first/only layer it renders
+    // nothing (no coordinate frame to draw in) AND wedges fly_to (which needs a
+    // coordinate space), which was the agent-drive black-screen + freeze.
+    // Bootstrap through the proven descriptor → restoreState path (identical to
+    // load_descriptor): it declares dimensions and auto-fits to the data.
+    // Later add_layer calls (coordinate space now established) take the
+    // lightweight makeLayer path below.
+    if (!this.currentState) {
+      this.loadDescriptor({
+        name,
+        display_name: name,
+        voxel_size_nm: [4, 4, 4],
+        layers: [
+          {
+            name,
+            type: layer.type === "image" ? "image" : "segmentation",
+            source: layer.source as string | string[],
+          },
+        ],
+      });
+      return;
+    }
     const release = this.lockCamera();
     const existing = viewer.layerManager.getLayerByName(name);
     let index: number | undefined;
