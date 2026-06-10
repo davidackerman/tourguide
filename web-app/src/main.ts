@@ -1070,14 +1070,34 @@ function resolveBridgeWsUrl(): string {
   return `ws://${host}:${port}/browser`;
 }
 
+// Each workspace gets a unique, addressable session id carried in the URL
+// (?session=<id>). Reopening or sharing that URL returns to the same id, and
+// the bridge keys routing on it — so concurrent tabs/users don't collide
+// (the old default routed to "most-recently-created", which let a second tab
+// steal commands). Minted and written into the URL on first open if absent.
+function resolveSessionId(): string {
+  const params = new URLSearchParams(window.location.search);
+  let id = params.get("session");
+  if (!id) {
+    id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `session-${Date.now()}`;
+    params.set("session", id);
+    history.replaceState(
+      null,
+      "",
+      window.location.pathname + "?" + params.toString() + window.location.hash,
+    );
+  }
+  return id;
+}
+
 function startBridgeIfWorkspace(): void {
   if (!isWorkspaceMode() || !workspacePanel) return;
   const bridgeWsUrl = resolveBridgeWsUrl();
 
-  const sessionId =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `session-${Date.now()}`;
+  const sessionId = resolveSessionId();
 
   const store = new SessionStore(
     sessionId,
