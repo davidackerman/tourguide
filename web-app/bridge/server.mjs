@@ -184,7 +184,16 @@ async function handleStateOp(request) {
 
 const server = http.createServer((req, res) => {
   if (req.method === "OPTIONS") {
-    res.writeHead(204, CORS);
+    // Private Network Access: a public HTTPS page (e.g. a hosted Tourguide
+    // build) reaching this localhost bridge triggers a PNA preflight. Echo
+    // the allow header so Chrome lets the real request through. localhost is
+    // already mixed-content-exempt; PNA is the extra gate Chrome adds for
+    // public→private requests. (The page still connects out to us; we never
+    // reach into it — same trust model as Babylon NME's local MCP server.)
+    const pna = req.headers["access-control-request-private-network"] === "true"
+      ? { "Access-Control-Allow-Private-Network": "true" }
+      : {};
+    res.writeHead(204, { ...CORS, ...pna });
     res.end();
     return;
   }

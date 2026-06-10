@@ -1046,12 +1046,33 @@ copyNgBtn.addEventListener("click", async () => {
 // this session. The browser is the source of truth for workspace state;
 // the bridge just relays ops and streams the action history.
 // ---------------------------------------------------------------------------
-function startBridgeIfWorkspace(): void {
-  if (!isWorkspaceMode() || !workspacePanel) return;
+// Resolve the bridge WebSocket URL. Default: the page's own host (local dev +
+// LAN sharing, where the page and bridge share a host). Override: a HOSTED page
+// must point at the user's LOCAL bridge — the bridge runs on their machine, not
+// on the static host. `?bridge=host[:port]` (or the persisted Connect setting)
+// forces it; localhost is mixed-content-exempt so ws://localhost works from an
+// HTTPS page. See memory: public-page-drives-local-bridge.
+function resolveBridgeWsUrl(): string {
   const params = new URLSearchParams(window.location.search);
   const port = params.get("bridgePort") || "7723";
+  let stored = "";
+  try {
+    stored = localStorage.getItem("tg.bridgeUrl") || "";
+  } catch {
+    /* localStorage may be unavailable (private mode) — fall through */
+  }
+  const override = params.get("bridge") || stored;
+  if (override) {
+    const [oHost, oPort] = override.replace(/^wss?:\/\//, "").replace(/\/.*$/, "").split(":");
+    return `ws://${oHost || "localhost"}:${oPort || port}/browser`;
+  }
   const host = window.location.hostname || "localhost";
-  const bridgeWsUrl = `ws://${host}:${port}/browser`;
+  return `ws://${host}:${port}/browser`;
+}
+
+function startBridgeIfWorkspace(): void {
+  if (!isWorkspaceMode() || !workspacePanel) return;
+  const bridgeWsUrl = resolveBridgeWsUrl();
 
   const sessionId =
     typeof crypto !== "undefined" && "randomUUID" in crypto
