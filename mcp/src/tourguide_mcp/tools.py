@@ -280,18 +280,33 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return {"recipes": out, "userRecipeDir": str(_USER_RECIPES)}
 
     @mcp.tool()
-    async def measure(source: str, name: str = "measurements", scale: str | None = None) -> dict:
+    async def measure(
+        source: str,
+        name: str = "measurements",
+        scale: str | None = None,
+        roi: str | None = None,
+    ) -> dict:
         """Measure every object in a segmentation layer and ingest the result as
         a table (the predesigned `measure_objects` recipe). `source` is the
         layer's data URL from get_session (e.g.
         n5://s3://.../labels/mito_seg). Runs server-side in the analysis env —
         fast, consistent coordinates, no Pyodide, no permission prompt. The
         table has object_id, volume_nm_3, voxel_count, com_x/y/z_nm (click-to-
-        fly). Optional `scale` forces a multiscale level (e.g. "s2")."""
+        fly). Optional `scale` forces a multiscale level (e.g. "s2").
+
+        Optional `roi` restricts measurement to a sub-cube in WORLD nm, as
+        "X0,Y0,Z0,X1,Y1,Z1". Only that cube is read AND the scale budget is
+        computed against it — so a small ROI unlocks a FINER resolution than the
+        whole volume could afford (use this for high-res analysis of one
+        region). Centroids stay in absolute world coords."""
         recipe = _find_recipe("measure_objects")
         if recipe is None:
             raise FileNotFoundError("measure_objects recipe not found in the analysis env")
-        extra = ["--scale", scale] if scale else []
+        extra: list[str] = []
+        if scale:
+            extra += ["--scale", scale]
+        if roi:
+            extra += ["--roi", roi]
         return await _run_and_ingest(recipe, source, name, extra)
 
     @mcp.tool()
