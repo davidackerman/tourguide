@@ -1152,7 +1152,14 @@ function startBridgeIfWorkspace(): void {
     getBackend: () => backend,
   };
 
-  startWorkspaceBridge(ctx, workspacePanel, { bridgeWsUrl, viewOnly, viewOf });
+  startWorkspaceBridge(ctx, workspacePanel, {
+    bridgeWsUrl,
+    viewOnly,
+    viewOf,
+    // The bridge reports its LAN IP on register; use it for computed-layer
+    // artifact URLs so a shared session is reachable by a peer, not just us.
+    onBridgeHost: (h) => viewer.setBridgeHost(h),
+  });
 }
 
 // Lightweight image modal for plots created via the Workspace API. Workspace
