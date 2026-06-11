@@ -5,28 +5,38 @@
 // Cursor, a local script, …) over the Workspace API. The mode is selected
 // with `?mode=workspace` / `?mode=chat`.
 //
-// Migration policy (intentional, see the agent-workspace plan):
-//   - During early phases the DEFAULT stays `chat` so existing links and
-//     muscle memory keep working.
-//   - Once the MCP adapter is usable, flip DEFAULT_MODE to "workspace" and
-//     legacy chat lives on at `?mode=chat`.
-//   - Eventually chat is removed after a deprecation window.
+// Migration status:
+//   - `workspace` is now the DEFAULT (the MCP adapter is in daily use).
+//   - legacy `?mode=chat` still works but is DEPRECATED — it logs a warning and
+//     will be removed after the deprecation window. Don't build new features on
+//     chat mode; drive the workspace from an external agent instead.
 //
 // Keep this module dependency-free so anything (UI, bridge, handlers) can
 // import it without pulling in the viewer or DB.
 
 export type TourguideMode = "workspace" | "chat";
 
-// Flip to "workspace" when Phase 3 (MCP adapter) is usable. Until then the
-// default remains chat so nothing the user relies on changes silently.
-export const DEFAULT_MODE: TourguideMode = "chat";
+// The agent-driven workspace is the product; chat mode is deprecated legacy.
+export const DEFAULT_MODE: TourguideMode = "workspace";
+
+let chatDeprecationWarned = false;
 
 /** Resolve the active mode from the current URL (`?mode=…`), falling back to
  *  DEFAULT_MODE. Unknown values are treated as the default. */
 export function resolveMode(search: string = window.location.search): TourguideMode {
   try {
     const raw = new URLSearchParams(search).get("mode")?.toLowerCase();
-    if (raw === "workspace" || raw === "chat") return raw;
+    if (raw === "workspace") return "workspace";
+    if (raw === "chat") {
+      if (!chatDeprecationWarned) {
+        chatDeprecationWarned = true;
+        console.warn(
+          "[tourguide] ?mode=chat is DEPRECATED — the agent workspace is now the default. " +
+            "Chat mode will be removed in a future release; drive the workspace from an external agent instead.",
+        );
+      }
+      return "chat";
+    }
   } catch {
     /* malformed query string — fall through to default */
   }
