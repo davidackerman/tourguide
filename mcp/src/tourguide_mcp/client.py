@@ -1,0 +1,87 @@
+"""HTTP client for the Tourguide Workspace API bridge.
+
+Mirrors web-app/src/workspace_api/transport_http.ts exactly: POST a
+WorkspaceRequest to /op, get a WorkspaceResponse back. The MCP adapter and
+the Python SDK both build on this.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+import httpx
+
+
+class WorkspaceError(RuntimeError):
+    """A Workspace operation returned ok:false, or the bridge was unreachable."""
+
+
+class WorkspaceClient:
+    def __init__(self, base_url: str, source: str = "mcp", op_timeout: float = 35.0):
+        self.base_url = base_url.rstrip("/")
+        self.source = source
+        self.op_timeout = op_timeout
+
+    async def health(self) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{self.base_url}/health")
+            r.raise_for_status()
+            return r.json()
+
+    async def is_healthy(self) -> bool:
+        try:
+            h = await self.health()
+            return bool(h.get("ok"))
+        except Exception:
+            return False
+
+    async def sessions(self) -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{self.base_url}/sessions")
+            r.raise_for_status()
+            return r.json()
+
+    async def share_state(self, state: Any) -> str:
+        """Store a viewer state on the bridge for a short LAN link; returns its
+        id (the recipient's browser fetches it back via /share-state/<id>)."""
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(f"{self.base_url}/share-state", json=state)
+        if r.status_code >= 400:
+            raise WorkspaceError(f"share-state failed: HTTP {r.status_code}")
+        body = r.json()
+        if not body.get("ok") or not body.get("id"):
+            raise WorkspaceError("share-state: bridge returned no id")
+        return body["id"]
+
+    async def call(
+        self, op: str, params: dict[str, Any] | None = None, session: str | None = None
+    ) -> Any:
+        """Issue one operation, returning its result or raising WorkspaceError.
+
+        `session` pins the op to a specific workspace tab (by sessionId). When
+        omitted the bridge routes to the sole live tab, or errors if several
+        are open rather than guessing."""
+        request: dict[str, Any] = {
+            "id": str(uuid.uuid4()),
+            "op": op,
+            "params": params,
+            "source": self.source,
+        }
+        if session is not None:
+            request["session"] = session
+        try:
+            async with httpx.AsyncClient(timeout=self.op_timeout) as c:
+                r = await c.post(f"{self.base_url}/op", json=request)
+        except httpx.HTTPError as e:
+            raise WorkspaceError(
+                f"could not reach Tourguide bridge at {self.base_url}: {e}. "
+                "Is the bridge running (npm run bridge) and a workspace tab open?"
+            ) from e
+        if r.status_code >= 400:
+            raise WorkspaceError(f"bridge /op {r.status_code}: {r.text}")
+        env = r.json()
+        if not env.get("ok"):
+            msg = (env.get("error") or {}).get("message", "workspace op failed")
+            raise WorkspaceError(msg)
+        return env.get("result")

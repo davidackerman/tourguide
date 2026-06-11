@@ -21,6 +21,13 @@ import { loadPromptHistory, mergePrompts } from "./prompt_history.js";
 import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import { createShareLink, fetchHealth, fetchShareLink } from "./remote_analysis.js";
 import { openWelcomeDialog, hasSeenWelcome } from "./welcome_ui.js";
+import { resolveMode, applyModeToDocument, isWorkspaceMode } from "./mode.js";
+import { renderWorkspacePanel, type WorkspacePanelHandle } from "./workspace_ui.js";
+import { SessionStore } from "./workspace_api/session_state.js";
+import { startWorkspaceBridge } from "./workspace_api/bridge.js";
+import type { WorkspaceContext } from "./workspace_api/handlers.js";
+import type { PlotArtifact } from "./workspace_api/protocol.js";
+import type { QueryUIHandle } from "./query_ui.js";
 import type { CatalogEntry, DatasetDescriptor } from "./descriptor.js";
 
 const CATALOG_URL = "./catalog.json";
@@ -166,12 +173,44 @@ let currentIsCustom = false;
 // loaded. Replaces what used to be an auto-loaded demo. Gives the user
 // big obvious next-step buttons instead of waiting for a load they
 // didn't ask for.
+// Fetch a shared viewer state from the bridge by id (`?state=<id>`) and apply
+// it. Returns true if it loaded. Lets a short Tourguide link carry the view
+// without the whole state in the URL — the bridge serves it over the LAN.
+async function maybeLoadSharedState(): Promise<boolean> {
+  const params = new URLSearchParams(window.location.search);
+  const id = params.get("state");
+  if (!id) return false;
+  const port = params.get("bridgePort") || "7723";
+  const host = window.location.hostname || "localhost";
+  try {
+    const res = await fetch(`http://${host}:${port}/share-state/${encodeURIComponent(id)}`);
+    if (!res.ok) return false;
+    viewer.applyNgState((await res.json()) as Record<string, unknown>);
+    return true;
+  } catch (err) {
+    console.warn("[share-state] failed to load:", (err as Error).message);
+    return false;
+  }
+}
+
+// Embed an external Neuroglancer viewer (the in-process Python NG instance)
+// as an iframe filling the viewer pane. Viewer control comes from the agent
+// via the MCP (direct), not from this page.
+function renderEmbeddedViewer(url: string): void {
+  ngHost.innerHTML = "";
+  const frame = document.createElement("iframe");
+  frame.src = url;
+  frame.className = "embedded-viewer";
+  frame.setAttribute("allow", "cross-origin-isolated");
+  ngHost.appendChild(frame);
+}
+
 function renderEmptyViewerState(): void {
   ngHost.innerHTML = `
     <div class="empty-viewer">
       <div class="empty-viewer-card">
         <h2>No dataset loaded</h2>
-        <p>Pick how you'd like to start:</p>
+        <p>${isWorkspaceMode() ? "Ask the agent to load data, or load it yourself:" : "Pick how you'd like to start:"}</p>
         <div class="empty-viewer-actions">
           <button class="btn-primary" data-empty-action="load">+ Load your data</button>
           <button class="btn-secondary" data-empty-action="catalog" ${entries.length === 0 ? "disabled" : ""}>Browse demo catalog</button>
@@ -290,18 +329,46 @@ updateBackendIndicator();
   }
 }
 
-const queryHandle = renderQueryBox(queryHost, {
-  getDB: () => currentDB,
-  setDB: (db) => {
-    currentDB = db;
-    if (browserHost && currentDB.tables.length > 0) {
-      void renderStructuredBrowser(browserHost, { db: currentDB, viewer });
-    }
-  },
-  getDescriptor: () => currentDescriptor,
-  getBackend: () => backend,
-  viewer,
-});
+// Mode selection. Workspace mode swaps the chat composer for the
+// agent-connection + action-history panel and hides chat-only chrome
+// (the AI provider indicator) via the body[data-mode] CSS gate. Tables,
+// plots, viewer, saved states and local-folder support all stay.
+const mode = resolveMode();
+applyModeToDocument(mode);
+
+// In chat mode the chat composer returns a real handle; in workspace mode
+// there is no chat thread, so share/replay paths get a no-op stub that
+// reports an empty session.
+let queryHandle: QueryUIHandle;
+let workspacePanel: WorkspacePanelHandle | null = null;
+if (isWorkspaceMode()) {
+  workspacePanel = renderWorkspacePanel(queryHost);
+  // Hide non-agentic compute chrome: the agent runs analysis/recipes and writes
+  // computed layers, so the in-browser Analyze / Custom / Save-zarr buttons are
+  // redundant here. (Load / Share / Copy NG stay — Copy NG is provenance.)
+  for (const id of ["analyze-btn", "custom-btn", "download-btn"]) {
+    document.getElementById(id)?.style.setProperty("display", "none");
+  }
+  // Clicking a docked plot thumbnail enlarges it in the modal.
+  workspacePanel.onOpenPlot((artifact) => showPlotModal(artifact));
+  queryHandle = {
+    getSerializedSession: () => [],
+    replaySerializedSession: () => {},
+  };
+} else {
+  queryHandle = renderQueryBox(queryHost, {
+    getDB: () => currentDB,
+    setDB: (db) => {
+      currentDB = db;
+      if (browserHost && currentDB.tables.length > 0) {
+        void renderStructuredBrowser(browserHost, { db: currentDB, viewer });
+      }
+    },
+    getDescriptor: () => currentDescriptor,
+    getBackend: () => backend,
+    viewer,
+  });
+}
 
 async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
   let descriptor: DatasetDescriptor;
@@ -439,6 +506,20 @@ async function init(): Promise<void> {
   // user on the page.
   await maybeExpandShareId();
 
+  // Embedded-viewer mode (`?ngViewer=<url>`): the viewer is an external
+  // (in-process Python Neuroglancer) instance — show it in an iframe instead
+  // of mounting the bundled JS viewer. The workspace panel (tables/plots) and
+  // the bridge keep working; the agent drives the viewer directly via the MCP.
+  const embedUrl = new URLSearchParams(window.location.search).get("ngViewer");
+  if (embedUrl) {
+    renderEmbeddedViewer(embedUrl);
+    return;
+  }
+
+  // Short Tourguide share link (`?state=<id>`): the viewer state lives in the
+  // bridge's share store, fetched over the LAN. Apply it and skip empty state.
+  const sharedStateLoaded = await maybeLoadSharedState();
+
   const permalinkState = decodeState(window.location.search, window.location.hash);
   if (permalinkState.descriptor) {
     loadDescriptorDirect(permalinkState.descriptor);
@@ -448,16 +529,16 @@ async function init(): Promise<void> {
   ) {
     select.value = String(permalinkState.catalogIndex);
     await loadEntry(entries[permalinkState.catalogIndex], permalinkState.catalogIndex);
-  } else {
+  } else if (!sharedStateLoaded) {
     // No permalink → don't auto-load anything. The empty state in
     // #ng-host gives the user clear next-step buttons (Load / pick
     // from catalog / open Welcome). Auto-loading the first catalog
     // entry was confusing — users who wanted to start clean had to
     // wait for the demo to load before they could load their own.
     renderEmptyViewerState();
-    // Show the first-run Welcome modal automatically. Returns
-    // immediately if the user has dismissed it before.
-    void maybeShowWelcome();
+    // In agentic (workspace) mode the agent drives loading, so skip the
+    // first-run Welcome modal — it's chat-mode onboarding chrome.
+    if (!isWorkspaceMode()) void maybeShowWelcome();
   }
   if (permalinkState.query) {
     const input = document.querySelector<HTMLInputElement>(".query-input");
@@ -965,4 +1046,140 @@ copyNgBtn.addEventListener("click", async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Workspace API bridge — in workspace mode, connect to the local bridge
+// server so external agents (MCP / Python SDK / local scripts) can drive
+// this session. The browser is the source of truth for workspace state;
+// the bridge just relays ops and streams the action history.
+// ---------------------------------------------------------------------------
+// Resolve the bridge WebSocket URL. Default: the page's own host (local dev +
+// LAN sharing, where the page and bridge share a host). Override: a HOSTED page
+// must point at the user's LOCAL bridge — the bridge runs on their machine, not
+// on the static host. `?bridge=host[:port]` (or the persisted Connect setting)
+// forces it; localhost is mixed-content-exempt so ws://localhost works from an
+// HTTPS page. See memory: public-page-drives-local-bridge.
+function resolveBridgeWsUrl(): string {
+  const params = new URLSearchParams(window.location.search);
+  const port = params.get("bridgePort") || "7723";
+  let stored = "";
+  try {
+    stored = localStorage.getItem("tg.bridgeUrl") || "";
+  } catch {
+    /* localStorage may be unavailable (private mode) — fall through */
+  }
+  const override = params.get("bridge") || stored;
+  if (override) {
+    const [oHost, oPort] = override.replace(/^wss?:\/\//, "").replace(/\/.*$/, "").split(":");
+    return `ws://${oHost || "localhost"}:${oPort || port}/browser`;
+  }
+  const host = window.location.hostname || "localhost";
+  return `ws://${host}:${port}/browser`;
+}
+
+// Each workspace gets a unique, addressable session id carried in the URL
+// (?session=<id>). Reopening or sharing that URL returns to the same id, and
+// the bridge keys routing on it — so concurrent tabs/users don't collide
+// (the old default routed to "most-recently-created", which let a second tab
+// steal commands). Minted and written into the URL on first open if absent.
+function resolveSessionId(): string {
+  const params = new URLSearchParams(window.location.search);
+  let id = params.get("session");
+  if (!id) {
+    id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `session-${Date.now()}`;
+    params.set("session", id);
+    history.replaceState(
+      null,
+      "",
+      window.location.pathname + "?" + params.toString() + window.location.hash,
+    );
+  }
+  return id;
+}
+
+function startBridgeIfWorkspace(): void {
+  if (!isWorkspaceMode() || !workspacePanel) return;
+  const bridgeWsUrl = resolveBridgeWsUrl();
+  // The viewer rewrites agent-computed /artifacts/ layer URLs to this host, so
+  // shared sessions fetch from the host machine (not a peer's own localhost).
+  try {
+    viewer.setBridgeHost(new URL(bridgeWsUrl.replace(/^ws/, "http")).host);
+  } catch {
+    /* malformed bridge URL — artifact rewriting stays a no-op */
+  }
+
+  // Read-only share (?view=1): register under a FRESH id so the viewer never
+  // collides with or hijacks the owner's live session, view the shared session
+  // (?session) via `viewOf`, and never persist back. Owner mode keeps the
+  // stable ?session id and full read/write.
+  const viewParams = new URLSearchParams(window.location.search);
+  const viewOnly = viewParams.get("view") === "1";
+  const sessionId = viewOnly
+    ? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `view-${Date.now()}`)
+    : resolveSessionId();
+  const viewOf = viewOnly ? viewParams.get("session") || undefined : undefined;
+
+  const store = new SessionStore(
+    sessionId,
+    {
+      getViewerState: () => viewer.getNgState(),
+      applyViewerState: (s) => viewer.applyNgState(s as Record<string, unknown>),
+      getDescriptorState: () => currentDescriptor,
+      getTableIds: () => (currentDB?.tables ?? []).map((t) => t.table_name),
+      getPlotIds: () => [],
+    },
+    () => new Date().toISOString(),
+  );
+
+  const ctx: WorkspaceContext = {
+    sessionId,
+    mode: "workspace",
+    viewer,
+    store,
+    getDB: () => currentDB,
+    setDB: (db) => {
+      currentDB = db;
+    },
+    getDescriptor: () => currentDescriptor,
+    loadDescriptor: (d) => loadDescriptorDirect(d),
+    refreshBrowser: () => {
+      if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
+    },
+    displayPlot: (artifact) => workspacePanel?.addPlot(artifact),
+    displayShareLink: (url, label) => workspacePanel?.addShareLink(url, label),
+    getBackend: () => backend,
+  };
+
+  startWorkspaceBridge(ctx, workspacePanel, { bridgeWsUrl, viewOnly, viewOf });
+}
+
+// Lightweight image modal for plots created via the Workspace API. Workspace
+// mode has no chat thread to render into, so show_plot pops the rendered
+// figure here; it's also persisted as a PlotArtifact in the session store.
+function showPlotModal(artifact: PlotArtifact): void {
+  if (!artifact.pngDataUrl) return;
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-label="Plot" style="max-width: 820px;">
+      <header class="modal-header">
+        <h2>${(artifact.title || "Plot").replace(/&/g, "&amp;").replace(/</g, "&lt;")}</h2>
+        <button class="modal-close" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <img alt="${(artifact.title || "plot").replace(/"/g, "&quot;")}" src="${artifact.pngDataUrl}" style="width:100%; height:auto; border-radius:4px;" />
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const close = (): void => overlay.remove();
+  overlay.querySelector(".modal-close")?.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+}
+
 void init();
+startBridgeIfWorkspace();

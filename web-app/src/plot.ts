@@ -141,6 +141,33 @@ interface PlotPlan {
   explanation?: string;
 }
 
+// Render a plot from matplotlib code directly, no LLM. Used by the
+// Workspace API's show_plot — the external agent already wrote the code,
+// so Tourguide just materializes the tables as df_<organelle_class> and
+// runs it. Same execution path as runPlotQuery's back half.
+export async function renderPlotFromCode(
+  code: string,
+  db: DatasetDB,
+  progress?: ProgressFn,
+): Promise<PlotResult> {
+  if (!code.trim()) throw new Error("show_plot: empty code");
+  const py = await loadPyodide(progress);
+  progress?.("Loading data into Python…");
+  py.globals.set("_tables_json", tablesToJson(db));
+  await py.runPythonAsync(SETUP_PY);
+  await py.runPythonAsync(`
+_dfs = _materialize_tables(_tables_json)
+for _k, _v in _dfs.items():
+    globals()[_k] = _v
+import numpy as np
+`);
+  progress?.("Running plot code…");
+  await py.runPythonAsync(RUN_TEMPLATE(code));
+  const b64 = py.globals.get("_PLOT_PNG") as string;
+  if (!b64) throw new Error("Plot script did not produce a figure");
+  return { code, png_data_url: `data:image/png;base64,${b64}` };
+}
+
 export async function runPlotQuery(
   question: string,
   db: DatasetDB,

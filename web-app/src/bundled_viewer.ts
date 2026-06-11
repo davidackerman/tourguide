@@ -62,12 +62,54 @@ export class BundledViewer {
   private container: HTMLElement;
   private currentState: ReturnType<typeof descriptorToNgState> | null = null;
 
+  // Host:port of the bridge this page is using. Agent-computed artifact layers
+  // are served at <bridge>/artifacts/… ; we rewrite their host to this so a LAN/
+  // VPN peer fetches from the host machine, not their own localhost. Set by
+  // main.ts from the bridge URL the page connects to.
+  private bridgeHost = "";
+  setBridgeHost(hostPort: string): void {
+    this.bridgeHost = hostPort;
+  }
+  private rewriteArtifactUrl(u: unknown): unknown {
+    if (typeof u !== "string" || !this.bridgeHost) return u;
+    // zarr://http://<host>/artifacts/…  ->  zarr://http://<bridgeHost>/artifacts/…
+    return u.replace(
+      /^((?:zarr|n5|precomputed):\/\/https?:\/\/)[^/]+(\/artifacts\/)/i,
+      `$1${this.bridgeHost}$2`,
+    );
+  }
+  private rewriteArtifactSource(src: unknown): unknown {
+    if (Array.isArray(src)) return src.map((s) => this.rewriteArtifactSource(s));
+    if (src && typeof src === "object" && "url" in (src as Record<string, unknown>)) {
+      const o = src as Record<string, unknown>;
+      return { ...o, url: this.rewriteArtifactUrl(o.url) };
+    }
+    return this.rewriteArtifactUrl(src);
+  }
+  private rewriteStateArtifacts<T>(state: T): T {
+    const s = state as unknown as { layers?: unknown };
+    if (!s || typeof s !== "object" || !Array.isArray(s.layers) || !this.bridgeHost) return state;
+    return {
+      ...(state as object),
+      layers: s.layers.map((l) =>
+        l && typeof l === "object" && "source" in (l as Record<string, unknown>)
+          ? { ...(l as Record<string, unknown>), source: this.rewriteArtifactSource((l as Record<string, unknown>).source) }
+          : l,
+      ),
+    } as T;
+  }
+
   constructor(container: HTMLElement) {
     this.container = container;
   }
 
   private ensureViewer(): NgViewer {
     if (this.viewer) return this.viewer;
+    // Clear any placeholder DOM (e.g. the "No dataset loaded" empty-state card
+    // that main.ts puts in #ng-host) before mounting, or Neuroglancer ends up
+    // rendered *underneath* it — which looked like set_viewer_state did
+    // nothing until a second load cleared the card.
+    while (this.container.firstChild) this.container.removeChild(this.container.firstChild);
     // Neuroglancer mounts inside a target element. We give it our container.
     this.viewer = setupDefaultViewer({ target: this.container });
     return this.viewer;
@@ -133,6 +175,11 @@ export class BundledViewer {
   ): void {
     const viewer = this.ensureViewer();
     if (!this.currentState) return;
+    // An explicit camera move wins over any in-flight per-layer camera holds
+    // (from recent add_layer calls) — otherwise their restore() would drag the
+    // camera straight back to the pre-add position. Snapshot the set first;
+    // each cancel mutates it.
+    for (const cancel of [...this.cameraHolds]) cancel();
     // NG's `navigationState.position.value` is in *output dim units*, not nm.
     // Even though we declare dimensions at 1 nm/unit, NG often inherits the
     // source zarr's native scale (e.g. z at 2.62 nm/unit). So we must:
@@ -215,8 +262,9 @@ export class BundledViewer {
   // descriptor has set up the layer scaffolding.
   applyNgState(state: Record<string, unknown>): void {
     const viewer = this.ensureViewer();
-    viewer.state.restoreState(state);
-    this.currentState = state as any;
+    const rewritten = this.rewriteStateArtifacts(state);
+    viewer.state.restoreState(rewritten);
+    this.currentState = rewritten as any;
   }
 
   // Add a Neuroglancer segmentation layer that only renders the mesh
@@ -304,6 +352,32 @@ export class BundledViewer {
       console.warn("[viewer] addLayerFromSpec: layer spec has no name", layer);
       return;
     }
+    // Point any agent-computed /artifacts/ source at the bridge host this page
+    // uses (no-op for S3/http sources). Keeps shared sessions working for peers.
+    if ("source" in layer) layer = { ...layer, source: this.rewriteArtifactSource(layer.source) };
+    // First data load establishes NG's global coordinate space. The makeLayer
+    // path below does NOT set it up — so as the first/only layer it renders
+    // nothing (no coordinate frame to draw in) AND wedges fly_to (which needs a
+    // coordinate space), which was the agent-drive black-screen + freeze.
+    // Bootstrap through the proven descriptor → restoreState path (identical to
+    // load_descriptor): it declares dimensions and auto-fits to the data.
+    // Later add_layer calls (coordinate space now established) take the
+    // lightweight makeLayer path below.
+    if (!this.currentState) {
+      this.loadDescriptor({
+        name,
+        display_name: name,
+        voxel_size_nm: [4, 4, 4],
+        layers: [
+          {
+            name,
+            type: layer.type === "image" ? "image" : "segmentation",
+            source: layer.source as string | string[],
+          },
+        ],
+      });
+      return;
+    }
     const release = this.lockCamera();
     const existing = viewer.layerManager.getLayerByName(name);
     let index: number | undefined;
@@ -330,6 +404,10 @@ export class BundledViewer {
   // for paths that bypass the signal), re-apply by reading the *new*
   // coord space and converting nm → new-NG-units. This way the camera
   // lands at the same physical place even if the units shifted.
+  // Active per-layer camera "holds" (see lockCamera). An explicit flyTo cancels
+  // them so a deliberate navigation isn't dragged back to the pre-add position.
+  private cameraHolds = new Set<() => void>();
+
   private lockCamera(): (holdMs?: number) => void {
     const viewer = this.ensureViewer();
     const navState = viewer.navigationState as any;
@@ -376,9 +454,17 @@ export class BundledViewer {
                 : 1;
             return scale > 0 ? (nm * nmToBase) / scale : nm;
           });
+          // Compare in Float32. NG stores position as a Float32Array, so the
+          // readback `cur` is float32-rounded; `ordered` is float64. For a
+          // non-trivial position those are NEVER strictly equal, so restore
+          // would re-set position.value on every fire — and the assignment
+          // re-fires position.changed, recursing into restore: a synchronous
+          // storm that freezes the page. Rounding `ordered` to Float32 first
+          // makes the compare idempotent so it settles after one correction.
+          const orderedF32 = Float32Array.from(ordered);
           const cur = navState.position.value as Float32Array | undefined;
-          if (!cur || !sameArray(cur, ordered)) {
-            navState.position.value = Float32Array.from(ordered);
+          if (!cur || !sameArray(cur, orderedF32)) {
+            navState.position.value = orderedF32;
           }
         }
         if (csScaleBefore !== undefined && navState?.zoomFactor && navState.zoomFactor.value !== csScaleBefore) {
@@ -404,17 +490,21 @@ export class BundledViewer {
     sub(navState?.depthRange?.changed);
     sub(navState?.coordinateSpace?.changed);
 
+    const teardown = (): void => {
+      if (!active) return;
+      active = false;
+      for (const u of subs) u();
+      this.cameraHolds.delete(teardown);
+    };
+    this.cameraHolds.add(teardown);
+
     return (holdMs = 2000): void => {
       restore();
       requestAnimationFrame(restore);
       setTimeout(restore, 100);
       setTimeout(restore, 400);
       setTimeout(restore, 1000);
-      setTimeout(() => {
-        restore();
-        active = false;
-        for (const u of subs) u();
-      }, holdMs);
+      setTimeout(teardown, holdMs);
     };
   }
 

@@ -1,0 +1,30 @@
+[project]
+name = "tourguide-analysis"
+version = "0.1.0"
+description = "Pre-loaded compute environment for measuring microscopy segmentations and pushing results into a Tourguide workspace. The agent runs analysis here so it never has to pip-install mid-task."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Array IO over the cloud: open the zarr/n5/precomputed source a layer
+    # points at, straight from S3/GCS/http, without downloading it whole.
+    "tensorstore>=0.1.60",
+    "zarr>=2.17",
+    "numcodecs>=0.12",
+    "s3fs>=2024.2.0",
+    "fsspec>=2024.2.0",
+    "aiohttp>=3.9",
+    # Measurement: connected-components stats + region properties.
+    "connected-components-3d>=3.12",  # cc3d.statistics — fast per-label volume/centroid/bbox
+    "scikit-image>=0.22",             # regionprops, marching_cubes (surface area)
+    "scipy>=1.11",
+    "numpy>=1.24",
+    # Chunked / out-of-core passes over volumes too big to load whole.
+    "dask>=2024.2.0",
+    # Tables + figures to hand back to the workspace.
+    "pandas>=2.1",
+    "matplotlib>=3.8",
+    "trimesh>=4.0",                   # load published meshes (e.g. for surface area)
+]
+
+[tool.uv]
+package = false

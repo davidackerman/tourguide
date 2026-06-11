@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "bridge": "node bridge/server.mjs",
+    "workspace": "node scripts/workspace.mjs",
+    "workspace:preview": "node scripts/workspace.mjs --preview",
+    "test:smoke": "node tests/workspace_smoke.mjs"
   },
   "dependencies": {
     "@mlc-ai/web-llm": "^0.2.82",
@@ -20,7 +24,10 @@
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@types/sql.js": "^1.4.11",
+    "@types/ws": "^8.18.1",
+    "playwright": "^1.60.0",
     "typescript": "^5.4.0",
-    "vite": "^5.2.0"
+    "vite": "^5.2.0",
+    "ws": "^8.21.0"
   }
 }
