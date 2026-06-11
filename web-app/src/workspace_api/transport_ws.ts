@@ -30,6 +30,9 @@ export interface BrowserTransportOptions {
   onStatus: (status: ConnectionStatus, detail?: string) => void;
   /** Called with the bridge-assigned label for this tab (e.g. "workspace-2"). */
   onRegistered?: (label: string | undefined) => void;
+  /** Called with a persisted snapshot the bridge sends on (re)connect, so a
+   *  reopened ?session=<id> link restores its workspace. */
+  onRestore?: (state: unknown) => void;
 }
 
 const MAX_BACKOFF_MS = 15_000;
@@ -60,6 +63,12 @@ export class BrowserWsTransport {
 
   sendEvent(event: WorkspaceEvent): void {
     this.send({ kind: "event", event });
+  }
+
+  /** Push a workspace snapshot up for the bridge to persist under this
+   *  session id (so reopening the ?session=<id> link restores it). */
+  persist(state: unknown): void {
+    this.send({ kind: "persist", state });
   }
 
   private send(msg: unknown): void {
@@ -103,6 +112,8 @@ export class BrowserWsTransport {
         this.opts.onRequest(msg.request);
       } else if (msg.kind === "registered") {
         this.opts.onRegistered?.((msg as { label?: string }).label);
+      } else if (msg.kind === "restore") {
+        this.opts.onRestore?.((msg as { state?: unknown }).state);
       } else if (msg.kind === "ping") {
         this.send({ kind: "pong" });
       }

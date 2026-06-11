@@ -17,6 +17,9 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { WebSocketServer } from "ws";
 import {
   saveState,
@@ -25,6 +28,8 @@ import {
   stateDir,
   saveShareState,
   getShareState,
+  saveSessionState,
+  getSessionState,
   isValidShareId,
 } from "./state_store.mjs";
 
@@ -116,6 +121,44 @@ const CORS = {
   "Access-Control-Allow-Headers": "content-type",
 };
 
+// Agent-computed artifacts (e.g. a zarr the agent wrote) are served here so the
+// viewer can load them as layers. The bridge binds to all interfaces, so the
+// URL is http://localhost:PORT/artifacts/… for you and http://<machine-ip>:PORT
+// /artifacts/… for others on the same LAN/VPN. Default dir ~/.tourguide/
+// artifacts (override with TG_ARTIFACTS_DIR). Returns real 404s (the vite SPA
+// fallback returned index.html, which broke NG's zarr probing) and CORP so the
+// cross-origin-isolated page can fetch it.
+const ARTIFACTS_DIR = (process.env.TG_ARTIFACTS_DIR || "").trim() ||
+  path.join(os.homedir(), ".tourguide", "artifacts");
+
+function serveArtifact(req, res, pathname) {
+  const rel = decodeURIComponent(pathname.slice("/artifacts/".length));
+  const base = path.resolve(ARTIFACTS_DIR);
+  const full = path.resolve(base, rel);
+  if (full !== base && !full.startsWith(base + path.sep)) {
+    res.writeHead(403, CORS);
+    res.end();
+    return;
+  }
+  fs.readFile(full, (err, data) => {
+    if (err) {
+      res.writeHead(404, CORS);
+      res.end("not found");
+      return;
+    }
+    const ct = /\.(zattrs|zgroup|zarray|json)$/.test(full)
+      ? "application/json"
+      : "application/octet-stream";
+    res.writeHead(200, {
+      ...CORS,
+      "Cross-Origin-Resource-Policy": "cross-origin",
+      "content-type": ct,
+      "cache-control": "no-cache",
+    });
+    res.end(data);
+  });
+}
+
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json", ...CORS });
@@ -206,6 +249,13 @@ const server = http.createServer((req, res) => {
 
   if (req.method === "GET" && url.pathname === "/sessions") {
     sendJson(res, 200, sessionRecords());
+    return;
+  }
+
+  // Serve agent-computed artifacts (zarr, meshes, …) for the viewer to load as
+  // layers — reachable on the LAN/VPN via the machine IP, not just localhost.
+  if (req.method === "GET" && url.pathname.startsWith("/artifacts/")) {
+    serveArtifact(req, res, url.pathname);
     return;
   }
 
@@ -364,6 +414,18 @@ function handleBrowser(ws) {
       ws.send(JSON.stringify({ kind: "registered", label }));
       log(`browser session registered: ${label} ${sessionId} (${msg.session.mode})`);
       broadcastToAgents(connectionStatusEvent());
+      // Reopening a ?session=<id> link should restore its workspace: if we
+      // have a persisted snapshot for this id, send it back for the page to
+      // apply (the page may be a fresh tab whose localStorage is empty).
+      const restored = getSessionState(sessionId);
+      if (restored) {
+        ws.send(JSON.stringify({ kind: "restore", state: restored }));
+        log(`sent restore snapshot to ${label} ${sessionId}`);
+      }
+    } else if (msg.kind === "persist" && msg.state) {
+      // Rolling auto-save of the page's current workspace snapshot, keyed by
+      // the session id, so the next open of this link restores it.
+      if (sessionId) saveSessionState(sessionId, msg.state);
     } else if (msg.kind === "response" && msg.response) {
       const p = pending.get(msg.response.id);
       if (p) {

@@ -123,6 +123,36 @@ export function getShareState(id) {
   }
 }
 
+// --- per-session persistence (keyed by ?session=<id>) ----------------------
+//
+// Auto-saved workspace snapshot for a live session id, so reopening the
+// ?session=<id> link restores its layers/camera. Distinct from saved-states
+// (explicit, named) and share-states (one-shot share links): this is the
+// rolling "current state" of an addressable session.
+
+function sessionStateDir() {
+  const override = process.env.TG_SESSION_STATE_DIR;
+  return override && override.trim()
+    ? path.resolve(override)
+    : path.join(os.homedir(), ".tourguide", "session-states");
+}
+
+export function saveSessionState(sessionId, state) {
+  if (!isValidShareId(sessionId)) return; // same token rule guards the filename
+  const dir = sessionStateDir();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${sessionId}.json`), JSON.stringify(state));
+}
+
+export function getSessionState(sessionId) {
+  if (!isValidShareId(sessionId)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(sessionStateDir(), `${sessionId}.json`), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 /** Full record for a saved id, or null if not on disk. */
 export function getState(id) {
   for (const { record } of readAll()) {

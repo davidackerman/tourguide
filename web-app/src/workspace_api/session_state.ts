@@ -106,6 +106,20 @@ export class SessionStore {
     return state;
   }
 
+  /** Current workspace state WITHOUT persisting it as a named saved-state —
+   *  used for the rolling per-session auto-save (keyed by session id on the
+   *  bridge), so reopening a ?session=<id> link restores the viewer. */
+  snapshot(): SavedTourguideState {
+    return {
+      id: this.sessionId,
+      createdAt: this.nowIso(),
+      viewerState: this.hooks.getViewerState(),
+      descriptorState: this.hooks.getDescriptorState(),
+      tableIds: this.hooks.getTableIds(),
+      plotIds: this.hooks.getPlotIds(),
+    };
+  }
+
   listSavedStates(): SavedTourguideState[] {
     return this.savedStates.slice();
   }
