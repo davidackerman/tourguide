@@ -387,6 +387,10 @@ function handleAgent(ws) {
 
 function handleBrowser(ws) {
   let sessionId = null;
+  // A ?view=1 connection registers with `viewOf` set; it is read-only and may
+  // NEVER persist. Enforced here (not just client-side), so a peer that speaks
+  // the WS protocol still cannot write back to the shared session.
+  let isViewer = false;
   ws.on("message", (data) => {
     let msg;
     try {
@@ -396,6 +400,7 @@ function handleBrowser(ws) {
     }
     if (msg.kind === "register" && msg.session) {
       sessionId = msg.session.sessionId;
+      isViewer = !!msg.session.viewOf;
       const existing = sessions.get(sessionId);
       // A label is assigned once per tab and reused across reconnects, so a
       // tab keeps a stable human-readable name (for the "which tab?" choice
@@ -427,9 +432,10 @@ function handleBrowser(ws) {
         log(`sent restore snapshot (${restoreId}) to ${label} ${sessionId}`);
       }
     } else if (msg.kind === "persist" && msg.state) {
-      // Rolling auto-save of the page's current workspace snapshot, keyed by
-      // the session id, so the next open of this link restores it.
-      if (sessionId) saveSessionState(sessionId, msg.state);
+      // Rolling auto-save of the page's current snapshot, keyed by session id.
+      // A read-only viewer may never write back — server-enforced, so a shared
+      // ?view=1 link can't be used to modify the owner's saved session.
+      if (sessionId && !isViewer) saveSessionState(sessionId, msg.state);
     } else if (msg.kind === "response" && msg.response) {
       const p = pending.get(msg.response.id);
       if (p) {

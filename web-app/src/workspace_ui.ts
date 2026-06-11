@@ -59,13 +59,13 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
       </div>
       <div class="workspace-actions">
         <header class="workspace-actions-header">
-          <h3 class="workspace-actions-title" data-actions-toggle title="Show/hide the agent trace">▾ Agent Trace</h3>
+          <h3 class="workspace-actions-title" data-actions-toggle title="Show/hide the agent trace">▸ Agent Trace</h3>
           <span class="workspace-actions-btns">
             <button class="btn-secondary btn-xs" data-export-actions title="Export the trace as JSON — exactly what the agent ran (sources, scales, recipes), so it can be reproduced (e.g. at full resolution on a cluster)">⤓ Export</button>
             <button class="btn-secondary btn-xs" data-clear-actions title="Clear the action log">Clear</button>
           </span>
         </header>
-        <div class="workspace-actions-list" data-actions-list>
+        <div class="workspace-actions-list" data-actions-list hidden>
           <p class="placeholder">No agent actions yet. Connect an agent (e.g. <code>tourguide-mcp</code>) to drive this workspace.</p>
         </div>
       </div>
