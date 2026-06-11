@@ -109,6 +109,33 @@ For an MCP client (e.g. Claude Desktop), point it at `uv run tourguide-mcp`
 with `cwd` = `mcp/` and `TOURGUIDE_WEBAPP_DIR` = `web-app/` so it can
 auto-start the bridge. See `mcp/README.md`.
 
+## Sharing & hosting — drive a hosted page from your local agent
+
+The bridge runs on **your machine**; the page can be served from anywhere and
+still be driven by your local agent. The page connects *out* to the bridge, so
+none of your data or compute is exposed — and there's no per-query cost (you
+bring your own agent; the page is just a viewer + a thin relay).
+
+- **Hosted page → local bridge.** Serve the static build anywhere (the live
+  build is on Cloudflare Pages) and open it with `?bridge=localhost:7723`; the
+  page connects to your local bridge (localhost is mixed-content-exempt, and the
+  bridge answers Chrome's Private-Network-Access preflight). Your local agent
+  drives the hosted page.
+- **Unique, addressable sessions.** Each workspace carries a `?session=<id>` in
+  its URL (minted on first open). Reopening the link returns to the same session;
+  the bridge keys routing on the id, so concurrent tabs/users don't collide.
+- **Reopen restores everything.** The page auto-saves a snapshot (viewer state +
+  table data + plot images) keyed by session id (`~/.tourguide/session-states`);
+  reopening the link rebuilds layers + tables + plots.
+- **Read-only share links.** `?session=<id>&view=1` registers under a fresh id
+  and never writes back, so a recipient can look + pan but can't modify your
+  saved session. Viewers need only a browser; only drivers need the MCP.
+- **Agent-computed layers.** The agent writes a result (e.g. a zarr) to
+  `~/.tourguide/artifacts` (`TG_ARTIFACTS_DIR`); the bridge serves it at
+  `/artifacts/…` and `add_layer` renders it. Layer URLs are rewritten to the
+  bridge host, so a LAN/VPN peer fetches from the host machine (use the machine
+  IP, not `localhost`).
+
 ## Operations / tool surface
 
 `launch_or_attach`, `get_session`, `load_descriptor`, `get_viewer_state`,

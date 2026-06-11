@@ -4,11 +4,18 @@ A 3D microscopy viewer with built-in structured-data browsing, plain-English que
 
 > **This repo contains two flavors of tourguide.** Pick the one that fits your situation.
 
-> **🧭 Agent workspace mode (new):** Tourguide can run as an agent-controllable
-> visual workspace — open `?mode=workspace` and drive the viewer, tables, plots
-> and saved states from any MCP-capable agent or a Python script via the
-> **Workspace API**. See [`WORKSPACE.md`](WORKSPACE.md), [`mcp/`](mcp/), and
-> [`python/`](python/).
+> **🧭 Agent workspace mode:** Tourguide runs as an agent-controllable visual
+> workspace — open `?mode=workspace` and drive the viewer, tables, plots and
+> saved states from **your own** MCP-capable agent (Claude Code/Desktop, Cursor,
+> …), a Python SDK, or raw HTTP via the **Workspace API**.
+>
+> The agent runs **locally** — compute in its own environment (no in-browser
+> Pyodide, no cloud backend), **no per-query API cost** (you bring your own
+> agent; the page is a static viewer + thin relay). A **local agent can drive a
+> _hosted_ page** through a local bridge, with unique `?session=<id>` links,
+> read-only `?view=1` shares, full per-session persistence (reopen restores
+> layers + tables + plots), and agent-computed layers served over the LAN. See
+> [`WORKSPACE.md`](WORKSPACE.md), [`mcp/`](mcp/), and [`python/`](python/).
 
 ---
 
