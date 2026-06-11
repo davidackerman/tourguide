@@ -343,6 +343,12 @@ let queryHandle: QueryUIHandle;
 let workspacePanel: WorkspacePanelHandle | null = null;
 if (isWorkspaceMode()) {
   workspacePanel = renderWorkspacePanel(queryHost);
+  // Hide non-agentic compute chrome: the agent runs analysis/recipes and writes
+  // computed layers, so the in-browser Analyze / Custom / Save-zarr buttons are
+  // redundant here. (Load / Share / Copy NG stay — Copy NG is provenance.)
+  for (const id of ["analyze-btn", "custom-btn", "download-btn"]) {
+    document.getElementById(id)?.style.setProperty("display", "none");
+  }
   // Clicking a docked plot thumbnail enlarges it in the modal.
   workspacePanel.onOpenPlot((artifact) => showPlotModal(artifact));
   queryHandle = {
