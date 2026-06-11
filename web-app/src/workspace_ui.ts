@@ -59,8 +59,11 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
       </div>
       <div class="workspace-actions">
         <header class="workspace-actions-header">
-          <h3>Agent Actions</h3>
-          <button class="btn-secondary btn-xs" data-clear-actions title="Clear the action log">Clear</button>
+          <h3 class="workspace-actions-title" data-actions-toggle title="Show/hide the agent trace">▾ Agent Trace</h3>
+          <span class="workspace-actions-btns">
+            <button class="btn-secondary btn-xs" data-export-actions title="Export the trace as JSON — exactly what the agent ran (sources, scales, recipes), so it can be reproduced (e.g. at full resolution on a cluster)">⤓ Export</button>
+            <button class="btn-secondary btn-xs" data-clear-actions title="Clear the action log">Clear</button>
+          </span>
         </header>
         <div class="workspace-actions-list" data-actions-list>
           <p class="placeholder">No agent actions yet. Connect an agent (e.g. <code>tourguide-mcp</code>) to drive this workspace.</p>
@@ -136,6 +139,30 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
   clearBtn.addEventListener("click", () => {
     entries = [];
     render();
+  });
+
+  // The trace is provenance, not always-on chrome — let it collapse.
+  const toggle = container.querySelector<HTMLElement>("[data-actions-toggle]")!;
+  toggle.addEventListener("click", () => {
+    const hidden = list.hasAttribute("hidden");
+    list.toggleAttribute("hidden", !hidden);
+    toggle.textContent = hidden ? "▾ Agent Trace" : "▸ Agent Trace";
+  });
+
+  // Export the trace as JSON — a reproducible record of exactly what the agent
+  // ran (ops, sources, scales, recipes), so someone can reproduce it elsewhere
+  // (e.g. rerun at full resolution on a cluster).
+  const exportBtn = container.querySelector<HTMLButtonElement>("[data-export-actions]")!;
+  exportBtn.addEventListener("click", () => {
+    const blob = new Blob([JSON.stringify(entries, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tourguide-trace.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   });
 
   setConnDom("disconnected", "");

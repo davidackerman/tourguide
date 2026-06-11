@@ -2092,6 +2092,15 @@ body[data-mode="workspace"] #backend-indicator {
   font-size: 0.9rem;
   letter-spacing: 0.02em;
 }
+.workspace-actions-title {
+  cursor: pointer;
+  user-select: none;
+}
+.workspace-actions-btns {
+  display: inline-flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
 .btn-xs {
   font-size: 0.75rem;
   padding: 0.15rem 0.45rem;
