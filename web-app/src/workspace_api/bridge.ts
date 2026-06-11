@@ -83,7 +83,12 @@ function exportTables(
 export function startWorkspaceBridge(
   ctx: WorkspaceContext,
   panel: WorkspacePanelHandle,
-  opts: { bridgeWsUrl: string; viewOnly?: boolean; viewOf?: string },
+  opts: {
+    bridgeWsUrl: string;
+    viewOnly?: boolean;
+    viewOf?: string;
+    onBridgeHost?: (host: string) => void;
+  },
 ): WorkspaceBridgeHandle {
   const handlers = createHandlers(ctx);
 
@@ -96,10 +101,13 @@ export function startWorkspaceBridge(
     onRequest: (request) => void handle(request),
     // Put the bridge-assigned label in the browser tab title so multiple
     // open workspace tabs are distinguishable at a glance.
-    onRegistered: (label) => {
+    onRegistered: (label, bridgeHost) => {
       if (label && typeof document !== "undefined") {
         document.title = `Tourguide — ${label}`;
       }
+      // Prefer the bridge's reachable LAN IP for artifact/share URLs so a shared
+      // session works for a peer, not just the owner's localhost.
+      if (bridgeHost) opts.onBridgeHost?.(bridgeHost);
     },
     // Reopening a ?session=<id> link: the bridge sends back the last persisted
     // snapshot for this id; apply it so the workspace (layers/camera) returns.

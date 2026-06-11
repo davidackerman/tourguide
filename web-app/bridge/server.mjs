@@ -385,6 +385,22 @@ function handleAgent(ws) {
   });
 }
 
+// First non-internal IPv4 (host:port) so a hosted page can rewrite artifact /
+// share URLs to the host machine instead of "localhost" — reachable by LAN/VPN
+// peers. Null if we can't determine one (then the page keeps its connect host).
+function machineHost() {
+  try {
+    for (const ifaces of Object.values(os.networkInterfaces())) {
+      for (const i of ifaces || []) {
+        if (i.family === "IPv4" && !i.internal) return `${i.address}:${PORT}`;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
 function handleBrowser(ws) {
   let sessionId = null;
   // A ?view=1 connection registers with `viewOf` set; it is read-only and may
@@ -416,7 +432,7 @@ function handleBrowser(ws) {
         status: "running",
       };
       sessions.set(sessionId, { record, ws });
-      ws.send(JSON.stringify({ kind: "registered", label }));
+      ws.send(JSON.stringify({ kind: "registered", label, bridgeHost: machineHost() }));
       log(`browser session registered: ${label} ${sessionId} (${msg.session.mode})`);
       broadcastToAgents(connectionStatusEvent());
       // Reopening a ?session=<id> link should restore its workspace: if we
