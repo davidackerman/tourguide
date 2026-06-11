@@ -173,6 +173,17 @@ export function startWorkspaceBridge(
     });
   });
 
+  // Portable workspace file: "Download" writes the current snapshot (the same
+  // shape persistence uses — viewer + tables + plots); "Load" applies a file
+  // into THIS session (the loader's own copy), so it's a forkable share that
+  // needs no live bridge on the recipient's side.
+  panel.onDownloadWorkspace(() => ({
+    ...ctx.store.snapshot(),
+    plots: ctx.store.listPlots(),
+    tablesData: exportTables(ctx.getDB()),
+  }));
+  panel.onLoadWorkspace((state) => void applyRestore(state));
+
   async function handle(request: WorkspaceRequest): Promise<void> {
     const handler = handlers[request.op];
     let response: WorkspaceResponse;

@@ -31,6 +31,10 @@ export interface WorkspacePanelHandle {
   onOpenPlot(cb: (artifact: PlotArtifact) => void): void;
   /** Show a clickable share link at the top of the panel (Open + Copy). */
   addShareLink(url: string, label?: string): void;
+  /** Provide the snapshot to write when the user clicks "Download workspace". */
+  onDownloadWorkspace(cb: () => unknown): void;
+  /** Apply a workspace file the user loaded (into their own copy). */
+  onLoadWorkspace(cb: (state: unknown) => void): void;
 }
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -51,6 +55,10 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
         <span class="conn-detail hint" data-conn-detail></span>
       </div>
       <div class="workspace-share" data-share hidden></div>
+      <div class="workspace-io">
+        <button class="btn-secondary btn-xs" data-download-ws title="Download this workspace (layers + tables + plots) as a portable file — share it, and anyone can load it into their own copy (no bridge needed)">⬇ Download</button>
+        <button class="btn-secondary btn-xs" data-load-ws title="Load a workspace file into your own copy">⬆ Load</button>
+      </div>
       <div class="workspace-plots" data-plots hidden>
         <header class="workspace-actions-header">
           <h3>Plots</h3>
@@ -84,6 +92,8 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
   let entries: ActionHistoryEntry[] = [];
   let restoreCb: ((id: string) => void) | null = null;
   let openPlotCb: ((artifact: PlotArtifact) => void) | null = null;
+  let downloadWsCb: (() => unknown) | null = null;
+  let loadWsCb: ((state: unknown) => void) | null = null;
 
   const renderEmpty = (): void => {
     list.innerHTML = `<p class="placeholder">No agent actions yet. Connect an agent (e.g. <code>tourguide-mcp</code>) to drive this workspace.</p>`;
@@ -165,6 +175,41 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   });
 
+  // Download / load the whole workspace as a portable file. A loader gets their
+  // OWN copy (the snapshot just describes layers + tables + plots), so this is
+  // how you share off-VPN — no live bridge needed on the recipient's side.
+  const downloadWsBtn = container.querySelector<HTMLButtonElement>("[data-download-ws]")!;
+  const loadWsBtn = container.querySelector<HTMLButtonElement>("[data-load-ws]")!;
+  downloadWsBtn.addEventListener("click", () => {
+    if (!downloadWsCb) return;
+    const blob = new Blob([JSON.stringify(downloadWsCb())], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tourguide-workspace.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+  loadWsBtn.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.addEventListener("change", () => {
+      const f = input.files?.[0];
+      if (!f) return;
+      void f.text().then((t) => {
+        try {
+          loadWsCb?.(JSON.parse(t));
+        } catch {
+          alert("That doesn't look like a Tourguide workspace file.");
+        }
+      });
+    });
+    input.click();
+  });
+
   setConnDom("disconnected", "");
   function setConnDom(status: ConnectionStatus, detail: string): void {
     dot.className = `conn-dot conn-${status}`;
@@ -190,6 +235,12 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
     },
     onRestoreSavedState(cb) {
       restoreCb = cb;
+    },
+    onDownloadWorkspace(cb) {
+      downloadWsCb = cb;
+    },
+    onLoadWorkspace(cb) {
+      loadWsCb = cb;
     },
     addPlot(artifact) {
       if (!artifact.pngDataUrl) return;

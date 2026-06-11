@@ -2101,6 +2101,12 @@ body[data-mode="workspace"] #backend-indicator {
   gap: 0.3rem;
   flex-shrink: 0;
 }
+.workspace-io {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.4rem 0.8rem;
+  flex-shrink: 0;
+}
 .btn-xs {
   font-size: 0.75rem;
   padding: 0.15rem 0.45rem;
