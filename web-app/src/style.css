@@ -2139,7 +2139,7 @@ body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="welcome"] 
   flex-wrap: wrap;
   gap: 0.4rem;
   padding: 0 0.6rem 0.6rem;
-  max-height: 40%;
+  max-height: 48vh;
   overflow-y: auto;
 }
 .workspace-plot {
@@ -2155,6 +2155,10 @@ body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="welcome"] 
   display: block;
   width: 100%;
   height: auto;
+  /* Scale the whole figure to fit — never clip it. object-fit:contain keeps
+     the full plot visible (letterboxed if needed) within the capped height. */
+  max-height: 240px;
+  object-fit: contain;
 }
 .workspace-plot figcaption {
   padding: 0.25rem 0.4rem;

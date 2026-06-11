@@ -62,6 +62,43 @@ export class BundledViewer {
   private container: HTMLElement;
   private currentState: ReturnType<typeof descriptorToNgState> | null = null;
 
+  // Host:port of the bridge this page is using. Agent-computed artifact layers
+  // are served at <bridge>/artifacts/… ; we rewrite their host to this so a LAN/
+  // VPN peer fetches from the host machine, not their own localhost. Set by
+  // main.ts from the bridge URL the page connects to.
+  private bridgeHost = "";
+  setBridgeHost(hostPort: string): void {
+    this.bridgeHost = hostPort;
+  }
+  private rewriteArtifactUrl(u: unknown): unknown {
+    if (typeof u !== "string" || !this.bridgeHost) return u;
+    // zarr://http://<host>/artifacts/…  ->  zarr://http://<bridgeHost>/artifacts/…
+    return u.replace(
+      /^((?:zarr|n5|precomputed):\/\/https?:\/\/)[^/]+(\/artifacts\/)/i,
+      `$1${this.bridgeHost}$2`,
+    );
+  }
+  private rewriteArtifactSource(src: unknown): unknown {
+    if (Array.isArray(src)) return src.map((s) => this.rewriteArtifactSource(s));
+    if (src && typeof src === "object" && "url" in (src as Record<string, unknown>)) {
+      const o = src as Record<string, unknown>;
+      return { ...o, url: this.rewriteArtifactUrl(o.url) };
+    }
+    return this.rewriteArtifactUrl(src);
+  }
+  private rewriteStateArtifacts<T>(state: T): T {
+    const s = state as unknown as { layers?: unknown };
+    if (!s || typeof s !== "object" || !Array.isArray(s.layers) || !this.bridgeHost) return state;
+    return {
+      ...(state as object),
+      layers: s.layers.map((l) =>
+        l && typeof l === "object" && "source" in (l as Record<string, unknown>)
+          ? { ...(l as Record<string, unknown>), source: this.rewriteArtifactSource((l as Record<string, unknown>).source) }
+          : l,
+      ),
+    } as T;
+  }
+
   constructor(container: HTMLElement) {
     this.container = container;
   }
@@ -225,8 +262,9 @@ export class BundledViewer {
   // descriptor has set up the layer scaffolding.
   applyNgState(state: Record<string, unknown>): void {
     const viewer = this.ensureViewer();
-    viewer.state.restoreState(state);
-    this.currentState = state as any;
+    const rewritten = this.rewriteStateArtifacts(state);
+    viewer.state.restoreState(rewritten);
+    this.currentState = rewritten as any;
   }
 
   // Add a Neuroglancer segmentation layer that only renders the mesh
@@ -314,6 +352,9 @@ export class BundledViewer {
       console.warn("[viewer] addLayerFromSpec: layer spec has no name", layer);
       return;
     }
+    // Point any agent-computed /artifacts/ source at the bridge host this page
+    // uses (no-op for S3/http sources). Keeps shared sessions working for peers.
+    if ("source" in layer) layer = { ...layer, source: this.rewriteArtifactSource(layer.source) };
     // First data load establishes NG's global coordinate space. The makeLayer
     // path below does NOT set it up — so as the first/only layer it renders
     // nothing (no coordinate frame to draw in) AND wedges fly_to (which needs a

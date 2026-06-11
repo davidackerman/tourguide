@@ -1096,6 +1096,13 @@ function resolveSessionId(): string {
 function startBridgeIfWorkspace(): void {
   if (!isWorkspaceMode() || !workspacePanel) return;
   const bridgeWsUrl = resolveBridgeWsUrl();
+  // The viewer rewrites agent-computed /artifacts/ layer URLs to this host, so
+  // shared sessions fetch from the host machine (not a peer's own localhost).
+  try {
+    viewer.setBridgeHost(new URL(bridgeWsUrl.replace(/^ws/, "http")).host);
+  } catch {
+    /* malformed bridge URL — artifact rewriting stays a no-op */
+  }
 
   const sessionId = resolveSessionId();
 
