@@ -1104,7 +1104,16 @@ function startBridgeIfWorkspace(): void {
     /* malformed bridge URL — artifact rewriting stays a no-op */
   }
 
-  const sessionId = resolveSessionId();
+  // Read-only share (?view=1): register under a FRESH id so the viewer never
+  // collides with or hijacks the owner's live session, view the shared session
+  // (?session) via `viewOf`, and never persist back. Owner mode keeps the
+  // stable ?session id and full read/write.
+  const viewParams = new URLSearchParams(window.location.search);
+  const viewOnly = viewParams.get("view") === "1";
+  const sessionId = viewOnly
+    ? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `view-${Date.now()}`)
+    : resolveSessionId();
+  const viewOf = viewOnly ? viewParams.get("session") || undefined : undefined;
 
   const store = new SessionStore(
     sessionId,
@@ -1137,7 +1146,7 @@ function startBridgeIfWorkspace(): void {
     getBackend: () => backend,
   };
 
-  startWorkspaceBridge(ctx, workspacePanel, { bridgeWsUrl });
+  startWorkspaceBridge(ctx, workspacePanel, { bridgeWsUrl, viewOnly, viewOf });
 }
 
 // Lightweight image modal for plots created via the Workspace API. Workspace

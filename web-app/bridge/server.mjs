@@ -417,10 +417,14 @@ function handleBrowser(ws) {
       // Reopening a ?session=<id> link should restore its workspace: if we
       // have a persisted snapshot for this id, send it back for the page to
       // apply (the page may be a fresh tab whose localStorage is empty).
-      const restored = getSessionState(sessionId);
+      // A read-only viewer (?view=1) registers under its own fresh id but asks
+      // to view another session via `viewOf` — send THAT session's snapshot so
+      // it never has to register as (and collide with) the owner's live tab.
+      const restoreId = msg.session.viewOf || sessionId;
+      const restored = getSessionState(restoreId);
       if (restored) {
         ws.send(JSON.stringify({ kind: "restore", state: restored }));
-        log(`sent restore snapshot to ${label} ${sessionId}`);
+        log(`sent restore snapshot (${restoreId}) to ${label} ${sessionId}`);
       }
     } else if (msg.kind === "persist" && msg.state) {
       // Rolling auto-save of the page's current workspace snapshot, keyed by

@@ -26,6 +26,9 @@ export interface BrowserTransportOptions {
   mode: "workspace" | "chat";
   /** ws://host:port — defaults to the page host on TG_BRIDGE_PORT. */
   bridgeWsUrl: string;
+  /** Read-only viewer: the id of the session to view (the bridge sends THAT
+   *  session's snapshot to restore, while we register under our own fresh id). */
+  viewOf?: string;
   onRequest: (request: WorkspaceRequest) => void;
   onStatus: (status: ConnectionStatus, detail?: string) => void;
   /** Called with the bridge-assigned label for this tab (e.g. "workspace-2"). */
@@ -96,6 +99,7 @@ export class BrowserWsTransport {
           sessionId: this.opts.sessionId,
           mode: this.opts.mode,
           url: window.location.href,
+          viewOf: this.opts.viewOf,
         },
       });
       this.opts.onStatus("connected", "bridge connected");

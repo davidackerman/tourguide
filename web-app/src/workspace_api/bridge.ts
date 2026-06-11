@@ -83,7 +83,7 @@ function exportTables(
 export function startWorkspaceBridge(
   ctx: WorkspaceContext,
   panel: WorkspacePanelHandle,
-  opts: { bridgeWsUrl: string },
+  opts: { bridgeWsUrl: string; viewOnly?: boolean; viewOf?: string },
 ): WorkspaceBridgeHandle {
   const handlers = createHandlers(ctx);
 
@@ -91,6 +91,7 @@ export function startWorkspaceBridge(
     sessionId: ctx.sessionId,
     mode: ctx.mode,
     bridgeWsUrl: opts.bridgeWsUrl,
+    viewOf: opts.viewOf,
     onStatus: (status: ConnectionStatus, detail) => panel.setConnectionStatus(status, detail),
     onRequest: (request) => void handle(request),
     // Put the bridge-assigned label in the browser tab title so multiple
@@ -199,8 +200,9 @@ export function startWorkspaceBridge(
       transport.sendEvent({ type: "action", entry });
     }
     // Auto-save the workspace after any successful change so reopening the
-    // ?session=<id> link restores it.
-    if (!READ_ONLY_OPS.has(request.op) && !error) schedulePersist();
+    // ?session=<id> link restores it — but a read-only viewer never persists
+    // back (so it can't modify the owner's saved session).
+    if (!READ_ONLY_OPS.has(request.op) && !error && !opts.viewOnly) schedulePersist();
   }
 
   function buildEntry(
