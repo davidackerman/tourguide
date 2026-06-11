@@ -13,13 +13,13 @@
     "test:smoke": "node tests/workspace_smoke.mjs"
   },
   "dependencies": {
-    "@mlc-ai/web-llm": "^0.2.82",
+    "@mlc-ai/web-llm": "^0.2.84",
     "@types/papaparse": "^5.5.2",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.2.0",
     "neuroglancer": "^2.41.2",
     "papaparse": "^5.5.3",
     "sql.js": "^1.14.1",
-    "zarrita": "^0.7.1"
+    "zarrita": "^0.7.3"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
