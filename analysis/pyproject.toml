@@ -24,6 +24,12 @@ dependencies = [
     "pandas>=2.1",
     "matplotlib>=3.8",
     "trimesh>=4.0",                   # load published meshes (e.g. for surface area)
+    "zmesh>=1.13.1",
+    "fastmorph>=1.8.0",
+    "fastremap>=1.19.0",
+    "edt>=3.1.1",
+    "kimimaro>=5.8.1",
+    "crackle-codec>=0.42.0",
 ]
 
 [tool.uv]

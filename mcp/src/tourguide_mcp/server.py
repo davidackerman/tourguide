@@ -148,6 +148,17 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
   asks. Do NOT substitute published/precomputed segment_properties or meshes
   unless the user explicitly asks for the published values.
 
+MESHES — when a segmentation has none and you want 3D, use `meshify`:
+  Many label volumes (e.g. COSEM n5 organelle segs) ship NO meshes, so
+  selecting a segment shows nothing in the 3D panel. `meshify(source=…,
+  segment_ids=[…])` generates them (zmesh, in the analysis env — no external
+  install), reading the source DIRECTLY from s3/gcs/http (no staging), serves
+  them via the bridge, and adds the mesh layer. It picks a coarse/fast scale by
+  default — tell the user which (the `ranAt` field) and that they can pass
+  scale= for finer; pass segment_ids (e.g. the largest from `measure`) to mesh
+  just those. (Optional: set TG_MESHNBONE_PYTHON to a mesh-n-bone >=0.5.0 env to
+  use multi-LOD Draco instead.) Don't hand-roll meshing when this tool exists.
+
 LOADING WHAT THE USER DROPS IN — discern the type, don't demand a format:
   When the user says "open this in tourguide" / "load these", infer the type
   from the content or extension and route it — don't require a yaml descriptor:

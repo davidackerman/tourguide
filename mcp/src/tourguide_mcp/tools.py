@@ -326,6 +326,73 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await _run_and_ingest(path, source, name or recipe, args or [])
 
     @mcp.tool()
+    async def meshify(
+        source: str,
+        name: str = "mesh",
+        segment_ids: list[str] | None = None,
+        scale: str | None = None,
+        num_lods: int = 1,
+    ) -> dict:
+        """Generate 3D meshes for a segmentation and add them as a layer — for
+        when the source has no precomputed meshes (so selecting a segment shows
+        nothing in 3D). Reads the `source` (n5/zarr over s3/gcs/http, from
+        get_session) DIRECTLY — no staging. Picks a coarse/fast multiscale level
+        by default (tell the user which — the `ranAt` field — and that they can
+        pass `scale` e.g. "s2" for finer), serves the meshes through the bridge,
+        and adds a segmentation layer with them. `segment_ids` defaults to ALL
+        objects (pass a few ids — e.g. the largest from `measure` — to mesh just
+        those at a finer scale).
+
+        By default this uses the in-house zmesh mesher in the analysis env — no
+        external install. If TG_MESHNBONE_PYTHON points at a mesh-n-bone (>=0.5.0)
+        environment, it uses mesh-n-bone instead (multi-LOD Draco; `num_lods`)."""
+        import os
+
+        bridge_netloc = urllib.parse.urlparse(session.config.bridge_url).netloc or "localhost:7723"
+        out = tempfile.NamedTemporaryFile(prefix="tg_meshify_", suffix=".json", delete=False)
+        out.close()
+        mnb_py = os.environ.get("TG_MESHNBONE_PYTHON")
+        if mnb_py and Path(mnb_py).exists():
+            # Optional upgrade: mesh-n-bone (multi-LOD Draco) in its own env.
+            runner = _ANALYSIS_DIR / "tg_local" / "meshify_runner.py"
+            cmd = [mnb_py, str(runner), "--source", source, "--name", name,
+                   "--mnb", str(Path(mnb_py).with_name("mesh-n-bone")),
+                   "--num-lods", str(num_lods), "--bridge", bridge_netloc, "--out", out.name]
+        else:
+            # Default: in-house zmesh in the pre-loaded analysis env.
+            runner = _ANALYSIS_DIR / "tg_local" / "meshify_local.py"
+            cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(runner),
+                   "--source", source, "--name", name, "--bridge", bridge_netloc, "--out", out.name]
+        if scale:
+            cmd += ["--scale", scale]
+        if segment_ids:
+            cmd += ["--ids", ",".join(str(s) for s in segment_ids)]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"meshify failed:\n{stderr.decode(errors='replace')[-2000:]}")
+        result = json.loads(Path(out.name).read_text())
+        # mesh-n-bone returns separate volume+mesh sources; the in-house mesher
+        # returns one self-contained precomputed source (voxels + mesh).
+        layer_source = ([result["volume_source"], result["mesh_source"]]
+                        if "mesh_source" in result else result["source"])
+        layer = {
+            "name": f"{name}_mesh",
+            "type": "segmentation",
+            "source": layer_source,
+            "segments": result["mesh_ids"],
+        }
+        await session.call("add_layer", {"layer": layer})
+        return {
+            "layer": layer["name"],
+            "meshIds": result["mesh_ids"],
+            "ranAt": f"chose scale {result.get('scale', '?')} (coarse/fast default; pass scale= for finer)",
+            "tool": result.get("tool", "zmesh (in-house)"),
+        }
+
+    @mcp.tool()
     async def launch_or_attach(new: bool = False, session_id: str | None = None) -> dict:
         """Launch Tourguide if needed, or attach to a workspace tab. Call this
         first; other tools auto-attach but this surfaces launch problems and

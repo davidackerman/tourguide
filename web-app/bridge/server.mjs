@@ -118,7 +118,10 @@ function connectionStatusEvent() {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "content-type",
+  // `range` so Neuroglancer's mesh/volume range requests survive the CORS
+  // preflight; expose Content-Range/Accept-Ranges so its fetcher can plan them.
+  "Access-Control-Allow-Headers": "content-type, range",
+  "Access-Control-Expose-Headers": "content-length, content-range, accept-ranges",
 };
 
 // Agent-computed artifacts (e.g. a zarr the agent wrote) are served here so the
@@ -140,8 +143,8 @@ function serveArtifact(req, res, pathname) {
     res.end();
     return;
   }
-  fs.readFile(full, (err, data) => {
-    if (err) {
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) {
       res.writeHead(404, CORS);
       res.end("not found");
       return;
@@ -149,13 +152,38 @@ function serveArtifact(req, res, pathname) {
     const ct = /\.(zattrs|zgroup|zarray|json)$/.test(full)
       ? "application/json"
       : "application/octet-stream";
-    res.writeHead(200, {
+    const headers = {
       ...CORS,
       "Cross-Origin-Resource-Policy": "cross-origin",
       "content-type": ct,
       "cache-control": "no-cache",
-    });
-    res.end(data);
+      // Neuroglancer fetches multi-LOD Draco mesh fragments (and large volume
+      // chunks) with HTTP Range requests; advertise + honor them so meshes can
+      // be served straight from here instead of a separate Range-capable server.
+      "accept-ranges": "bytes",
+    };
+    // "bytes=START-END" (END or START may be empty; "bytes=-N" = last N bytes).
+    const m = /^bytes=(\d*)-(\d*)$/.exec((req.headers["range"] || "").trim());
+    if (m && (m[1] !== "" || m[2] !== "")) {
+      let start = m[1] !== "" ? parseInt(m[1], 10) : st.size - parseInt(m[2], 10);
+      let end = m[1] !== "" && m[2] !== "" ? parseInt(m[2], 10) : st.size - 1;
+      start = Math.max(0, start);
+      end = Math.min(end, st.size - 1);
+      if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= st.size) {
+        res.writeHead(416, { ...headers, "content-range": `bytes */${st.size}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
+        ...headers,
+        "content-range": `bytes ${start}-${end}/${st.size}`,
+        "content-length": String(end - start + 1),
+      });
+      fs.createReadStream(full, { start, end }).pipe(res);
+      return;
+    }
+    res.writeHead(200, { ...headers, "content-length": String(st.size) });
+    fs.createReadStream(full).pipe(res);
   });
 }
 
