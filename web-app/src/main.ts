@@ -166,6 +166,65 @@ if (sidebar && browserHost && queryHost && sidebarDivider) {
     }
   });
 }
+
+// Sidebar WIDTH: drag #main-divider (between viewer and panel) to resize,
+// and a collapse/expand toggle to hide the panel to the right. Both persist.
+const mainDivider = document.getElementById("main-divider");
+const sidebarCollapse = document.getElementById("sidebar-collapse");
+const sidebarExpand = document.getElementById("sidebar-expand");
+const SIDEBAR_WIDTH_KEY = "tourguide.sidebarWidth";
+const SIDEBAR_COLLAPSED_KEY = "tourguide.sidebarCollapsed";
+const SIDEBAR_WIDTH_MIN = 360;
+const sidebarWidthMax = (): number => Math.round(window.innerWidth * 0.9);
+const clampSidebarWidth = (w: number): number =>
+  Math.max(SIDEBAR_WIDTH_MIN, Math.min(sidebarWidthMax(), w));
+if (sidebar) {
+  const savedW = parseFloat(localStorage.getItem(SIDEBAR_WIDTH_KEY) || "");
+  if (Number.isFinite(savedW)) sidebar.style.width = `${clampSidebarWidth(savedW)}px`;
+}
+const setCollapsed = (collapsed: boolean): void => {
+  if (!sidebar) return;
+  sidebar.classList.toggle("collapsed", collapsed);
+  if (mainDivider) mainDivider.style.display = collapsed ? "none" : "";
+  if (sidebarExpand) sidebarExpand.hidden = !collapsed;
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    /* private mode / quota — silently drop */
+  }
+  // Neuroglancer sizes its canvas to the container; nudge it to reflow.
+  window.dispatchEvent(new Event("resize"));
+};
+setCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1");
+sidebarCollapse?.addEventListener("click", () => setCollapsed(true));
+sidebarExpand?.addEventListener("click", () => setCollapsed(false));
+if (mainDivider && sidebar) {
+  let wDragging = false;
+  mainDivider.addEventListener("mousedown", (e) => {
+    wDragging = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!wDragging) return;
+    // Panel is pinned to the right edge, so its width = distance from the
+    // pointer to the right edge of the window.
+    sidebar.style.width = `${clampSidebarWidth(window.innerWidth - e.clientX)}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!wDragging) return;
+    wDragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebar.clientWidth));
+    } catch {
+      /* private mode / quota — silently drop */
+    }
+    window.dispatchEvent(new Event("resize"));
+  });
+}
 let currentCatalogIndex: number | null = null;
 let currentIsCustom = false;
 

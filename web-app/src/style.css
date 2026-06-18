@@ -102,8 +102,10 @@ main {
 #sidebar {
   /* Two-pane layout: structured browser on top, agent on the bottom,
      with a draggable divider between them. The pane heights are set
-     in JS (main.ts splitter logic) using inline pixel values; clamp
-     here is for the user-resize-the-sidebar-width case. */
+     in JS (main.ts splitter logic) using inline pixel values. The
+     panel WIDTH is set inline by the #main-divider drag (main.ts);
+     min/max clamp it. */
+  position: relative;
   width: 520px;
   flex-shrink: 0;
   background: var(--bg-elev);
@@ -114,11 +116,65 @@ main {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* User-resizable horizontally: drag the left edge to make the
-     panel wider when a plot or trace needs more room. */
-  resize: horizontal;
   min-width: 360px;
-  max-width: 80vw;
+  max-width: 90vw;
+}
+/* Collapsed: hide the panel entirely; the #sidebar-expand tab brings
+   it back. (#main-divider is hidden in JS since it precedes #sidebar
+   in the DOM and can't be reached by a sibling selector.) */
+#sidebar.collapsed {
+  display: none;
+}
+
+/* Vertical drag handle between the viewer and the panel — drag to
+   resize the panel width (the CSS `resize` corner-grip didn't work
+   for a right-pinned panel). */
+#main-divider {
+  flex-shrink: 0;
+  width: 6px;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+#main-divider:hover,
+#main-divider:active {
+  background: var(--accent, #4a7);
+}
+
+/* Collapse button (top-right of the panel) + expand tab (screen edge,
+   shown only when collapsed). */
+#sidebar-collapse {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 5;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  opacity: 0.6;
+}
+#sidebar-collapse:hover {
+  opacity: 1;
+  color: var(--fg, inherit);
+}
+#sidebar-expand {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 22px;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+#sidebar-expand:hover {
+  color: var(--fg, inherit);
+  background: var(--bg, var(--bg-elev));
 }
 
 #browser-host {
