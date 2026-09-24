@@ -50,6 +50,7 @@ import { makeLayer } from "neuroglancer/unstable/layer/index.js";
 import { layerDataSourceSpecificationFromJson } from "neuroglancer/unstable/layer/layer_data_source.js";
 import type { DatasetDescriptor } from "./descriptor.js";
 import { descriptorToNgState } from "./viewer.js";
+import type { WorkspaceAnnotation } from "./workspace_api/protocol.js";
 
 function sameArray(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
   if (a.length !== b.length) return false;
@@ -522,6 +523,106 @@ export class BundledViewer {
       source: "local://annotations",
       annotations,
     });
+  }
+
+  // Add (or replace) an annotation layer with native Neuroglancer point /
+  // line / axis-aligned-bounding-box annotations. Coordinates are world nm
+  // (converted to NG runtime units via the live coordinate space, like
+  // flyTo). Returns the number of annotations now on the layer.
+  addWorkspaceAnnotations(layerName: string, anns: WorkspaceAnnotation[], replace = false): number {
+    const viewer = this.ensureViewer();
+    const toUnits = (p: number[]): number[] => this.nmToUnits([p[0], p[1], p[2]]);
+    const stamp = Date.now();
+    const converted = anns.map((a, i) => {
+      const id = a.id ?? `ann-${stamp}-${i}`;
+      const description = a.label ?? "";
+      if (a.type === "point") return { type: "point", id, point: toUnits(a.position), description };
+      if (a.type === "line") return { type: "line", id, pointA: toUnits(a.points[0]), pointB: toUnits(a.points[1]), description };
+      return { type: "axis_aligned_bounding_box", id, pointA: toUnits(a.min), pointB: toUnits(a.max), description };
+    });
+    let existing: unknown[] = [];
+    if (!replace) {
+      const state = this.getNgState() as { layers?: Array<Record<string, unknown>> } | null;
+      const prior = state?.layers?.find((l) => l.name === layerName && l.type === "annotation");
+      existing = Array.isArray(prior?.annotations) ? (prior!.annotations as unknown[]) : [];
+    }
+    const annotations = [...existing, ...converted];
+    this.addLayerFromSpec({
+      type: "annotation",
+      name: layerName,
+      source: "local://annotations",
+      annotations,
+    });
+    void viewer;
+    return annotations.length;
+  }
+
+  // World-nm xyz -> NG runtime units for the live coordinate space, using
+  // the same dim-order + per-dim scale logic as flyTo. Identity when the
+  // viewer isn't mounted yet.
+  private nmToUnits(nm: [number, number, number]): number[] {
+    const viewer = this.viewer;
+    if (!viewer) return nm;
+    const cs = (viewer.navigationState as any).coordinateSpace?.value as
+      | { names?: string[]; scales?: Float64Array | number[]; units?: string[] }
+      | undefined;
+    const names = cs?.names ?? ["x", "y", "z"];
+    const scales = cs?.scales ?? [1e-9, 1e-9, 1e-9];
+    const units = cs?.units ?? ["m", "m", "m"];
+    const xyzNm: Record<string, number> = { x: nm[0], y: nm[1], z: nm[2] };
+    return names.map((n, i) => {
+      const nmValue = xyzNm[n] ?? 0;
+      const scale = Number(scales[i]);
+      const unit = units[i];
+      const nmToBase =
+        unit === "m" ? 1e-9 :
+        unit === "µm" || unit === "um" || unit === "micrometer" ? 1e-3 :
+        unit === "nm" || unit === "nanometer" ? 1 :
+        unit === "" ? scale :
+        1;
+      return scale > 0 ? (nmValue * nmToBase) / scale : nmValue;
+    });
+  }
+
+  // True when every layer has loaded what the current view needs. Mirrors
+  // Neuroglancer's own screenshot gate.
+  isReady(): boolean {
+    const viewer = this.viewer;
+    if (!viewer) return false;
+    try {
+      return viewer.isReady();
+    } catch {
+      return false;
+    }
+  }
+
+  // Grab the current view as a PNG. Forces a draw first so the WebGL
+  // buffer is fresh (preserveDrawingBuffer is off, so reading the canvas
+  // without a draw yields black). Optionally downscales to maxWidth so
+  // the agent isn't handed a multi-megabyte image.
+  async screenshot(maxWidth?: number): Promise<{ png: string; width: number; height: number }> {
+    const viewer = this.viewer;
+    if (!viewer) throw new Error("Viewer not mounted yet — load a dataset first.");
+    const display = viewer.display as unknown as { draw: () => void; canvas: HTMLCanvasElement };
+    display.draw();
+    const src = display.canvas;
+    let { width, height } = src;
+    let dataUrl: string;
+    if (maxWidth && width > maxWidth) {
+      const scale = maxWidth / width;
+      const out = document.createElement("canvas");
+      out.width = Math.round(width * scale);
+      out.height = Math.round(height * scale);
+      out.getContext("2d")!.drawImage(src, 0, 0, out.width, out.height);
+      width = out.width;
+      height = out.height;
+      dataUrl = out.toDataURL("image/png");
+    } else {
+      dataUrl = src.toDataURL("image/png");
+    }
+    const prefix = "data:image/png;base64,";
+    if (!dataUrl.startsWith(prefix)) throw new Error("screenshot: canvas returned no PNG data");
+    return { png: dataUrl.slice(prefix.length), width, height };
   }
 
   // Change which segment IDs are visible in a segmentation layer.

@@ -212,6 +212,22 @@ copy it to the clipboard; NEVER paste the long URL into chat):
     export_session writes a portable file; they load it with
     restore_session_state(path=…) and get their own copy (read-only to yours).
 
+SEEING AND REACTING:
+  - `screenshot` returns the current view as an image. Look at it after every
+    visual change (fly_to, select_segments, add_layer, meshify) to confirm the
+    user sees what you intended; call `wait_for_ready` first if chunks may
+    still be loading. `fly_to_segment(layer, id)` flies to an object by id
+    using the measured centroid — prefer it over hand-computed fly_to.
+  - `wait_for_user_action` blocks until the person selects segments, moves the
+    camera or loads a dataset. Loop on it for a "you point, I explain" session:
+    on selection_changed → run_sql for that object_id → screenshot → narrate.
+
+SECURITY (already handled for you — just don't fight it):
+  - The bridge binds loopback and needs a bearer token; launch_or_attach reads
+    or generates it and opens the tab with it. Never paste tokens into chat.
+  - The page contacts no LLM, no analysis cloud, and holds no API keys.
+    Everything you compute stays on this machine unless the user shares.
+
 Other notes:
   - Call launch_or_attach first. Do NOT offer the workspace URL as a "share"
     link — opening it is a fresh blank workspace, not the current view. Share

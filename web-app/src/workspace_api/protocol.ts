@@ -3,13 +3,14 @@
 // This is the DURABLE artifact. MCP is just the first adapter; the Python
 // SDK and any future adapter speak the same operations defined here. Keep
 // this file free of DOM / viewer / DB imports so it can be shared verbatim
-// with non-browser code (it is mirrored by the MCP adapter's schemas.py and
-// the Python SDK).
+// with non-browser code (it is mirrored by the Python SDK's schemas.py).
 //
 // Wire shape: JSON-RPC-ish request/response envelopes relayed between an
 // external agent and the live browser session by the local bridge server.
-// HTTP carries request/response operations; WebSocket carries live streams
-// (connection status, action history, task progress).
+// HTTP carries request/response operations; WebSocket (or GET /events
+// polling) carries live streams: connection status, action history, and
+// user events (selection / camera changes) so an agent can react to what
+// the person at the screen is doing.
 
 // ---------------------------------------------------------------------------
 // Operations
@@ -22,12 +23,15 @@ export type WorkspaceOp =
   | "launch_or_attach"
   | "get_session"
   | "load_descriptor"
+  | "wait_for_ready"
+  | "screenshot"
   | "get_viewer_state"
   | "set_viewer_state"
   | "show_share_link"
   | "get_selection"
   | "select_segments"
   | "fly_to"
+  | "fly_to_segment"
   | "add_layer"
   | "add_annotations"
   | "list_tables"
@@ -48,12 +52,15 @@ export const WORKSPACE_OPS: readonly WorkspaceOp[] = [
   "launch_or_attach",
   "get_session",
   "load_descriptor",
+  "wait_for_ready",
+  "screenshot",
   "get_viewer_state",
   "set_viewer_state",
   "show_share_link",
   "get_selection",
   "select_segments",
   "fly_to",
+  "fly_to_segment",
   "add_layer",
   "add_annotations",
   "list_tables",
@@ -82,6 +89,8 @@ export interface WorkspaceRequest<P = unknown> {
   params?: P;
   /** Which adapter issued this — used for action-history attribution. */
   source?: ActionSource;
+  /** Pin the op to a specific workspace tab (bridge routing). */
+  session?: string;
 }
 
 export interface WorkspaceResponse<R = unknown> {
@@ -108,6 +117,8 @@ export interface SessionSummary {
     voxelSizeNm?: number[];
   };
   viewer: {
+    /** True once every layer has finished loading its current view. */
+    ready: boolean;
     layers: Array<{
       name: string;
       type?: string;
@@ -116,6 +127,10 @@ export interface SessionSummary {
        *  directly in its own environment — the workspace is a sink/source,
        *  not a compute runtime. */
       source?: string;
+      /** On-disk path for local-folder layers, when the descriptor declared
+       *  one (`paths:` block or per-layer `local_path`). The browser-served
+       *  `/local-data/` URL is not readable from outside the tab; this is. */
+      localPath?: string;
       organelleClass?: string;
     }>;
     selectedSegmentsByLayer: Record<string, string[]>;
@@ -144,13 +159,14 @@ export interface SessionSummary {
 }
 
 // ---------------------------------------------------------------------------
-// Annotations — minimal first version; richer NG schemas added later if needed.
+// Annotations — point / line / bbox map 1:1 onto Neuroglancer's native
+// point / line / axis_aligned_bounding_box annotation types.
 // ---------------------------------------------------------------------------
 
 export type WorkspaceAnnotation =
-  | { type: "point"; position: number[]; label?: string }
-  | { type: "line"; points: number[][]; label?: string }
-  | { type: "bbox"; min: number[]; max: number[]; label?: string };
+  | { type: "point"; position: number[]; label?: string; id?: string }
+  | { type: "line"; points: number[][]; label?: string; id?: string }
+  | { type: "bbox"; min: number[]; max: number[]; label?: string; id?: string };
 
 // ---------------------------------------------------------------------------
 // Saved workspace state — agents should prefer these over raw viewer blobs.
@@ -169,7 +185,8 @@ export interface SavedTourguideState {
 }
 
 // ---------------------------------------------------------------------------
-// Plot artifact — plots stay in Tourguide; agents call show_plot.
+// Plot artifact — plots stay in Tourguide; agents call show_plot with a
+// PNG they rendered themselves.
 // ---------------------------------------------------------------------------
 
 export interface PlotArtifact {
@@ -179,7 +196,7 @@ export interface PlotArtifact {
   sourceTable?: string;
   spec: unknown;
   linkedSelection?: boolean;
-  /** Rendered image (data URL) once Tourguide has drawn it. */
+  /** Rendered image (data URL). */
   pngDataUrl?: string;
 }
 
@@ -201,14 +218,21 @@ export interface ActionHistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Live WebSocket events (bridge -> agent, bridge -> browser as relevant).
+// Live events (browser -> bridge -> agents). The bridge stamps each with a
+// monotonically increasing `seq` so HTTP pollers can resume with ?since=.
 // ---------------------------------------------------------------------------
 
 export type WorkspaceEvent =
   | { type: "connection_status"; status: ConnectionStatus; sessionId?: string }
   | { type: "action"; entry: ActionHistoryEntry }
   | { type: "task_progress"; taskId: string; message: string; fraction?: number }
-  | { type: "heartbeat"; at: string };
+  /** The person at the screen changed which segments are visible. */
+  | { type: "selection_changed"; selectedSegmentsByLayer: Record<string, string[]> }
+  /** The person at the screen moved the camera (debounced). */
+  | { type: "position_changed"; position: number[] }
+  /** A different dataset was loaded in the tab. */
+  | { type: "dataset_changed"; name?: string }
+  | { type: "heartbeat"; at?: string };
 
 export type ConnectionStatus = "connected" | "disconnected" | "reconnecting";
 
@@ -218,9 +242,11 @@ export type ConnectionStatus = "connected" | "disconnected" | "reconnecting";
 
 export interface WorkspaceSessionRecord {
   sessionId: string;
+  label?: string;
   createdAt: string;
   lastSeenAt: string;
   url: string;
   mode: "workspace" | "chat";
   status: "running" | "disconnected" | "crashed";
+  readOnly?: boolean;
 }

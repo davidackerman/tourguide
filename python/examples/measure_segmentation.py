@@ -27,7 +27,9 @@ def main(layer_name: str) -> None:
     if layer_name not in layers:
         sys.exit(f"layer {layer_name!r} not found; have: {list(layers)}")
     layer = layers[layer_name]
-    source = layer.get("source")
+    # Prefer the on-disk path for local-folder layers (the browser's
+    # /local-data/ URL isn't readable from here); else the remote URL.
+    source = layer.get("localPath") or layer.get("source")
     voxel = session.get("descriptor", {}).get("voxelSizeNm")  # [x, y, z] nm
     if not source or not voxel:
         sys.exit("layer has no resolvable source/voxel size to read")
@@ -56,12 +58,14 @@ def main(layer_name: str) -> None:
     res = s.ingest_table(layer_name, cols, rows)
     print(f"ingested {res['rowCount']} rows as table '{res['tableId']}'")
 
-    # 4. Fly to the biggest one.
+    # 4. Fly to the biggest one (centroid looked up from the table we just pushed).
     rows.sort(key=lambda r: r[1], reverse=True)
     if rows:
         biggest = rows[0]
-        s.fly_to([biggest[2], biggest[3], biggest[4]], layer=layer_name, segment_id=str(biggest[0]))
+        s.fly_to_segment(layer_name, biggest[0])
         print(f"flew to object {biggest[0]} ({biggest[1]/1e9:.2f} um^3)")
+        # 5. Look at it.
+        s.screenshot("biggest.png", max_width=1280)
 
 
 def load_array(source: str):

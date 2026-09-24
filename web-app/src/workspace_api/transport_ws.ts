@@ -12,7 +12,13 @@
 //   browser -> bridge : { kind: "register", session }    on (re)connect
 //                       { kind: "response", response }    op result
 //                       { kind: "event",    event }       live event
+//                       { kind: "persist",  state }       rolling auto-save
 //                       { kind: "pong" }
+//
+// Auth: the bridge requires a token (see bridge/server.mjs). The tab gets it
+// from the `bridgeToken` URL parameter (the launcher opens the tab with it;
+// read-only share links carry the weaker view token) and sends it as a
+// `token` query parameter on the WS URL.
 
 import type {
   ConnectionStatus,
@@ -24,8 +30,10 @@ import type {
 export interface BrowserTransportOptions {
   sessionId: string;
   mode: "workspace" | "chat";
-  /** ws://host:port — defaults to the page host on TG_BRIDGE_PORT. */
+  /** ws://host:port/browser — defaults to the page host on TG_BRIDGE_PORT. */
   bridgeWsUrl: string;
+  /** Bearer token the bridge expects; omitted when the bridge runs with auth off. */
+  token?: string;
   /** Read-only viewer: the id of the session to view (the bridge sends THAT
    *  session's snapshot to restore, while we register under our own fresh id). */
   viewOf?: string;
@@ -82,18 +90,27 @@ export class BrowserWsTransport {
     }
   }
 
+  private url(): string {
+    if (!this.opts.token) return this.opts.bridgeWsUrl;
+    const u = new URL(this.opts.bridgeWsUrl);
+    u.searchParams.set("token", this.opts.token);
+    return u.toString();
+  }
+
   private connect(): void {
     this.opts.onStatus("reconnecting", `connecting to ${this.opts.bridgeWsUrl}`);
     let ws: WebSocket;
     try {
-      ws = new WebSocket(this.opts.bridgeWsUrl);
+      ws = new WebSocket(this.url());
     } catch (err) {
       this.scheduleReconnect(`connect failed: ${(err as Error).message}`);
       return;
     }
     this.ws = ws;
+    let opened = false;
 
     ws.onopen = () => {
+      opened = true;
       this.backoff = 500;
       this.send({
         kind: "register",
@@ -126,9 +143,18 @@ export class BrowserWsTransport {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws === ws) this.ws = null;
-      this.scheduleReconnect("bridge connection closed");
+      // A handshake that never opened is almost always the bridge refusing
+      // us (401: missing/wrong token). Say so instead of "closed".
+      const detail = !opened
+        ? this.opts.token
+          ? "bridge refused the connection (wrong token?)"
+          : "bridge refused the connection — open this tab via the launcher, or add ?bridgeToken=… to the URL"
+        : ev.reason
+          ? `bridge closed: ${ev.reason}`
+          : "bridge connection closed";
+      this.scheduleReconnect(detail);
     };
 
     ws.onerror = () => {

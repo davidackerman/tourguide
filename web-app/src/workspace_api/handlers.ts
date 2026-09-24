@@ -5,13 +5,15 @@
 //
 // Operations are intentionally semantic (select_segments, fly_to, …);
 // set_viewer_state is the escape hatch for raw Neuroglancer blobs.
+//
+// Principle: the agent owns compute, Tourguide owns visual state. Nothing in
+// here runs Python or calls an LLM — show_plot takes a PNG the agent
+// rendered, ingest_table takes rows the agent computed.
 
 import type { BundledViewer } from "../bundled_viewer.js";
 import type { DatasetDB } from "../db.js";
 import type { DatasetDescriptor } from "../descriptor.js";
-import type { LLMBackend } from "../llm.js";
 import { runQuery, ingestTableIntoDB } from "../db.js";
-import { renderPlotFromCode, runPlotQuery } from "../plot.js";
 import { SessionStore } from "./session_state.js";
 import type {
   PlotArtifact,
@@ -38,8 +40,6 @@ export interface WorkspaceContext {
   /** Show a clickable share link in the workspace UI (avoids pasting a long
    *  URL through the agent's chat). */
   displayShareLink: (url: string, label?: string) => void;
-  /** AI backend — only needed for the question-based show_plot path. */
-  getBackend: () => LLMBackend;
 }
 
 export type HandlerMap = Record<WorkspaceOp, (params: any) => Promise<unknown>>;
@@ -48,6 +48,41 @@ const MAX_SQL_ROWS = 1000;
 
 const firstSource = (source: string | string[] | undefined): string | undefined =>
   Array.isArray(source) ? source[0] : source;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Only SELECT-shaped statements go through the query ops. Anything that
+ *  writes (INSERT/UPDATE/DROP/…) or chains several statements is refused,
+ *  so the agent can't mutate tables through what the tool surface calls
+ *  a read-only query. ingest_table is the sanctioned write path. */
+const assertReadOnlySql = (sql: string): void => {
+  const stripped = sql
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ")
+    .trim()
+    .replace(/;+\s*$/, "");
+  if (stripped.includes(";")) {
+    throw new Error("run_sql: one statement at a time");
+  }
+  const first = (/^\s*(\w+)/.exec(stripped)?.[1] ?? "").toUpperCase();
+  if (!["SELECT", "WITH", "EXPLAIN", "PRAGMA", "VALUES"].includes(first)) {
+    throw new Error(
+      `run_sql is read-only (got '${first || "?"}'). Use ingest_table to add or replace data.`,
+    );
+  }
+  if (first === "PRAGMA" && !/^\s*PRAGMA\s+table_info/i.test(stripped)) {
+    throw new Error("run_sql: only PRAGMA table_info is permitted");
+  }
+};
+
+const quoteIdent = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+
+const POSITION_COLUMNS: Array<[string, string, string]> = [
+  ["com_x_nm", "com_y_nm", "com_z_nm"],
+  ["position_x_nm", "position_y_nm", "position_z_nm"],
+  ["position_x", "position_y", "position_z"],
+  ["com_x", "com_y", "com_z"],
+];
 
 const segmentationLayerNames = (ctx: WorkspaceContext): string[] => {
   const state = ctx.viewer.getNgState() as { layers?: Array<Record<string, unknown>> } | null;
@@ -88,6 +123,7 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
         }
       : undefined,
     viewer: {
+      ready: ctx.viewer.isReady(),
       layers: ngLayers.map((l) => {
         const name = String(l.name ?? "");
         const dl = descLayers.get(name);
@@ -96,6 +132,7 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
           type: l.type ? String(l.type) : undefined,
           visible: l.visible === undefined ? true : Boolean(l.visible),
           source: dl ? firstSource(dl.source) : undefined,
+          localPath: dl?.local_path,
           organelleClass: dl?.organelle_class,
         };
       }),
@@ -114,29 +151,32 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
   };
 };
 
-const annotationsToPoints = (
-  anns: WorkspaceAnnotation[],
-): { pos: [number, number, number]; description?: string }[] => {
-  const pts: { pos: [number, number, number]; description?: string }[] = [];
-  for (const a of anns) {
-    if (a.type === "point") {
-      pts.push({ pos: a.position as [number, number, number], description: a.label });
-    } else if (a.type === "line") {
-      a.points.forEach((p, i) =>
-        pts.push({ pos: p as [number, number, number], description: a.label ? `${a.label} [${i}]` : undefined }),
-      );
-    } else if (a.type === "bbox") {
-      pts.push({ pos: a.min as [number, number, number], description: a.label ? `${a.label} min` : "min" });
-      pts.push({ pos: a.max as [number, number, number], description: a.label ? `${a.label} max` : "max" });
-    }
-  }
-  return pts;
-};
-
 const requireDB = (ctx: WorkspaceContext): DatasetDB => {
   const db = ctx.getDB();
-  if (!db) throw new Error("No dataset DB loaded — load a dataset with tables first.");
+  if (!db) throw new Error("No dataset DB loaded — ingest a table first.");
   return db;
+};
+
+/** Pick the table that describes a layer: explicit name, else the table
+ *  whose layer_name / table_name / organelle_class matches. */
+const tableForLayer = (ctx: WorkspaceContext, layer: string, table?: string) => {
+  const db = requireDB(ctx);
+  if (table) {
+    const t = db.tables.find((x) => x.table_name === table);
+    if (!t) throw new Error(`table not found: ${table}`);
+    return { db, table: t };
+  }
+  const cls = ctx.getDescriptor()?.layers.find((l) => l.name === layer)?.organelle_class;
+  const t =
+    db.tables.find((x) => x.layer_name === layer) ??
+    db.tables.find((x) => x.table_name === layer) ??
+    (cls ? db.tables.find((x) => x.organelle_class === cls) : undefined);
+  if (!t) {
+    throw new Error(
+      `no table for layer '${layer}' (have: ${db.tables.map((x) => x.table_name).join(", ") || "none"}); pass 'table'`,
+    );
+  }
+  return { db, table: t };
 };
 
 export function createHandlers(ctx: WorkspaceContext): HandlerMap {
@@ -147,10 +187,45 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
 
     get_session: async () => buildSessionSummary(ctx),
 
-    load_descriptor: async (p: { descriptor: DatasetDescriptor }) => {
+    load_descriptor: async (p: { descriptor: DatasetDescriptor; wait?: boolean; timeoutMs?: number }) => {
       if (!p?.descriptor) throw new Error("load_descriptor: missing 'descriptor'");
       ctx.loadDescriptor(p.descriptor);
-      return { name: p.descriptor.name };
+      let ready = false;
+      if (p.wait !== false) {
+        const deadline = Date.now() + (p.timeoutMs ?? 30_000);
+        await sleep(250); // let NG mount the layers before polling readiness
+        while (Date.now() < deadline) {
+          if (ctx.viewer.isReady()) {
+            ready = true;
+            break;
+          }
+          await sleep(250);
+        }
+      }
+      return { name: p.descriptor.name, ready };
+    },
+
+    // Block until every layer has loaded the chunks for the current view,
+    // or the timeout passes. Lets an agent take a screenshot / read state
+    // right after fly_to or load_descriptor without racing the loader.
+    wait_for_ready: async (p: { timeoutMs?: number }) => {
+      const deadline = Date.now() + (p?.timeoutMs ?? 30_000);
+      while (Date.now() < deadline) {
+        if (ctx.viewer.isReady()) return { ready: true };
+        await sleep(200);
+      }
+      return { ready: false, timedOut: true };
+    },
+
+    // The agent's eyes: a PNG of the current view. Waits for the view to
+    // finish loading first (bounded) so the image isn't half-drawn.
+    screenshot: async (p: { waitForReadyMs?: number; maxWidth?: number }) => {
+      const wait = p?.waitForReadyMs ?? 10_000;
+      const deadline = Date.now() + wait;
+      while (wait > 0 && Date.now() < deadline && !ctx.viewer.isReady()) await sleep(150);
+      const shot = await ctx.viewer.screenshot(p?.maxWidth);
+      const position = (ctx.viewer.getNgState() as { position?: number[] } | null)?.position;
+      return { ...shot, ready: ctx.viewer.isReady(), position };
     },
 
     get_viewer_state: async () => {
@@ -198,18 +273,55 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       return { position: p.position };
     },
 
+    // Fly to an object by id, looking its centroid up in the layer's table
+    // (com_x_nm/com_y_nm/com_z_nm or the legacy position_* variants).
+    fly_to_segment: async (p: { layer: string; segmentId: string | number; table?: string; select?: boolean }) => {
+      if (!p?.layer) throw new Error("fly_to_segment: missing 'layer'");
+      if (p.segmentId === undefined || p.segmentId === null) throw new Error("fly_to_segment: missing 'segmentId'");
+      const { db, table } = tableForLayer(ctx, p.layer, p.table);
+      const cols = POSITION_COLUMNS.find((c) => c.every((k) => table.columns.includes(k)));
+      if (!cols) {
+        throw new Error(`table '${table.table_name}' has no position columns (need com_x_nm/com_y_nm/com_z_nm)`);
+      }
+      const res = runQuery(
+        db.db,
+        `SELECT ${cols.map(quoteIdent).join(", ")} FROM ${quoteIdent(table.table_name)} WHERE object_id = ${Number(p.segmentId)} LIMIT 1`,
+      );
+      const row = res.rows[0];
+      if (!row) throw new Error(`object_id ${p.segmentId} not found in '${table.table_name}'`);
+      const position = [Number(row[0]), Number(row[1]), Number(row[2])] as [number, number, number];
+      if (position.some((v) => !Number.isFinite(v))) {
+        throw new Error(`object_id ${p.segmentId} has a non-numeric position in '${table.table_name}'`);
+      }
+      const id = String(p.segmentId);
+      ctx.viewer.flyTo(position, id, p.layer);
+      if (p.select !== false) ctx.viewer.highlightSegments(p.layer, [id]);
+      return { layer: p.layer, segmentId: id, position, table: table.table_name };
+    },
+
     add_layer: async (p: { layer: Record<string, unknown> }) => {
       if (!p?.layer?.name) throw new Error("add_layer: layer spec must include 'name'");
       ctx.viewer.addLayerFromSpec(p.layer);
       return { name: String(p.layer.name) };
     },
 
-    add_annotations: async (p: { layerName?: string; annotations: WorkspaceAnnotation[] }) => {
+    add_annotations: async (p: { layerName?: string; annotations: WorkspaceAnnotation[]; replace?: boolean }) => {
       const anns = p?.annotations ?? [];
       if (anns.length === 0) throw new Error("add_annotations: 'annotations' is empty");
-      const pts = annotationsToPoints(anns);
-      ctx.viewer.addAnnotationLayer(p.layerName || "agent-annotations", pts);
-      return { layerName: p.layerName || "agent-annotations", count: pts.length };
+      for (const a of anns) {
+        if (a.type === "point" && (!Array.isArray(a.position) || a.position.length < 3)) {
+          throw new Error("add_annotations: point needs 'position' [x,y,z]");
+        }
+        if (a.type === "line" && (!Array.isArray(a.points) || a.points.length !== 2)) {
+          throw new Error("add_annotations: line needs exactly two 'points' (use several lines for a polyline)");
+        }
+        if (a.type === "bbox" && (!Array.isArray(a.min) || !Array.isArray(a.max))) {
+          throw new Error("add_annotations: bbox needs 'min' and 'max' [x,y,z]");
+        }
+      }
+      const layerName = p.layerName || "agent-annotations";
+      const count = ctx.viewer.addWorkspaceAnnotations(layerName, anns, p.replace === true);
+      return { layerName, count };
     },
 
     list_tables: async () => {
@@ -218,6 +330,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
         tables: (db?.tables ?? []).map((t) => ({
           id: t.table_name,
           name: t.organelle_class || t.table_name,
+          layer: t.layer_name,
           rowCount: t.row_count,
           columns: t.columns,
         })),
@@ -227,7 +340,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
     get_table_schema: async (p: { table: string }) => {
       if (!p?.table) throw new Error("get_table_schema: missing 'table'");
       const db = requireDB(ctx);
-      const info = runQuery(db.db, `PRAGMA table_info("${p.table.replace(/"/g, '""')}");`);
+      const info = runQuery(db.db, `PRAGMA table_info(${quoteIdent(p.table)});`);
       const nameIdx = info.columns.indexOf("name");
       const typeIdx = info.columns.indexOf("type");
       const columns = info.rows.map((r) => ({
@@ -241,6 +354,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
 
     run_sql: async (p: { sql: string }) => {
       if (!p?.sql) throw new Error("run_sql: missing 'sql'");
+      assertReadOnlySql(p.sql);
       const db = requireDB(ctx);
       const res = runQuery(db.db, p.sql);
       const truncated = res.rows.length > MAX_SQL_ROWS;
@@ -277,6 +391,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
 
     show_table: async (p: { sql: string; name?: string }) => {
       if (!p?.sql) throw new Error("show_table: missing 'sql'");
+      assertReadOnlySql(p.sql);
       const db = requireDB(ctx);
       const res = runQuery(db.db, p.sql);
       const name = (p.name || "agent_result").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
@@ -292,44 +407,24 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       return { tableId: name, name, rowCount: res.rows.length, columns: res.columns };
     },
 
+    // Display a figure the agent rendered in ITS environment. No Pyodide,
+    // no LLM — just show the image and keep it as a session artifact.
     show_plot: async (p: {
-      png?: string;
-      code?: string;
-      question?: string;
+      png: string;
       title?: string;
       kind?: PlotArtifact["kind"];
       sourceTable?: string;
       linkedSelection?: boolean;
     }) => {
-      let pngDataUrl: string;
-      let usedCode = p.code ?? "";
-      // Preferred path: the agent rendered the figure in its OWN environment
-      // and hands us the image. No Pyodide, no AI backend — just display it.
-      if (p.png) {
-        pngDataUrl = p.png.startsWith("data:") ? p.png : `data:image/png;base64,${p.png}`;
-      } else if (p.code) {
-        const r = await renderPlotFromCode(p.code, requireDB(ctx));
-        pngDataUrl = r.png_data_url;
-      } else if (p.question) {
-        const db = requireDB(ctx);
-        const backend = ctx.getBackend();
-        if (!backend.isReady()) {
-          throw new Error("show_plot: 'question' path needs an AI backend; pass 'code' instead.");
-        }
-        const r = await runPlotQuery(p.question, db, backend);
-        pngDataUrl = r.png_data_url;
-        usedCode = r.code;
-      } else {
-        throw new Error(
-          "show_plot: provide 'png' (an image the agent rendered — preferred), " +
-            "'code' (matplotlib, runs in-browser), or 'question' (needs AI backend).",
-        );
+      if (!p?.png || typeof p.png !== "string") {
+        throw new Error("show_plot: 'png' (base64 PNG or data URL, rendered by the agent) is required");
       }
+      const pngDataUrl = p.png.startsWith("data:") ? p.png : `data:image/png;base64,${p.png}`;
       const artifact = ctx.store.addPlot({
         title: p.title,
         kind: p.kind ?? "custom",
         sourceTable: p.sourceTable,
-        spec: { code: usedCode, question: p.question },
+        spec: {},
         linkedSelection: p.linkedSelection,
         pngDataUrl,
       });

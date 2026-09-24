@@ -309,11 +309,11 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
 
           <h4>Analysis backend (heavy compute)</h4>
           <div class="settings-section" data-section="analysis-backend">
-            <p class="hint">Where to run heavy analyses that don't fit in Pyodide's ~4 GB ceiling. Leave empty to disable the remote path (everything still runs locally).</p>
+            <p class="hint">Optional remote server for the legacy chat tools (Σ Analyze / 🐍 Custom) when inputs don't fit in the browser. <strong>Empty (the default) means nothing leaves this machine.</strong> When set, analysis inputs, computed tables and shortened share links are uploaded to that server.</p>
             <div class="analysis-backend-fork-callout">
-              <strong>For real use:</strong> fork the Space.
-              The default URL points to a shared demo Space with limited
-              CPU + memory and possible cold starts.
+              <strong>If you want one, fork the Space</strong> rather than
+              using the shared demo Space (limited CPU + memory, cold starts,
+              shared with other users).
               <a class="btn-link" href="https://huggingface.co/spaces/ackermand/tourguide-analysis?duplicate=true" target="_blank" rel="noopener">Duplicate this Space →</a>
               (~5 min, one-time). Paste the resulting URL below.
               On your Space's <em>Files</em> tab, click <em>"Sync with
@@ -744,6 +744,7 @@ export function openSettingsDialog(opts: SettingsUIOptions): void {
       openaiBaseUrl: get("openaiBaseUrl").trim(),
       webllmModel: get("webllmModel") || WEBLLM_MODELS[0].id,
       analysisBackendUrl: get("analysisBackendUrl").trim(),
+      analysisBackendOptIn: get("analysisBackendUrl").trim() !== "",
     };
     saveSettings(next);
     opts.onChange(backendFromSettings(next));
