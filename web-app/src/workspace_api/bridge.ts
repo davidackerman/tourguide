@@ -6,9 +6,12 @@
 // Agent Actions panel, and reflects connection status.
 //
 // Read-only inspection ops (get_session, get_viewer_state, get_selection,
-// list_*, get_table_schema, run_sql, export_session_summary) do NOT create
-// history entries — the panel logs operations that *change* the workspace,
-// not every poll.
+// list_*, get_table_schema, run_sql, screenshot, wait_for_ready,
+// export_session_summary) do NOT create history entries — the panel logs
+// operations that *change* the workspace, not every poll.
+//
+// It also publishes *user* events (selection / camera / dataset changes made
+// by the person at the screen) so an agent can react to them.
 
 import type { WorkspacePanelHandle } from "../workspace_ui.js";
 import { createHandlers, type WorkspaceContext } from "./handlers.js";
@@ -32,7 +35,13 @@ const READ_ONLY_OPS = new Set<string>([
   "export_session_summary",
   "launch_or_attach",
   "show_share_link",
+  "screenshot",
+  "wait_for_ready",
 ]);
+
+/** How often to compare the live viewer against the last published
+ *  snapshot. Cheap (a JSON stringify of position + selection). */
+const USER_EVENT_POLL_MS = 400;
 
 export interface WorkspaceBridgeHandle {
   stop(): void;
@@ -54,6 +63,12 @@ const summarizeArgs = (params: unknown): string | undefined => {
 const summarizeResult = (result: unknown): string | undefined => {
   if (result === undefined || result === null) return undefined;
   try {
+    // Never echo image payloads into the action log.
+    if (typeof result === "object" && "png" in (result as Record<string, unknown>)) {
+      const { png: _png, ...rest } = result as Record<string, unknown>;
+      void _png;
+      return truncate(JSON.stringify({ ...rest, png: "<png>" }));
+    }
     return truncate(JSON.stringify(result));
   } catch {
     return undefined;
@@ -85,6 +100,8 @@ export function startWorkspaceBridge(
   panel: WorkspacePanelHandle,
   opts: {
     bridgeWsUrl: string;
+    /** Bearer (or view) token the bridge expects. */
+    token?: string;
     viewOnly?: boolean;
     viewOf?: string;
     onBridgeHost?: (host: string) => void;
@@ -96,6 +113,7 @@ export function startWorkspaceBridge(
     sessionId: ctx.sessionId,
     mode: ctx.mode,
     bridgeWsUrl: opts.bridgeWsUrl,
+    token: opts.token,
     viewOf: opts.viewOf,
     onStatus: (status: ConnectionStatus, detail) => panel.setConnectionStatus(status, detail),
     onRequest: (request) => void handle(request),
@@ -211,6 +229,13 @@ export function startWorkspaceBridge(
     }
     transport.sendResponse(response);
 
+    if (!READ_ONLY_OPS.has(request.op)) {
+      // Agent-driven change: rebase the user-event snapshot and stay quiet
+      // for a moment so the agent isn't told about its own fly_to.
+      quietUntil = Date.now() + 1500;
+      snapshot = currentSnapshot();
+    }
+
     // Record + stream an action entry for workspace-changing ops (and any
     // op that errored — a failed write is worth surfacing).
     if (!READ_ONLY_OPS.has(request.op) || error) {
@@ -250,6 +275,68 @@ export function startWorkspaceBridge(
     };
   }
 
+  // --- user events -----------------------------------------------------------
+
+  interface Snapshot {
+    position: string;
+    selection: string;
+    dataset: string;
+    selectionObj: Record<string, string[]>;
+    positionArr?: number[];
+  }
+
+  let quietUntil = 0;
+
+  function currentSnapshot(): Snapshot {
+    const state = ctx.viewer.getNgState() as
+      | { layers?: Array<Record<string, unknown>>; position?: number[] }
+      | null;
+    const selectionObj: Record<string, string[]> = {};
+    for (const l of state?.layers ?? []) {
+      if (l.type !== "segmentation") continue;
+      const name = String(l.name ?? "");
+      const ids = ctx.viewer.getVisibleSegments(name);
+      if (ids.length) selectionObj[name] = ids;
+    }
+    const positionArr = state?.position?.map((v) => Math.round(v));
+    return {
+      position: JSON.stringify(positionArr ?? null),
+      selection: JSON.stringify(selectionObj),
+      dataset: ctx.getDescriptor()?.name ?? "",
+      selectionObj,
+      positionArr,
+    };
+  }
+
+  let snapshot = currentSnapshot();
+  const poll = setInterval(() => {
+    const next = currentSnapshot();
+    if (Date.now() >= quietUntil) {
+      if (next.dataset !== snapshot.dataset) {
+        transport.sendEvent({ type: "dataset_changed", name: next.dataset || undefined });
+      }
+      if (next.selection !== snapshot.selection) {
+        transport.sendEvent({ type: "selection_changed", selectedSegmentsByLayer: next.selectionObj });
+      }
+      if (next.position !== snapshot.position && next.positionArr) {
+        transport.sendEvent({ type: "position_changed", position: next.positionArr });
+      }
+      // A human change is also worth persisting (agent ops already do).
+      if (
+        !opts.viewOnly &&
+        (next.dataset !== snapshot.dataset || next.selection !== snapshot.selection)
+      ) {
+        schedulePersist();
+      }
+    }
+    snapshot = next;
+  }, USER_EVENT_POLL_MS);
+
   transport.start();
-  return { stop: () => transport.stop() };
+  return {
+    stop: () => {
+      clearInterval(poll);
+      transport.stop();
+    },
+  };
 }

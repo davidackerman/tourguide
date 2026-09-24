@@ -1,7 +1,5 @@
 import type { DatasetDescriptor } from "./descriptor.js";
 
-const NEUROGLANCER_HOST = "https://neuroglancer-demo.appspot.com/";
-
 interface NgDimensions {
   [axis: string]: [number, string];
 }
@@ -79,39 +77,4 @@ export function descriptorToNgState(d: DatasetDescriptor): NgState {
     state.selectedLayer = { visible: true, layer: firstImage.name };
   }
   return state;
-}
-
-export function ngStateToUrl(state: NgState): string {
-  const json = JSON.stringify(state);
-  return `${NEUROGLANCER_HOST}#!${encodeURIComponent(json)}`;
-}
-
-export class Viewer {
-  private iframe: HTMLIFrameElement;
-  private currentState: NgState | null = null;
-
-  constructor(iframe: HTMLIFrameElement) {
-    this.iframe = iframe;
-  }
-
-  loadDescriptor(d: DatasetDescriptor): void {
-    const state = descriptorToNgState(d);
-    this.currentState = state;
-    this.iframe.src = ngStateToUrl(state);
-  }
-
-  flyTo(position: [number, number, number], segmentId?: string, layerName?: string): void {
-    if (!this.currentState) return;
-    const next: NgState = JSON.parse(JSON.stringify(this.currentState));
-    next.position = position;
-    if (segmentId && layerName) {
-      const layer = next.layers.find((l) => l.name === layerName);
-      if (layer) {
-        const augmented = layer as NgLayer & { segments?: string[] };
-        augmented.segments = [segmentId];
-      }
-    }
-    this.currentState = next;
-    this.iframe.src = ngStateToUrl(next);
-  }
 }

@@ -8,27 +8,56 @@ Load-bearing behavior (see the agent-workspace plan):
   5. On reconnect failure, raise a clear error so the caller can relaunch.
 
 Config via environment:
-  TOURGUIDE_BRIDGE_URL     default http://localhost:7723
+  TOURGUIDE_BRIDGE_URL     default http://127.0.0.1:7723
   TOURGUIDE_WORKSPACE_URL  default http://localhost:5173/?mode=workspace
-  TOURGUIDE_WEBAPP_DIR     path to web-app/ (enables auto-starting the bridge)
+  TOURGUIDE_WEBAPP_DIR     path to web-app/ (auto-detected from this repo)
+  TOURGUIDE_WEBAPP_MODE    "preview" (default; production build) or "dev"
   TOURGUIDE_AUTO_OPEN      "1" (default) to open a browser when no session
+  TOURGUIDE_BRIDGE_TOKEN   bearer token to use / pass to a bridge we start
+                           (default: generated per launch; read back from the
+                           bridge's token file when attaching)
+  TOURGUIDE_LOG_DIR        where bridge/webapp logs go (default: <tmp>/tourguide-logs)
+  TG_BRIDGE_HOST / TG_HOST passed through to the bridge / Vite; default loopback.
+                           Set both to 0.0.0.0 to share sessions on the LAN.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import subprocess
+import tempfile
 import webbrowser
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
 from .client import WorkspaceClient, WorkspaceError
 
-DEFAULT_BRIDGE_URL = "http://localhost:7723"
+DEFAULT_BRIDGE_URL = "http://127.0.0.1:7723"
 DEFAULT_WORKSPACE_URL = "http://localhost:5173/?mode=workspace"
+LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def _default_log_dir() -> Path:
+    d = Path(os.environ.get("TOURGUIDE_LOG_DIR") or Path(tempfile.gettempdir()) / "tourguide-logs")
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)  # private: logs are on a possibly shared machine
+    except OSError:
+        pass
+    return d
+
+
+def _tail(path: Path, n: int = 15) -> str:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+        return "\n".join(lines[-n:])
+    except OSError:
+        return "(no log)"
 
 
 def _detect_webapp_dir() -> str | None:
@@ -55,6 +84,8 @@ class LauncherConfig:
     # "dev" uses the Vite dev server (fast/hot-reload, but its worker/codec
     # handling leaves Neuroglancer image chunks black on some setups).
     webapp_mode: str = os.environ.get("TOURGUIDE_WEBAPP_MODE", "preview")
+    token: str | None = os.environ.get("TOURGUIDE_BRIDGE_TOKEN") or os.environ.get("TG_BRIDGE_TOKEN")
+    log_dir: Path = field(default_factory=_default_log_dir)
 
 
 async def _wait_for(predicate, timeout: float, interval: float = 0.5):
@@ -75,12 +106,45 @@ class Launcher:
         self.config = config or LauncherConfig()
         self._bridge_proc: subprocess.Popen | None = None
         self._webapp_proc: subprocess.Popen | None = None
+        if self.config.token:
+            self.client.set_token(self.config.token)
+
+    @property
+    def bridge_log(self) -> Path:
+        return self.config.log_dir / "bridge.log"
+
+    @property
+    def webapp_log(self) -> Path:
+        return self.config.log_dir / "webapp.log"
+
+    def lan_exposed(self) -> bool:
+        """True when the bridge/web app were asked to bind a non-loopback
+        address (TG_BRIDGE_HOST / TG_HOST), so LAN share links can work."""
+        return (
+            os.environ.get("TG_BRIDGE_HOST", "127.0.0.1") not in LOOPBACK
+            and os.environ.get("TG_HOST", "localhost") not in LOOPBACK
+        )
+
+    def workspace_url_with_token(self, view: bool = False) -> str:
+        """The workspace URL plus bridgeToken (and bridgePort if non-default)
+        so the tab can authenticate to the bridge. view=True uses the weaker
+        view token (read-only viewer links)."""
+        u = urlparse(self.config.workspace_url)
+        q = dict(parse_qsl(u.query))
+        q.setdefault("mode", "workspace")
+        bport = urlparse(self.config.bridge_url).port or 7723
+        if bport != 7723:
+            q["bridgePort"] = str(bport)
+        token = self.client.view_token if view else self.client.token
+        if token:
+            q["bridgeToken"] = token
+        return urlunparse(u._replace(query=urlencode(q)))
 
     def lan_url(self) -> str | None:
-        """The workspace URL with this machine's LAN IP swapped in, so it can
-        be shared with others on the same network (vite preview + the bridge
-        already bind all interfaces, and the page derives its bridge URL from
-        the host it was opened on). Returns None if no LAN IP is found."""
+        """The workspace URL with this machine's LAN IP swapped in, for sharing
+        with others on the same network. Only meaningful when the bridge and
+        web app are bound to a non-loopback address (lan_exposed()). Returns
+        None if no LAN IP is found."""
         import socket
 
         try:
@@ -110,20 +174,28 @@ class Launcher:
 
         if (Path(self.config.webapp_dir) / "node_modules").is_dir():
             return
+        log = open(self.webapp_log, "ab")
         install = await asyncio.create_subprocess_exec(
             "npm", "install",
             cwd=self.config.webapp_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
         )
         if await install.wait() != 0:
             raise WorkspaceError(
-                "`npm install` failed in the web app, so it can't be started. "
-                "Run it manually in web-app to see the error."
+                "`npm install` failed in the web app, so it can't be started.\n"
+                f"Log ({self.webapp_log}):\n{_tail(self.webapp_log, 30)}"
             )
 
     async def ensure_bridge(self, timeout: float = 20.0) -> None:
         if await self.client.is_healthy():
+            # Attaching to a bridge someone else started: pick up its token.
+            health = await self.client.health()
+            if health.get("auth") and self.client.token is None:
+                raise WorkspaceError(
+                    f"a bridge is running at {self.config.bridge_url} but its token could not be "
+                    "found. Set TOURGUIDE_BRIDGE_TOKEN to the value it was started with."
+                )
             return
         if not self.config.webapp_dir:
             raise WorkspaceError(
@@ -132,20 +204,34 @@ class Launcher:
                 "Start it manually: `cd web-app && npm run bridge`."
             )
         await self.ensure_deps()
+        token = self.config.token or secrets.token_urlsafe(24)
+        self.config.token = token
+        self.client.set_token(token)
+        parsed = urlparse(self.config.bridge_url)
+        env = {
+            **os.environ,
+            "TG_BRIDGE_TOKEN": token,
+            "TG_BRIDGE_PORT": str(parsed.port or 7723),
+            "TG_BRIDGE_HOST": os.environ.get("TG_BRIDGE_HOST") or parsed.hostname or "127.0.0.1",
+        }
         # Spawn `npm run bridge` in its own session so it outlives this MCP
-        # process (e.g. when the client restarts the server); it self-reports
-        # readiness via /health.
+        # process (e.g. when the client restarts the server); stdout/err go to
+        # a log file so a failure is diagnosable instead of silent. The token
+        # travels in the environment, never on the command line or in logs.
+        log = open(self.bridge_log, "ab")
         self._bridge_proc = subprocess.Popen(
             ["npm", "run", "bridge"],
             cwd=self.config.webapp_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
             start_new_session=True,
         )
         ok = await _wait_for(self.client.is_healthy, timeout=timeout)
         if not ok:
             raise WorkspaceError(
-                f"started the bridge but it never became healthy at {self.config.bridge_url}."
+                f"started the bridge but it never became healthy at {self.config.bridge_url}.\n"
+                f"Log ({self.bridge_log}):\n{_tail(self.bridge_log)}"
             )
 
     async def _reachable_mode(self) -> str | None:
@@ -232,6 +318,7 @@ class Launcher:
             await _wait_for(lambda: self._is_port_free(port), timeout=10.0)
         # Pin the port so the URL we open matches the server we start.
         await self.ensure_deps()
+        log = open(self.webapp_log, "ab")
         if self.config.webapp_mode == "dev":
             cmd = ["npm", "run", "dev", "--", "--port", port, "--strictPort"]
         else:
@@ -239,28 +326,28 @@ class Launcher:
             build = await asyncio.create_subprocess_exec(
                 "npm", "run", "build",
                 cwd=self.config.webapp_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
             if await build.wait() != 0:
                 raise WorkspaceError(
-                    "`npm run build` failed, so the preview server can't start. "
-                    "Run it manually in web-app to see the error, or set "
-                    "TOURGUIDE_WEBAPP_MODE=dev to use the dev server instead."
+                    "`npm run build` failed, so the preview server can't start.\n"
+                    f"Log ({self.webapp_log}):\n{_tail(self.webapp_log, 40)}"
                 )
             cmd = ["npm", "run", "preview", "--", "--port", port, "--strictPort"]
         self._webapp_proc = subprocess.Popen(
             cmd,
             cwd=self.config.webapp_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         ok = await _wait_for(self._webapp_reachable, timeout=timeout)
         if not ok:
             raise WorkspaceError(
                 f"started the web app but it never came up at {self.config.workspace_url}. "
-                f"Is port {port} free? (a stale server there will block --strictPort)."
+                f"Is port {port} free? (a stale server there will block --strictPort).\n"
+                f"Log ({self.webapp_log}):\n{_tail(self.webapp_log)}"
             )
 
     async def launch_or_attach(
@@ -303,9 +390,10 @@ class Launcher:
         # existing one (important when `new` and others are already open).
         before = {s["sessionId"] for s in await self._live_sessions()}
         await self.ensure_webapp()
+        url = self.workspace_url_with_token()
         if self.config.auto_open:
             try:
-                webbrowser.open(self.config.workspace_url)
+                webbrowser.open(url)
             except Exception:
                 pass  # headless / no browser — caller may open it manually
 
@@ -318,9 +406,8 @@ class Launcher:
         opened = await _wait_for(_fresh_session, timeout=wait_for_session)
         if not opened:
             raise WorkspaceError(
-                "no Tourguide workspace session connected. Open "
-                f"{self.config.workspace_url} in a browser (it must be able to "
-                f"reach the bridge at {self.config.bridge_url}), then retry."
+                "no Tourguide workspace session connected. Open this URL in a browser "
+                f"on this machine (it carries the bridge token), then retry:\n  {url}"
             )
         return opened
 
@@ -362,7 +449,10 @@ class Launcher:
             sessions = await self.client.sessions()
         except Exception:
             return []
-        live = [s for s in sessions if s.get("status") == "running" and self._seen_recently(s)]
+        live = [
+            s for s in sessions
+            if s.get("status") == "running" and self._seen_recently(s) and not s.get("readOnly")
+        ]
         live.sort(key=lambda s: s.get("createdAt", ""), reverse=True)
         return live
 

@@ -364,7 +364,10 @@ updateBackendIndicator();
 // pings on top of the agent's own traffic — material when HF's free
 // tier has a tight per-IP rate budget across the whole *.hf.space
 // subdomain.
-{
+// Never in workspace mode: the external agent owns compute, and a page load
+// should not beacon a third-party host unless the user opted into a backend
+// for the legacy chat tools.
+if (!isWorkspaceMode()) {
   const warmUpUrl = loadSettings().analysisBackendUrl.trim();
   if (warmUpUrl) {
     const WARM_UP_TTL_MS = 5 * 60 * 1000;
@@ -404,8 +407,9 @@ if (isWorkspaceMode()) {
   workspacePanel = renderWorkspacePanel(queryHost);
   // Hide non-agentic compute chrome: the agent runs analysis/recipes and writes
   // computed layers, so the in-browser Analyze / Custom / Save-zarr buttons are
-  // redundant here. (Load / Share / Copy NG stay — Copy NG is provenance.)
-  for (const id of ["analyze-btn", "custom-btn", "download-btn"]) {
+  // redundant here, and the upload-based Share is replaced by the agent's
+  // share_session / export_session. (Load / Copy NG stay — Copy NG is provenance.)
+  for (const id of ["analyze-btn", "custom-btn", "download-btn", "share-btn"]) {
     document.getElementById(id)?.style.setProperty("display", "none");
   }
   // Clicking a docked plot thumbnail enlarges it in the modal.
@@ -951,7 +955,16 @@ shareBtn.addEventListener("click", async () => {
   // null = no short-link was attempted (inline URL — no storage involved);
   // true = HF Datasets (persistent); false = /tmp fallback (ephemeral).
   let persistent: boolean | null = null;
-  if (backendUrl) {
+  // Uploading the share payload (viewer state, layer URLs, computed tables,
+  // prompt history) to the backend is an explicit choice every time — it
+  // leaves the machine. Cancel keeps the self-contained long URL.
+  const wantsUpload =
+    !!backendUrl &&
+    confirm(
+      `Shorten this link by uploading its contents (view, layer URLs, computed tables, prompt history) to\n${backendUrl} ?\n\n` +
+        "OK = upload and copy a short link.\nCancel = copy the long self-contained link (nothing leaves this machine).",
+    );
+  if (wantsUpload) {
     try {
       const suffix = url.slice(url.indexOf("?") >= 0 ? url.indexOf("?") : url.indexOf("#"));
       if (suffix.length > 200) {
@@ -1158,9 +1171,25 @@ function resolveSessionId(): string {
   return id;
 }
 
+// The bridge requires a token (see bridge/server.mjs). The launcher opens the
+// tab with ?bridgeToken=…; share links carry the weaker view token. Remember
+// it in sessionStorage so a reload that drops the query string still connects.
+function resolveBridgeToken(): string | undefined {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get("bridgeToken") || undefined;
+  try {
+    if (token) sessionStorage.setItem("tourguide.bridgeToken", token);
+    else token = sessionStorage.getItem("tourguide.bridgeToken") || undefined;
+  } catch {
+    /* storage blocked — token only lives in the URL */
+  }
+  return token;
+}
+
 function startBridgeIfWorkspace(): void {
   if (!isWorkspaceMode() || !workspacePanel) return;
   const bridgeWsUrl = resolveBridgeWsUrl();
+  const bridgeToken = resolveBridgeToken();
   // The viewer rewrites agent-computed /artifacts/ layer URLs to this host, so
   // shared sessions fetch from the host machine (not a peer's own localhost).
   try {
@@ -1186,8 +1215,9 @@ function startBridgeIfWorkspace(): void {
       getViewerState: () => viewer.getNgState(),
       applyViewerState: (s) => viewer.applyNgState(s as Record<string, unknown>),
       getDescriptorState: () => currentDescriptor,
+      applyDescriptorState: (d, ngState) =>
+        loadDescriptorDirect(d as DatasetDescriptor, ngState as Record<string, unknown> | undefined),
       getTableIds: () => (currentDB?.tables ?? []).map((t) => t.table_name),
-      getPlotIds: () => [],
     },
     () => new Date().toISOString(),
   );
@@ -1208,11 +1238,11 @@ function startBridgeIfWorkspace(): void {
     },
     displayPlot: (artifact) => workspacePanel?.addPlot(artifact),
     displayShareLink: (url, label) => workspacePanel?.addShareLink(url, label),
-    getBackend: () => backend,
   };
 
   startWorkspaceBridge(ctx, workspacePanel, {
     bridgeWsUrl,
+    token: bridgeToken,
     viewOnly,
     viewOf,
     // The bridge reports its LAN IP on register; use it for computed-layer
