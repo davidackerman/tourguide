@@ -31,8 +31,10 @@ export interface BrowserTransportOptions {
   viewOf?: string;
   onRequest: (request: WorkspaceRequest) => void;
   onStatus: (status: ConnectionStatus, detail?: string) => void;
-  /** Called with the bridge-assigned label for this tab (e.g. "workspace-2"). */
-  onRegistered?: (label: string | undefined) => void;
+  /** Called with the bridge-assigned label and the bridge's reachable host:port
+   *  (its LAN IP) so artifact/share URLs can target the host machine, not
+   *  localhost. */
+  onRegistered?: (label: string | undefined, bridgeHost?: string) => void;
   /** Called with a persisted snapshot the bridge sends on (re)connect, so a
    *  reopened ?session=<id> link restores its workspace. */
   onRestore?: (state: unknown) => void;
@@ -115,7 +117,8 @@ export class BrowserWsTransport {
       if (msg.kind === "request" && msg.request) {
         this.opts.onRequest(msg.request);
       } else if (msg.kind === "registered") {
-        this.opts.onRegistered?.((msg as { label?: string }).label);
+        const m = msg as { label?: string; bridgeHost?: string };
+        this.opts.onRegistered?.(m.label, m.bridgeHost);
       } else if (msg.kind === "restore") {
         this.opts.onRestore?.((msg as { state?: unknown }).state);
       } else if (msg.kind === "ping") {

@@ -118,7 +118,10 @@ function connectionStatusEvent() {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "content-type",
+  // `range` so Neuroglancer's mesh/volume range requests survive the CORS
+  // preflight; expose Content-Range/Accept-Ranges so its fetcher can plan them.
+  "Access-Control-Allow-Headers": "content-type, range",
+  "Access-Control-Expose-Headers": "content-length, content-range, accept-ranges",
 };
 
 // Agent-computed artifacts (e.g. a zarr the agent wrote) are served here so the
@@ -140,8 +143,8 @@ function serveArtifact(req, res, pathname) {
     res.end();
     return;
   }
-  fs.readFile(full, (err, data) => {
-    if (err) {
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) {
       res.writeHead(404, CORS);
       res.end("not found");
       return;
@@ -149,13 +152,38 @@ function serveArtifact(req, res, pathname) {
     const ct = /\.(zattrs|zgroup|zarray|json)$/.test(full)
       ? "application/json"
       : "application/octet-stream";
-    res.writeHead(200, {
+    const headers = {
       ...CORS,
       "Cross-Origin-Resource-Policy": "cross-origin",
       "content-type": ct,
       "cache-control": "no-cache",
-    });
-    res.end(data);
+      // Neuroglancer fetches multi-LOD Draco mesh fragments (and large volume
+      // chunks) with HTTP Range requests; advertise + honor them so meshes can
+      // be served straight from here instead of a separate Range-capable server.
+      "accept-ranges": "bytes",
+    };
+    // "bytes=START-END" (END or START may be empty; "bytes=-N" = last N bytes).
+    const m = /^bytes=(\d*)-(\d*)$/.exec((req.headers["range"] || "").trim());
+    if (m && (m[1] !== "" || m[2] !== "")) {
+      let start = m[1] !== "" ? parseInt(m[1], 10) : st.size - parseInt(m[2], 10);
+      let end = m[1] !== "" && m[2] !== "" ? parseInt(m[2], 10) : st.size - 1;
+      start = Math.max(0, start);
+      end = Math.min(end, st.size - 1);
+      if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= st.size) {
+        res.writeHead(416, { ...headers, "content-range": `bytes */${st.size}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
+        ...headers,
+        "content-range": `bytes ${start}-${end}/${st.size}`,
+        "content-length": String(end - start + 1),
+      });
+      fs.createReadStream(full, { start, end }).pipe(res);
+      return;
+    }
+    res.writeHead(200, { ...headers, "content-length": String(st.size) });
+    fs.createReadStream(full).pipe(res);
   });
 }
 
@@ -385,8 +413,28 @@ function handleAgent(ws) {
   });
 }
 
+// First non-internal IPv4 (host:port) so a hosted page can rewrite artifact /
+// share URLs to the host machine instead of "localhost" — reachable by LAN/VPN
+// peers. Null if we can't determine one (then the page keeps its connect host).
+function machineHost() {
+  try {
+    for (const ifaces of Object.values(os.networkInterfaces())) {
+      for (const i of ifaces || []) {
+        if (i.family === "IPv4" && !i.internal) return `${i.address}:${PORT}`;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
 function handleBrowser(ws) {
   let sessionId = null;
+  // A ?view=1 connection registers with `viewOf` set; it is read-only and may
+  // NEVER persist. Enforced here (not just client-side), so a peer that speaks
+  // the WS protocol still cannot write back to the shared session.
+  let isViewer = false;
   ws.on("message", (data) => {
     let msg;
     try {
@@ -396,6 +444,7 @@ function handleBrowser(ws) {
     }
     if (msg.kind === "register" && msg.session) {
       sessionId = msg.session.sessionId;
+      isViewer = !!msg.session.viewOf;
       const existing = sessions.get(sessionId);
       // A label is assigned once per tab and reused across reconnects, so a
       // tab keeps a stable human-readable name (for the "which tab?" choice
@@ -411,7 +460,7 @@ function handleBrowser(ws) {
         status: "running",
       };
       sessions.set(sessionId, { record, ws });
-      ws.send(JSON.stringify({ kind: "registered", label }));
+      ws.send(JSON.stringify({ kind: "registered", label, bridgeHost: machineHost() }));
       log(`browser session registered: ${label} ${sessionId} (${msg.session.mode})`);
       broadcastToAgents(connectionStatusEvent());
       // Reopening a ?session=<id> link should restore its workspace: if we
@@ -427,9 +476,10 @@ function handleBrowser(ws) {
         log(`sent restore snapshot (${restoreId}) to ${label} ${sessionId}`);
       }
     } else if (msg.kind === "persist" && msg.state) {
-      // Rolling auto-save of the page's current workspace snapshot, keyed by
-      // the session id, so the next open of this link restores it.
-      if (sessionId) saveSessionState(sessionId, msg.state);
+      // Rolling auto-save of the page's current snapshot, keyed by session id.
+      // A read-only viewer may never write back — server-enforced, so a shared
+      // ?view=1 link can't be used to modify the owner's saved session.
+      if (sessionId && !isViewer) saveSessionState(sessionId, msg.state);
     } else if (msg.kind === "response" && msg.response) {
       const p = pending.get(msg.response.id);
       if (p) {

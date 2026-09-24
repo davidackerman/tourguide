@@ -2,3 +2,11 @@
 __pycache__/
 *.pyc
 uv.lock
+
+# agent scratch scripts + their outputs (pre-convention; disposable)
+_*
+tg_local/
+
+# per-eval run folders: keep scripts/tables/plots/README, ignore heavy regenerables
+runs/*/meshes/
+runs/*/data/
