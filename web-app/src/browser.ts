@@ -263,7 +263,13 @@ function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<str
     const params = new URLSearchParams(window.location.search);
     if (params.get("ngViewer")) {
       const port = params.get("bridgePort") || "7723";
-      void fetch(`http://${window.location.hostname}:${port}/viewer-fly`, {
+      let token = "";
+      try {
+        token = new URLSearchParams(window.location.search).get("bridgeToken") || sessionStorage.getItem("tourguide.bridgeToken") || "";
+      } catch {
+        /* no storage */
+      }
+      void fetch(`http://${window.location.hostname}:${port}/viewer-fly${token ? `?token=${encodeURIComponent(token)}` : ""}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ position: [px, py, pz], layer: table.layer_name, segmentId }),
