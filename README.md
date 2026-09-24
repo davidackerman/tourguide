@@ -1,385 +1,126 @@
-# Neuroglancer Tourguide
+# Tourguide
 
-A 3D microscopy viewer with built-in structured-data browsing, plain-English queries powered by Claude / Gemini / OpenAI / local Ollama, and Python analysis (mesh-based or voxel-based, in-browser or on a cloud backend).
+A 3D microscopy **visual workspace** — Neuroglancer plus tables, plots, saved
+states and annotations — that a coding agent drives over a local
+**Workspace API**. Ships as an MCP server you drop into Claude Code, Cursor,
+or Claude Desktop.
 
-> **This repo contains two flavors of tourguide.** Pick the one that fits your situation.
+> **You (the agent) own reasoning and compute. Tourguide owns visual state.**
 
-> **🧭 Agent workspace mode:** Tourguide runs as an agent-controllable visual
-> workspace — open `?mode=workspace` and drive the viewer, tables, plots and
-> saved states from **your own** MCP-capable agent (Claude Code/Desktop, Cursor,
-> …), a Python SDK, or raw HTTP via the **Workspace API**.
->
-> The agent runs **locally** — compute in its own environment (no in-browser
-> Pyodide, no cloud backend), **no per-query API cost** (you bring your own
-> agent; the page is a static viewer + thin relay). A **local agent can drive a
-> _hosted_ page** through a local bridge, with unique `?session=<id>` links,
-> read-only `?view=1` shares, full per-session persistence (reopen restores
-> layers + tables + plots), and agent-computed layers served over the LAN. See
-> [`WORKSPACE.md`](WORKSPACE.md), [`mcp/`](mcp/), and [`python/`](python/).
+The agent reads the data and runs analysis in its own environment, then pushes
+results into the workspace: tables with click-to-fly, figures, meshes,
+annotations, camera moves. Tourguide runs no LLM and holds no API keys. By
+default nothing leaves your machine except reads of the data sources you point
+it at, and every request to the bridge needs a per-launch token.
 
----
+```
+Claude Code / Cursor / Claude Desktop
+  └─ tourguide-mcp   (stdio; this repo's .mcp.json)
+       └─ local bridge  (127.0.0.1:7723, bearer token, origin allowlist)
+            └─ Tourguide tab  (?mode=workspace — the default)
+                 └─ Neuroglancer · tables · plots · meshes · annotations · saved states
+```
 
-## 🌐 Web tourguide   `web-app/`
-
-Static web app — Neuroglancer embedded in the page, AI agent for natural-language queries and analysis, share links, optional cloud compute backend. Anyone can use it; nothing to install.
-
-- **Live**: https://tourguide-8j4.pages.dev
-- **Docs**: [`web-app/README.md`](web-app/README.md)
-- **Cloud analysis backend** (optional, for big data): [`hf-space/README.md`](hf-space/README.md)
-
-**Best for**: trying things out, sharing views with collaborators, exploratory analysis, day-to-day use, sharing data with anyone via a URL.
-
-What it does:
-- Loads zarr / n5 / Neuroglancer precomputed datasets directly from S3 / GCS / local folders
-- Natural-language queries against organelle CSVs ("show the largest mito", "plot volume distributions")
-- Agent-generated Python analysis (regionprops, cc3d, custom code) — in-browser via Pyodide or on the HF Space for bigger volumes
-- Share-link with NG state + computed tables embedded; persists across browser refreshes
-- One-click "Copy NG link" for sharing just the viewer state with non-tourguide users
-- Bring your own AI key (Gemini free tier works great), or run an in-browser model via WebLLM
-- **Can be run fully on-prem** (`vite preview` + local `uvicorn` for analysis + local Ollama for LLM) — no cloud required
-
----
-
-## 🖥️ Sidecar tourguide   `server/`
-
-Python service that runs alongside a local Neuroglancer process, streams screenshots, narrates them with local TTS, and records narrated tour videos. Originally the only flavor; preserved for the workflows the web app doesn't (yet) cover.
-
-**Best for**: making narrated tour movies, voice cloning with Chatterbox, fully on-prem GPU workflows, batch tour generation.
-
-What it does (in addition to the web app's features):
-- Voice narration with Chatterbox cloning (GPU TTS)
-- Movie recording with synchronized narration + multiple transition modes
-- Local Ollama integration on a GPU box (the web app supports this too via the OpenAI-compatible backend; the sidecar adds Janelia-cluster-friendly conventions on top)
-
-Setup + usage instructions are below ⬇
-
----
-
-## Features
-
-- **Live Screenshot Streaming**: Debounced 0.1-5 fps JPEG streaming
-- **State Tracking**: Position, zoom, orientation, layer visibility, and segment selection
-- **WebSocket Updates**: Real-time updates to browser panel
-- **AI Narration**: Context-aware descriptions using cloud (Gemini/Claude) or local (Ollama) AI
-- **Natural Language Query**: Ask questions about organelles in plain English
-- **Agent-Driven Visualization**: AI interprets queries to show/hide segments intelligently
-- **AI-Powered Analysis Mode**: Generate and execute Python code for data analysis via natural language
-- **Voice Synthesis**: Browser-based TTS or edge-tts with multiple voices
-- **Movie Recording**: Record navigation sessions with synchronized narration
-- **Multiple Transition Modes**: Direct cuts, crossfade, or smooth state interpolation
-- **Responsive UI**: Clean dark theme with status indicators and narration history
-- **Explore Mode with Verbose Logging**: Real-time progress tracking shows screenshot capture, AI narration generation, and audio synthesis status
-
-## Quick Start
-
-### Installation with pixi (recommended)
+## Install
 
 ```bash
-# Install dependencies with pixi
-pixi install
-
-# Start the server
-pixi run start
-
-# Or with custom settings
-pixi run python server/main.py --ng-port 9999 --web-port 8090 --fps 2
+git clone <this repo> && cd tourguide
+cd web-app && npm install && cd ..
+cd mcp && uv sync && cd ..
+uv sync --project analysis          # the agent's pre-loaded measurement env
 ```
 
-### Alternative: Installation with pip
+Open the repo in Claude Code or Cursor: [`.mcp.json`](.mcp.json) registers the
+`tourguide` MCP server automatically. For Claude Desktop see
+[`mcp/README.md`](mcp/README.md).
+
+Then just say **"attach to Tourguide"**. `launch_or_attach` builds the web app,
+starts the bridge with a fresh token, opens the workspace tab, and attaches.
+No terminals.
+
+## The loop
+
+```
+get_session                         → layer source URLs (zarr/n5/precomputed) + voxel size
+measure(source=…)                   → volume + centroid per object, ingested as a table
+   (or your own Python → ingest_table(name, path="mito.csv"))
+fly_to_segment("mito_seg", 4312)    → camera + selection via the table centroid
+meshify(source=…, segment_ids=[…])  → 3D meshes for a label volume that has none
+show_plot(png_path="hist.png")      → a figure you rendered
+screenshot()                        → you SEE the view and decide what's next
+wait_for_user_action()              → the human clicks something; you respond
+share_session() / export_session()  → hand the view or the whole session to a colleague
+```
+
+Full guide for agents: [`CLAUDE.md`](CLAUDE.md). Architecture, security model
+and the wire contract: [`WORKSPACE.md`](WORKSPACE.md). Python SDK for scripts
+and notebooks: [`python/`](python/). Recipes and the analysis environment:
+[`analysis/`](analysis/).
+
+## Tools
+
+| Group | Tools |
+| --- | --- |
+| Session | `launch_or_attach` (multi-tab aware), `get_session`, `load_descriptor`, `load_url`, `wait_for_ready` |
+| Seeing | `screenshot` (returns an image) |
+| Viewer | `fly_to`, `fly_to_segment`, `select_segments`, `get_selection`, `add_layer`, `add_annotations` (point / line / bbox), `get_viewer_state`, `set_viewer_state` |
+| Compute (runs in the agent's env) | `measure`, `run_recipe`, `list_recipes`, `meshify` |
+| Tables | `ingest_table` (inline or `path=` to CSV / JSON), `run_sql` (read-only), `show_table`, `list_tables`, `get_table_schema` |
+| Plots | `show_plot` (`png_path=` or inline PNG) |
+| Events | `get_recent_events`, `wait_for_user_action` |
+| Sharing | `share_session` (short Tourguide link, view token), `share_view` (Neuroglancer link), `export_session` (portable file) |
+| State | `save_session_state`, `restore_session_state`, `list_saved_states`, `start_recording`, `stop_recording`, `add_narration_note`, `export_session_summary` |
+
+## Privacy and security
+
+- **No keys.** Workspace mode has no LLM integration. Your agent brings its own.
+- **Loopback only by default.** The bridge binds `127.0.0.1` and the web app
+  `localhost`. Set `TG_BRIDGE_HOST=0.0.0.0` and `TG_HOST=0.0.0.0` to share
+  sessions on the LAN.
+- **Token auth.** Every bridge request that reads workspace state or drives
+  the viewer needs a bearer token generated per launch (written 0600 to
+  `tourguide-bridge-<port>.token` in the OS temp dir, never printed). Share
+  links carry a weaker **view token** that only permits a read-only viewer.
+- **Origin allowlist.** Browser requests are accepted only from loopback, this
+  machine's own addresses, or the hosted Tourguide page. A random web page in
+  the same browser can't drive your workspace.
+- **Read-only SQL.** `run_sql` refuses writes; `ingest_table` is the only way in.
+- **Read-only viewers are server-enforced.** A `?view=1` tab can look but
+  never persists or answers ops.
+- **No beacons.** The page contacts no analysis backend or share server unless
+  you configure one in Settings (legacy chat mode only).
+
+## Sharing and hosting
+
+The bridge runs on **your machine**; the page can be served from anywhere
+(the live static build is on Cloudflare Pages) and still be driven by your
+local agent via `?bridge=localhost:7723&bridgeToken=…`. Each workspace has an
+addressable `?session=<id>`; reopening it restores layers, tables and plots
+from `~/.tourguide/session-states`. `share_session` produces a short link with
+the view token; `export_session` writes a portable file a colleague can load
+into their own copy.
+
+## Legacy
+
+Two earlier designs are preserved but not maintained:
+
+- **Chat mode** (`?mode=chat`, deprecated): the browser itself calls an LLM
+  with a key you paste, runs Python via Pyodide or an optional Hugging Face
+  Space, and can upload share links. The analysis backend is now empty by
+  default and uploads require a confirm. See
+  [`web-app/README.md`](web-app/README.md) and [`hf-space/`](hf-space/).
+- **Sidecar server** (Python, narration, movies): moved to
+  [`legacy/`](legacy/) with its docs in [`legacy/docs/`](legacy/docs/).
+
+## Develop
 
 ```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -r server/requirements.txt
-
-# Start the server
-python server/main.py
+cd web-app
+npm run workspace:preview   # build + bridge + preview; prints the tokened URL
+npm run test:smoke          # headless end-to-end (Playwright)
+npx tsc --noEmit            # type-check
 ```
-
-### Usage
-
-**Just open one URL:** `http://localhost:8090/`
-
-The web panel now includes:
-- **Embedded Neuroglancer viewer** (left) with sample EM data pre-loaded
-- **Explore Mode** (default, right panel):
-  - **Screenshots tab**: Live screenshots with AI narrations as you navigate
-  - **Verbose Log tab**: Real-time progress tracking (📸 Screenshot captured → 📤 Sent to AI → ⏳ Waiting → ✅ Narration received → 🔊 Audio generated)
-- **Query Mode**: Natural language questions about organelles with AI-driven visualization
-- **State tracking**: Position, zoom, layers, selections
-- **Recording controls**: Capture and compile narrated tours with multiple transition modes
-
-Navigate in the embedded viewer and watch the live stream update automatically!
-
-### Natural Language Queries
-
-Ask questions about organelles in plain English:
-
-**Examples:**
-- "show the largest mitochondrion"
-- "how many nuclei are there?"
-- "take me to the smallest peroxisome"
-- "show mitochondria larger than 1e11 nm³"
-- "also show nucleus 5" (adds to current selection)
-- "hide all mitochondria" (removes from view)
-
-The AI agent:
-1. Converts your question to SQL
-2. Queries the organelle database
-3. Interprets the results based on query semantics
-4. Updates the visualization intelligently
-5. Provides a natural language answer with voice narration
-
-See [AGENT_DRIVEN_VISUALIZATION.md](AGENT_DRIVEN_VISUALIZATION.md) for technical details.
-
-### Analysis Mode
-
-Switch to **Analysis Mode** to generate and execute Python code for data analysis using natural language:
-
-**Examples:**
-- "Plot the volume distribution of mitochondria"
-- "Show me a histogram of nucleus sizes"
-- "Create a scatter plot comparing mitochondria volume vs surface area"
-
-The AI analysis agent:
-1. Converts your question to Python code
-2. Executes the code in a sandboxed container (Docker or Apptainer)
-3. Displays generated plots and statistics
-4. Tracks session metadata and timing information
-
-**Container Support:**
-- **Docker**: Default for most systems
-- **Apptainer**: Automatic fallback for HPC/cluster environments
-
-See [ANALYSIS_MODE.md](ANALYSIS_MODE.md) for technical details and API documentation.
-
-### Recording Tours
-
-1. **Start Recording**: Click "Start Recording" to begin capturing frames
-2. **Navigate**: Explore the dataset - narration triggers automatically on significant view changes
-3. **Stop Recording**: Click "Stop Recording" when done
-4. **Create Movie**: Choose transition style and click "Create Movie"
-   - **Direct Cuts**: Instant transitions with 2-second silent pauses
-   - **Crossfade**: Smooth dissolve transitions between views
-   - **State Interpolation**: Neuroglancer renders smooth camera movements
-
-Movies are saved to `recordings/<session_id>/output/movie.mp4` with:
-- 960x540 resolution
-- Frame duration matches audio narration length
-- 2-second silent transitions between narrations
-- Synchronized audio track
-
-See [QUICKSTART.md](QUICKSTART.md) for detailed usage guide.
-
-## Architecture
-
-### Stage 1: State Capture ✅
-
-- Neuroglancer viewer with state change callbacks
-- Summarizes position, zoom, orientation, layers, and selections
-- Filters meaningful changes to avoid spam
-
-### Stage 2: Screenshot Loop ✅
-
-- Background thread captures screenshots when viewer state is "dirty"
-- Converts PNG to JPEG for bandwidth efficiency
-- Debounced to max 2 fps (configurable)
-
-### Stage 3: WebSocket Streaming ✅
-
-- FastAPI server with WebSocket endpoint
-- Sends `{type: "frame", jpeg_b64: "...", state: {...}}` messages
-- Browser displays live frames and state summary
-
-### Stage 4: AI Narrator ✅
-
-- Triggers narration on meaningful state changes
-- Uses Gemini, Claude, or local Ollama to describe current view
-- Context-aware prompts for EM/neuroanatomy
-- Real-time WebSocket broadcasting to all clients
-- Configurable thresholds and intervals
-
-### Stage 5: Voice & TTS ✅
-
-- Browser-based TTS or edge-tts with multiple voices
-- Automatic audio playback in browser
-- Audio synchronized with narration display
-- Saved to recordings for movie compilation
-
-### Stage 6: Movie Recording ✅
-
-- Record navigation sessions with frame capture
-- Three transition modes: cuts, crossfade, interpolation
-- Frame duration matches narration audio length
-- 2-second silent transitions between narrations
-- FFmpeg-based video compilation with audio sync
-- Neuroglancer video_tool integration for smooth camera movements
-
-### Stage 7: Natural Language Query System ✅
-
-- SQLite database for organelle metadata (volume, position, etc.)
-- AI-powered natural language to SQL conversion
-- Multi-query support with automatic splitting
-- Intent classification: navigation, visualization, or informational
-- Agent-driven visualization state updates
-- Semantic understanding: "show X" vs "also show X" vs "hide X"
-- Context-aware command generation using current viewer state
-
-### Stage 8: Analysis Mode ✅
-
-- Natural language to Python code generation
-- Sandboxed code execution (Docker/Apptainer)
-- Interactive plot generation and visualization
-- Session metadata tracking with timing breakdown
-- Comprehensive results management with REST API
-- Automatic container detection for HPC environments
-
-## Project Structure
-
-```
-tourguide/
-├── server/
-│   ├── main.py             # Entry point
-│   ├── ng.py               # Neuroglancer viewer + state tracking
-│   ├── stream.py           # FastAPI WebSocket server + query/analysis endpoints
-│   ├── narrator.py         # AI narration engine
-│   ├── query_agent.py      # Natural language query agent
-│   ├── analysis_agent.py   # Natural language to Python code agent
-│   ├── docker_sandbox.py   # Docker container sandbox
-│   ├── apptainer_sandbox.py # Apptainer container sandbox
-│   ├── analysis_results.py # Analysis session metadata manager
-│   ├── organelle_db.py     # SQLite database for organelle metadata
-│   ├── recording.py        # Movie recording and compilation
-│   └── requirements.txt    # Legacy pip requirements
-├── web/
-│   ├── index.html      # Web UI with recording and analysis controls
-│   ├── app.js          # WebSocket client + recording + analysis logic
-│   ├── style.css       # Styling with spinner animations
-│   └── ng-screenshot-handler.js  # Neuroglancer screenshot capture
-├── organelle_data/     # Organelle CSV files and database (gitignored)
-├── analysis_results/   # Analysis session outputs (gitignored)
-├── containers/         # Container images (gitignored)
-├── recordings/         # Recorded sessions (auto-created)
-├── pixi.toml           # Pixi environment config
-├── AGENT_DRIVEN_VISUALIZATION.md  # Agent visualization docs
-├── ANALYSIS_MODE.md    # Analysis mode documentation
-└── README.md
-```
-
-## Configuration
-
-### Command-line Arguments
-
-```
---ng-host HOST        Neuroglancer bind address (default: 127.0.0.1)
---ng-port PORT        Neuroglancer port (default: 9999)
---web-host HOST       Web server bind address (default: 0.0.0.0)
---web-port PORT       Web server port (default: 8090)
---fps FPS             Maximum screenshot frame rate (default: 2)
-```
-
-## Development Stages
-
-- [x] **Stage 0**: Repository structure
-- [x] **Stage 1**: Neuroglancer state capture
-- [x] **Stage 2**: Screenshot loop
-- [x] **Stage 3**: WebSocket streaming
-- [x] **Stage 4**: AI narrator
-- [x] **Stage 5**: Voice/TTS
-- [x] **Stage 6**: Movie recording and compilation
-- [x] **Stage 7**: Natural language query system with agent-driven visualization
-- [x] **Stage 8**: Analysis mode with AI code generation and sandboxed execution
-- [ ] **Stage 9**: Quality upgrades (ROI crop, advanced UI controls)
-
-## Using AI Narration
-
-### Option 1: Cloud AI (Gemini - Recommended)
-
-1. **Get a free API key** from https://aistudio.google.com/app/apikey
-
-2. **Create a `.env` file**:
-   ```bash
-   cp .env.example .env
-   ```
-
-3. **Add your API key** to `.env`:
-   ```bash
-   GOOGLE_API_KEY=your_api_key_here
-   ```
-
-4. **Start the server**:
-   ```bash
-   pixi run start
-   ```
-
-### Option 2: Local AI (Ollama + Kokoro TTS - No API Key!)
-
-For completely local, private, and free AI narration with voice:
-
-1. **Install Ollama** from [ollama.com](https://ollama.com)
-
-2. **Download the vision model**:
-   ```bash
-   ollama pull llama3.2-vision
-   ```
-
-3. **Install TTS** (optional):
-   ```bash
-   pixi run pip install kokoro soundfile sounddevice
-   ```
-
-4. **Enable local mode** in `.env`:
-   ```bash
-   USE_LOCAL=true
-   ```
-
-5. **Start the server**:
-   ```bash
-   pixi run start
-   ```
-
-See [LOCAL_SETUP.md](LOCAL_SETUP.md) for detailed local setup instructions.
-
-### Option 3: Cloud AI (Claude/Anthropic)
-
-Use `ANTHROPIC_API_KEY` in `.env` instead of `GOOGLE_API_KEY`.
-
----
-
-Navigate in Neuroglancer and watch the AI narrate your exploration in real-time!
-
-## Running on GPU Cluster (LSF/H100)
-
-To run on a GPU cluster node, use `mode=shared` when requesting GPUs:
-
-```bash
-bsub -P cellmap -n 12 -gpu "num=1:mode=shared" -q gpu_h100 -Is /bin/bash
-```
-
-**Important**: The `mode=shared` parameter is required! Without it, the GPU will be in exclusive mode, preventing both PyTorch (Chatterbox) and Ollama from using the GPU simultaneously.
-
-Once on the node, run the application normally:
-```bash
-pixi run start
-```
-
-See [CLUSTER_TROUBLESHOOTING.md](CLUSTER_TROUBLESHOOTING.md) for detailed cluster setup and troubleshooting.
-
-## Requirements
-
-- Python 3.10+
-- FastAPI & Uvicorn
-- Pillow
-- Neuroglancer
-- FFmpeg (for movie compilation)
-- edge-tts (for voice synthesis, optional)
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
-
-Tourguide depends on `zmesh`, `cc3d`, `fastmorph`, `edt`, and `kimimaro` from
-the Seung Lab, which are GPL-3.0; the combined work is therefore GPL-3.0.
+GPL-3.0. See [LICENSE](LICENSE).
