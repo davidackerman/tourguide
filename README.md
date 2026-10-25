@@ -1,5 +1,9 @@
 # Tourguide
 
+**Live**: https://tourguide-8j4.pages.dev
+
+![Tourguide demo](docs/media/tourguide-demo.gif)
+
 A 3D microscopy **visual workspace** — Neuroglancer plus tables, plots, saved
 states and annotations — that a coding agent drives over a local
 **Workspace API**. Ships as an MCP server you drop into Claude Code, Cursor,
