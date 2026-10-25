@@ -3,6 +3,7 @@
 **Live**: https://tourguide-8j4.pages.dev
 
 ![Tourguide demo](docs/media/tourguide-demo.gif)
+*Prompt: "Use the Tourguide MCP. Load this Neuroglancer view, measure the mitochondria, create meshes for them, plot the distribution of various parameters, then fly to the largest mitochondrion and turn it on."*
 
 A 3D microscopy **visual workspace** — Neuroglancer plus tables, plots, saved
 states and annotations — that a coding agent drives over a local
