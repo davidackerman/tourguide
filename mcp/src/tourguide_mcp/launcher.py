@@ -179,6 +179,7 @@ class Launcher:
         install = await asyncio.create_subprocess_exec(
             "npm", "install",
             cwd=self.config.webapp_dir,
+            stdin=subprocess.DEVNULL,  # never share the MCP stdio pipe; see ensure_bridge
             stdout=log,
             stderr=subprocess.STDOUT,
         )
@@ -219,10 +220,16 @@ class Launcher:
         # process (e.g. when the client restarts the server); stdout/err go to
         # a log file so a failure is diagnosable instead of silent. The token
         # travels in the environment, never on the command line or in logs.
+        # stdin must be DEVNULL: an inherited stdin is the MCP JSON-RPC pipe,
+        # and Node puts it in non-blocking mode for as long as it runs. The
+        # flag is shared, so this server's next idle stdin read comes back
+        # empty, is taken as EOF, and the server exits silently ("Connection
+        # closed" on the call after a first-run launch_or_attach).
         log = open(self.bridge_log, "ab")
         self._bridge_proc = subprocess.Popen(
             ["npm", "run", "bridge"],
             cwd=self.config.webapp_dir,
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
@@ -327,6 +334,7 @@ class Launcher:
             build = await asyncio.create_subprocess_exec(
                 "npm", "run", "build",
                 cwd=self.config.webapp_dir,
+                stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
@@ -339,6 +347,7 @@ class Launcher:
         self._webapp_proc = subprocess.Popen(
             cmd,
             cwd=self.config.webapp_dir,
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,

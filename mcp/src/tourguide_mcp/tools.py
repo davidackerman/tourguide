@@ -159,7 +159,8 @@ async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> tuple[str, str]:
     cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(recipe),
            *args, "--out", out.name]
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd, stdin=asyncio.subprocess.DEVNULL,  # keep off the MCP stdio pipe
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
     text = stderr.decode(errors="replace")
@@ -386,7 +387,8 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         if segment_ids:
             cmd += ["--ids", ",".join(str(s) for s in segment_ids)]
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd, stdin=asyncio.subprocess.DEVNULL,  # keep off the MCP stdio pipe
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
