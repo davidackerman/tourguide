@@ -58,6 +58,20 @@ function sameArray(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
   return true;
 }
 
+// nm per base unit for a length unit; null for anything else (time, channel).
+function lengthUnitToNm(unit: string | undefined): number | null {
+  switch (unit) {
+    case "m": return 1e9;
+    case "µm": case "um": case "micrometer": return 1e3;
+    case "nm": case "nanometer": return 1;
+    default: return null;
+  }
+}
+
+function coordSpaceSignature(names: string[], scales: ArrayLike<number>, units: string[]): string {
+  return names.map((n, i) => `${n}:${Number(scales[i])}${units[i]}`).join(",");
+}
+
 export class BundledViewer {
   private viewer: NgViewer | null = null;
   private container: HTMLElement;
@@ -160,6 +174,7 @@ export class BundledViewer {
     if (ngStateOverride) {
       this.currentState = ngStateOverride as unknown as ReturnType<typeof descriptorToNgState>;
       viewer.state.restoreState(ngStateOverride);
+      this.keepStatePosition(ngStateOverride);
       return;
     }
     const state = descriptorToNgState(d);
@@ -263,9 +278,78 @@ export class BundledViewer {
   // descriptor has set up the layer scaffolding.
   applyNgState(state: Record<string, unknown>): void {
     const viewer = this.ensureViewer();
+    // An explicit state wins over in-flight add_layer camera holds.
+    for (const cancel of [...this.cameraHolds]) cancel();
     const rewritten = this.rewriteStateArtifacts(state);
     viewer.state.restoreState(rewritten);
     this.currentState = rewritten as any;
+    this.keepStatePosition(rewritten);
+  }
+
+  // A full restoreState re-creates every layer, and as their sources resolve
+  // NG can swap the global coordinate space for the layers' native one (the
+  // state says 1 nm/unit, the n5 is 4×4×5.24 nm). NG rescales the zoom but
+  // keeps position's raw numbers, so the camera lands 4–5× off, often outside
+  // the volume. Pin the state's position in world nm, read with the state's
+  // OWN dimensions, and re-express it each time the coordinate space changes
+  // during the hold. Only a units change re-applies it, so a user pan sticks.
+  private keepStatePosition(state: Record<string, unknown>, holdMs = 10000): void {
+    const dims = state.dimensions as Record<string, [number, string]> | undefined;
+    const pos = state.position as number[] | undefined;
+    if (!dims || typeof dims !== "object" || !Array.isArray(pos)) return;
+    const names = Object.keys(dims);
+    if (names.length !== pos.length) return;
+    const worldNm: Record<string, number> = {};
+    names.forEach((n, i) => {
+      const [scale, unit] = Array.isArray(dims[n]) ? dims[n] : [NaN, ""];
+      const k = lengthUnitToNm(unit);
+      if (k !== null && Number.isFinite(Number(scale)) && Number.isFinite(pos[i])) {
+        worldNm[n] = pos[i] * Number(scale) * k;
+      }
+    });
+    if (Object.keys(worldNm).length === 0) return;
+
+    const navState = this.ensureViewer().navigationState as any;
+    let appliedSig = coordSpaceSignature(
+      names,
+      names.map((n) => Number(dims[n][0])),
+      names.map((n) => String(dims[n][1])),
+    );
+    let active = true;
+    const reapply = (): void => {
+      if (!active) return;
+      const cs = navState?.coordinateSpace?.value as
+        | { valid?: boolean; names?: string[]; scales?: ArrayLike<number>; units?: string[] }
+        | undefined;
+      if (!cs || cs.valid === false || !cs.names?.length || !cs.scales || !cs.units) return;
+      const sig = coordSpaceSignature(cs.names, cs.scales, cs.units);
+      if (sig === appliedSig || !navState?.position) return;
+      appliedSig = sig;
+      const cur = navState.position.value as Float32Array | undefined;
+      navState.position.value = Float32Array.from(
+        cs.names.map((n, i) => {
+          const k = lengthUnitToNm(cs.units![i]);
+          const scale = Number(cs.scales![i]);
+          return n in worldNm && k !== null && scale > 0 ? worldNm[n] / (scale * k) : (cur?.[i] ?? 0);
+        }),
+      );
+    };
+
+    const signal = navState?.coordinateSpace?.changed;
+    signal?.add?.(reapply);
+    const teardown = (): void => {
+      if (!active) return;
+      active = false;
+      signal?.remove?.(reapply);
+      this.cameraHolds.delete(teardown);
+    };
+    this.cameraHolds.add(teardown);
+    // Paths that change the space without firing the signal get caught by
+    // these timed checks; each is a no-op unless the units actually changed.
+    reapply();
+    requestAnimationFrame(reapply);
+    for (const ms of [100, 400, 1000, 3000]) setTimeout(reapply, ms);
+    setTimeout(teardown, holdMs);
   }
 
   // Add a Neuroglancer segmentation layer that only renders the mesh
