@@ -18,6 +18,12 @@ updates:
         dependency-type: "production"
         exclude-patterns:
           - "neuroglancer"
+    ignore:
+      # Vite 8 builds and passes the smoke test, but Neuroglancer renders no
+      # image data under it (checked 2026-11 with jrc_hela-2). Lift this once
+      # a Vite major is verified against a real dataset, not just the build.
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "deps(web-app)"
       include: "scope"
