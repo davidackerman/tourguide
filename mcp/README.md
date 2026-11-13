@@ -47,8 +47,9 @@ The web-app directory is auto-detected from the repo layout; set
 
 `launch_or_attach`:
 
-1. Bridge healthy + a session running → **attach** to the most recent session
-   (token read from the bridge's token file).
+1. Bridge healthy + one session running → **attach** to it (token read from
+   the bridge's token file). Several tabs open → returns `{ambiguous, sessions}`;
+   pass `session_id` (or `new=True`).
 2. Bridge down → start it with a fresh bearer token (`npm run bridge`).
 3. Web app down → `npm run build` + `npm run preview` (production build, so
    image data renders; `TOURGUIDE_WEBAPP_MODE=dev` for the dev server).

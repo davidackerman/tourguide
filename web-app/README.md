@@ -36,9 +36,10 @@ This README is the user-feature guide. For the optional cloud-compute backend, s
 ## Quick start
 
 1. Go to the [live URL](https://tourguide-8j4.pages.dev).
-2. Click the welcome dialog's **Load demo dataset** to pull a public HeLa-2 sample, or paste a YAML descriptor / NG state URL.
-3. Click **⚙ Settings** and configure an AI backend (see next section) — required only if you want to use natural-language queries; the structured browser works without one.
-4. Start asking questions in the **Ask** box on the right panel.
+2. Click **Load demo dataset** to pull a public HeLa-2 sample, or **+ Load** to paste a zarr / n5 / precomputed URL, a YAML descriptor or a Neuroglancer state.
+3. To have an agent drive it, set up the `tourguide` MCP server: see [`../README.md`](../README.md#install).
+
+Legacy chat mode (`?mode=chat`): click **⚙ Settings**, configure an AI backend (see next section), then ask questions in the **Ask** box on the right panel. The structured browser works without one.
 
 ---
 
@@ -66,7 +67,7 @@ Keys are stored in `localStorage` on your machine only — tourguide's frontend 
 
 For datasets too large to fit in Pyodide's ~1.5 GB browser memory (think hemibrain at 512 nm), the agent can route analysis to a Hugging Face Space that has tensorstore, the full Seung-lab stack (cc3d, fastmorph, fastremap, edt, kimimaro, zmesh), and ~16 GB RAM.
 
-You don't have to configure anything to use the default shared backend (`ackermand-tourguide-analysis.hf.space`) — it's preconfigured. It's rate-limited and may cold-start (~30-60 s if it's been idle), but works for casual use.
+The analysis backend is empty by default. To use the shared one (`ackermand-tourguide-analysis.hf.space`), enter it in **⚙ Settings**. It's rate-limited and may cold-start (~30-60 s if it's been idle), but works for casual use.
 
 For real work, **duplicate the Space** into your own free HF account so you have isolated compute + storage. See [`../hf-space/README.md`](../hf-space/README.md) for setup + the optional persistent share-link storage.
 
@@ -95,7 +96,7 @@ Two ways:
 1. **Paste an NG state URL** in the loader — works for any Neuroglancer permalink. Tourguide infers the descriptor from the state.
 2. **Write a YAML descriptor** under `public/datasets/` and reference it from `public/catalog.json`. See `public/datasets/jrc_hela-2.yaml` for the schema. Required fields: `name`, `display_name`, `voxel_size_nm`, `layers`. Each layer needs `name`, `type` (`image` or `segmentation`), `source` (NG source URL — `zarr://`, `n5://`, `precomputed://`, etc.).
 
-The descriptor approach lets you bundle organelle CSVs (volume / COM / surface area columns) so the structured browser + NL queries work without extra setup. See [`../CSV_COLUMN_GUIDE.md`](../CSV_COLUMN_GUIDE.md) for the column conventions.
+The descriptor approach lets you bundle organelle CSVs (volume / COM / surface area columns) so the structured browser + NL queries work without extra setup. See [`../legacy/docs/CSV_COLUMN_GUIDE.md`](../legacy/docs/CSV_COLUMN_GUIDE.md) for the column conventions.
 
 ---
 

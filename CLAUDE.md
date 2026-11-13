@@ -57,7 +57,7 @@ coding agent (Claude Code, Cursor) picks it up automatically. The tools:
    centroid per object). Write a CSV. Install what you need; you have a shell.
 3. `ingest_table("mito", path="mito.csv")` — or skip 2–3 with `measure(source=…)`.
 4. `fly_to_segment("mito_seg", <largest id>)` → `screenshot()` to confirm →
-   `show_plot_file("volumes.png")` for the distribution.
+   `show_plot(png_path="volumes.png")` for the distribution.
 
 Result: the table appears in Tourguide with click-to-fly, the user sees the
 object, you see what they see. No Pyodide, no cloud backend, no AI key.

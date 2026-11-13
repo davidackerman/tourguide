@@ -51,7 +51,7 @@ cd web-app && npm install
 npm run workspace:preview   # bridge + built app together; prints the tokened URL
 # or separately:
 npm run bridge              # 127.0.0.1:7723
-npm run preview             # then open http://localhost:5173/?mode=workspace&bridgeToken=<token>
+npm run preview             # then open http://localhost:4173/?mode=workspace&bridgeToken=<token>
 ```
 
 Override the port with `?bridgePort=NNNN` on the page URL and
