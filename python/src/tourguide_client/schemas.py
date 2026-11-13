@@ -1,22 +1,24 @@
-"""Shared constants for the Tourguide Python SDK, mirroring the Workspace API
-protocol (web-app/src/workspace_api/protocol.ts)."""
+"""Shared constants mirroring web-app/src/workspace_api/protocol.ts."""
 
 from __future__ import annotations
 
 
 class WorkspaceError(RuntimeError):
-    """A Workspace op returned ok:false, or the bridge was unreachable."""
+    """A Workspace operation returned ok:false, or the bridge was unreachable."""
 
 
 WORKSPACE_OPS = (
     "launch_or_attach",
     "get_session",
     "load_descriptor",
+    "wait_for_ready",
+    "screenshot",
     "get_viewer_state",
     "set_viewer_state",
     "get_selection",
     "select_segments",
     "fly_to",
+    "fly_to_segment",
     "add_layer",
     "add_annotations",
     "list_tables",
@@ -33,3 +35,9 @@ WORKSPACE_OPS = (
     "add_narration_note",
     "export_session_summary",
 )
+
+# Annotation shapes accepted by add_annotations (map 1:1 to Neuroglancer):
+#   {"type": "point", "position": [x,y,z], "label": "..."}
+#   {"type": "line",  "points": [[x,y,z], [x,y,z]], "label": "..."}
+#   {"type": "bbox",  "min": [x,y,z], "max": [x,y,z], "label": "..."}
+ANNOTATION_TYPES = ("point", "line", "bbox")

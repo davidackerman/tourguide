@@ -18,7 +18,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from .session import WorkspaceSession
 
@@ -222,13 +222,26 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         For a coworker WITHOUT Tourguide use share_view; for a portable file
         with tables/plots use export_session."""
         state = await session.call("get_viewer_state")
-        base = session.launcher.lan_url() or session.config.workspace_url
+        exposed = session.launcher.lan_exposed()
+        base = (session.launcher.lan_url() if exposed else None) or session.config.workspace_url
         sep = "&" if "?" in base else "?"
         url = f"{base}{sep}state={await session.client.share_state(state)}"
         port = urllib.parse.urlparse(session.config.bridge_url).port
         if port and port != 7723:
             url += f"&bridgePort={port}"
-        return await _deliver_share_link(url, "Open in Tourguide", "Tourguide")
+        # The link carries the weaker VIEW token: it lets the recipient's tab
+        # read the shared state as a read-only viewer, never drive this one.
+        view_token = session.client.view_token
+        if view_token:
+            url += f"&bridgeToken={urllib.parse.quote(view_token)}"
+        result = await _deliver_share_link(url, "Open in Tourguide", "Tourguide")
+        if not exposed:
+            result["warning"] = (
+                "The bridge and web app are bound to loopback (the default), so this link only "
+                "works on this machine. To share on the LAN, restart with TG_BRIDGE_HOST=0.0.0.0 "
+                "and TG_HOST=0.0.0.0 — or use share_view / export_session instead."
+            )
+        return result
 
     @mcp.tool()
     async def share_view() -> dict:
@@ -326,6 +339,73 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await _run_and_ingest(path, source, name or recipe, args or [])
 
     @mcp.tool()
+    async def meshify(
+        source: str,
+        name: str = "mesh",
+        segment_ids: list[str] | None = None,
+        scale: str | None = None,
+        num_lods: int = 1,
+    ) -> dict:
+        """Generate 3D meshes for a segmentation and add them as a layer — for
+        when the source has no precomputed meshes (so selecting a segment shows
+        nothing in 3D). Reads the `source` (n5/zarr over s3/gcs/http, from
+        get_session) DIRECTLY — no staging. Picks a coarse/fast multiscale level
+        by default (tell the user which — the `ranAt` field — and that they can
+        pass `scale` e.g. "s2" for finer), serves the meshes through the bridge,
+        and adds a segmentation layer with them. `segment_ids` defaults to ALL
+        objects (pass a few ids — e.g. the largest from `measure` — to mesh just
+        those at a finer scale).
+
+        By default this uses the in-house zmesh mesher in the analysis env — no
+        external install. If TG_MESHNBONE_PYTHON points at a mesh-n-bone (>=0.5.0)
+        environment, it uses mesh-n-bone instead (multi-LOD Draco; `num_lods`)."""
+        import os
+
+        bridge_netloc = urllib.parse.urlparse(session.config.bridge_url).netloc or "localhost:7723"
+        out = tempfile.NamedTemporaryFile(prefix="tg_meshify_", suffix=".json", delete=False)
+        out.close()
+        mnb_py = os.environ.get("TG_MESHNBONE_PYTHON")
+        if mnb_py and Path(mnb_py).exists():
+            # Optional upgrade: mesh-n-bone (multi-LOD Draco) in its own env.
+            runner = _ANALYSIS_DIR / "tg_local" / "meshify_runner.py"
+            cmd = [mnb_py, str(runner), "--source", source, "--name", name,
+                   "--mnb", str(Path(mnb_py).with_name("mesh-n-bone")),
+                   "--num-lods", str(num_lods), "--bridge", bridge_netloc, "--out", out.name]
+        else:
+            # Default: in-house zmesh in the pre-loaded analysis env.
+            runner = _ANALYSIS_DIR / "tg_local" / "meshify_local.py"
+            cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(runner),
+                   "--source", source, "--name", name, "--bridge", bridge_netloc, "--out", out.name]
+        if scale:
+            cmd += ["--scale", scale]
+        if segment_ids:
+            cmd += ["--ids", ",".join(str(s) for s in segment_ids)]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"meshify failed:\n{stderr.decode(errors='replace')[-2000:]}")
+        result = json.loads(Path(out.name).read_text())
+        # mesh-n-bone returns separate volume+mesh sources; the in-house mesher
+        # returns one self-contained precomputed source (voxels + mesh).
+        layer_source = ([result["volume_source"], result["mesh_source"]]
+                        if "mesh_source" in result else result["source"])
+        layer = {
+            "name": f"{name}_mesh",
+            "type": "segmentation",
+            "source": layer_source,
+            "segments": result["mesh_ids"],
+        }
+        await session.call("add_layer", {"layer": layer})
+        return {
+            "layer": layer["name"],
+            "meshIds": result["mesh_ids"],
+            "ranAt": f"chose scale {result.get('scale', '?')} (coarse/fast default; pass scale= for finer)",
+            "tool": result.get("tool", "zmesh (in-house)"),
+        }
+
+    @mcp.tool()
     async def launch_or_attach(new: bool = False, session_id: str | None = None) -> dict:
         """Launch Tourguide if needed, or attach to a workspace tab. Call this
         first; other tools auto-attach but this surfaces launch problems and
@@ -347,15 +427,75 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def get_session() -> dict:
-        """Get a summary of the current workspace: layers, selected segments,
-        camera position, tables, plots, saved states, and recording status."""
+        """Summary of the current workspace: layers (with data source URL,
+        on-disk `localPath` when known, voxel size), selected segments, camera
+        position, whether the view has finished loading (`viewer.ready`),
+        tables, plots, saved states, and recording status."""
         return await session.call("get_session")
 
     @mcp.tool()
-    async def load_descriptor(descriptor: dict) -> dict:
+    async def load_descriptor(descriptor: dict, wait: bool = True) -> dict:
         """Load a Tourguide dataset descriptor (layers + voxel size + metadata)
-        into the viewer."""
-        return await session.call("load_descriptor", {"descriptor": descriptor})
+        into the viewer. Waits (up to 30 s) for the layers to finish loading
+        unless wait=False."""
+        return await session.call("load_descriptor", {"descriptor": descriptor, "wait": wait})
+
+    @mcp.tool()
+    async def wait_for_ready(timeout_ms: int = 30000) -> dict:
+        """Block until every layer has loaded what the current view needs (or
+        the timeout passes). Use after fly_to / add_layer before a screenshot."""
+        return await session.call("wait_for_ready", {"timeoutMs": timeout_ms})
+
+    @mcp.tool()
+    async def screenshot(max_width: int = 1280, save_to: str | None = None):
+        """Take a PNG screenshot of the current Neuroglancer view and return it
+        as an image you can LOOK at — your eyes on the workspace. Waits briefly
+        for chunks to load first. `max_width` downsamples large canvases;
+        `save_to` also writes the PNG to that path and returns metadata instead
+        of the image. Use it after every visual change to confirm what the
+        user is seeing."""
+        res = await session.call("screenshot", {"maxWidth": max_width, "waitForReadyMs": 10_000})
+        data = base64.b64decode(res["png"])
+        if save_to:
+            Path(save_to).expanduser().write_bytes(data)
+            return {k: v for k, v in res.items() if k != "png"} | {"savedTo": save_to, "bytes": len(data)}
+        return Image(data=data, format="png")
+
+    @mcp.tool()
+    async def fly_to_segment(
+        layer: str, segment_id: str, table: str | None = None, select: bool = True
+    ) -> dict:
+        """Fly to an object by id, looking up its centroid (com_x_nm/com_y_nm/
+        com_z_nm) in the layer's table — the one `measure` / ingest_table
+        produced for that layer, or `table` explicitly. Selects the segment
+        unless select=False. Prefer this over fly_to when you have an object id."""
+        params: dict[str, Any] = {"layer": layer, "segmentId": segment_id, "select": select}
+        if table is not None:
+            params["table"] = table
+        return await session.call("fly_to_segment", params)
+
+    @mcp.tool()
+    async def get_recent_events(since_seq: int = 0, types: list[str] | None = None) -> dict:
+        """Recent workspace events with sequence numbers: selection_changed
+        (the user picked segments), position_changed (the user moved the
+        camera), dataset_changed, action (an op ran), connection_status. Pass
+        the last seen `latestSeq` as since_seq to get only new ones."""
+        return await session.events(since=since_seq, wait_ms=0, types=types)
+
+    @mcp.tool()
+    async def wait_for_user_action(
+        since_seq: int = 0,
+        timeout_ms: int = 60000,
+        types: list[str] | None = None,
+    ) -> dict:
+        """Block (up to timeout_ms, max 120 s) until the person at the screen
+        does something — selects segments, moves the camera, loads a dataset —
+        and return those events. Default types: selection_changed,
+        position_changed, dataset_changed. Use in a loop for a "you point, I
+        explain" workflow: on selection_changed, run_sql for that object_id,
+        screenshot, and narrate."""
+        types = types or ["selection_changed", "position_changed", "dataset_changed"]
+        return await session.events(since=since_seq, wait_ms=min(timeout_ms, 120_000), types=types)
 
     @mcp.tool()
     async def get_viewer_state() -> dict:
@@ -414,11 +554,14 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         annotations: list[dict] | None = None,
         layer_name: str | None = None,
         path: str | None = None,
+        replace: bool = False,
     ) -> dict:
-        """Add annotations to an annotation layer. Each is one of:
-        {type:'point', position:[x,y,z], label?}, {type:'line', points:[[x,y,z],...], label?},
-        {type:'bbox', min:[x,y,z], max:[x,y,z], label?}. Coordinates in nm. For
-        MANY annotations, write them to a .json file (a list, or {annotations:[…]})
+        """Add native Neuroglancer annotations. Each is one of:
+        {type:'point', position:[x,y,z], label?}
+        {type:'line',  points:[[x,y,z],[x,y,z]], label?}   (a segment; chain for polylines)
+        {type:'bbox',  min:[x,y,z], max:[x,y,z], label?}
+        Coordinates in nm. Appends to the layer unless replace=True. For MANY
+        annotations, write them to a .json file (a list, or {annotations:[…]})
         and pass `path` instead of inlining them — keeps the blob out of your
         token stream."""
         if path is not None:
@@ -426,7 +569,7 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
             annotations = data.get("annotations") if isinstance(data, dict) else data
         if not annotations:
             raise ValueError("add_annotations: provide annotations or path")
-        params: dict[str, Any] = {"annotations": annotations}
+        params: dict[str, Any] = {"annotations": annotations, "replace": replace}
         if layer_name is not None:
             params["layerName"] = layer_name
         return await session.call("add_annotations", params)
@@ -444,7 +587,8 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def run_sql(sql: str, max_rows: int = 50) -> dict:
-        """Run a read-only SQL query against the workspace's in-memory tables.
+        """Run a read-only SELECT against the workspace's in-memory tables
+        (writes are refused — ingest_table is the write path).
         Returns columns + rows, but only the first `max_rows` reach you (the
         full result already lives in the workspace) — so a broad SELECT doesn't
         dump hundreds of rows into your context. Prefer aggregates/LIMIT; for a

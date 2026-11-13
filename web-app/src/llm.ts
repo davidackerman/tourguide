@@ -336,8 +336,10 @@ export class GeminiBackend implements LLMBackend {
 
   async complete(messages: LLMMessage[], options: LLMCompleteOptions = {}): Promise<string> {
     const useStream = !!options.onToken;
-    const action = useStream ? "streamGenerateContent?alt=sse&key=" : "generateContent?key=";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:${action}${encodeURIComponent(this.apiKey)}`;
+    // Key goes in a header, not the URL — URLs end up in logs, proxies and
+    // browser history.
+    const action = useStream ? "streamGenerateContent?alt=sse" : "generateContent";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:${action}`;
     const systemParts: string[] = [];
     const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
     for (const m of messages) {
@@ -369,7 +371,7 @@ export class GeminiBackend implements LLMBackend {
     GeminiBackend.requestCount += 1;
     let res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
       body: JSON.stringify(body),
       signal: options.signal,
     });
@@ -394,7 +396,7 @@ export class GeminiBackend implements LLMBackend {
       GeminiBackend.requestCount += 1;
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
         body: JSON.stringify(body),
         signal: options.signal,
       });
@@ -414,7 +416,7 @@ export class GeminiBackend implements LLMBackend {
         GeminiBackend.requestCount += 1;
         res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
           body: JSON.stringify(body),
           signal: options.signal,
         });
@@ -923,8 +925,8 @@ export interface GeminiModelInfo {
 // can't actually use. Sorted with newest / lite-tier first.
 export async function listGeminiModels(apiKey: string): Promise<GeminiModelInfo[]> {
   if (!apiKey) throw new Error("API key required to list models");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url);
+  const url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200";
+  const res = await fetch(url, { headers: { "x-goog-api-key": apiKey } });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`models.list failed (${res.status}): ${text.slice(0, 300)}`);
@@ -1114,6 +1116,10 @@ export interface Settings {
   // Optional HF-Space analysis backend (see hf-space/app.py). Empty string
   // disables the remote path — everything still works via Pyodide.
   analysisBackendUrl: string;
+  // True once the user has explicitly chosen a backend (Settings / Welcome).
+  // Older builds wrote the shared demo Space URL into saved settings without
+  // a choice; loadSettings clears that unless this flag is set.
+  analysisBackendOptIn?: boolean;
 }
 
 // Provider → preset URL. Used by the Settings UI to auto-fill
@@ -1138,9 +1144,9 @@ export const OPENAI_COMPATIBLE_PRESETS: Record<string, { url: string; placeholde
   },
 };
 
-// Shared tourguide analysis Space. Each user who wants isolated compute can
-// duplicate this to their own HF account and paste the new URL into Settings
-// — but the default just works with no setup.
+// Shared tourguide analysis Space (legacy chat mode only). Offered as an
+// opt-in choice in Settings / Welcome; NOT the default — by default the app
+// contacts no server other than the user's own data sources.
 export const DEFAULT_ANALYSIS_BACKEND = "https://ackermand-tourguide-analysis.hf.space";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -1162,7 +1168,8 @@ const DEFAULT_SETTINGS: Settings = {
   openaiModel: "",
   openaiBaseUrl: "",
   webllmModel: WEBLLM_MODELS[0].id,
-  analysisBackendUrl: DEFAULT_ANALYSIS_BACKEND,
+  // Empty = no remote analysis backend; nothing leaves the machine.
+  analysisBackendUrl: "",
 };
 
 export function loadSettings(): Settings {
@@ -1170,6 +1177,12 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<Settings>;
+    // Migration: the shared demo Space used to be written as the default
+    // without the user choosing it. Treat that as "unset" unless they have
+    // since opted in explicitly.
+    if (parsed.analysisBackendUrl === DEFAULT_ANALYSIS_BACKEND && !parsed.analysisBackendOptIn) {
+      parsed.analysisBackendUrl = "";
+    }
     return { ...DEFAULT_SETTINGS, ...parsed };
   } catch {
     return { ...DEFAULT_SETTINGS };

@@ -18,9 +18,11 @@ export interface ViewerStateHooks {
   applyViewerState: (state: unknown) => void;
   /** Current dataset descriptor (for descriptorState capture). */
   getDescriptorState: () => unknown;
-  /** Ids of tables/plots currently present, for the saved-state manifest. */
+  /** Reload a descriptor captured in a saved state when it differs from the
+   *  one currently loaded (restoring after a dataset switch). */
+  applyDescriptorState?: (descriptor: unknown, viewerState: unknown) => void;
+  /** Ids of tables currently present, for the saved-state manifest. */
   getTableIds: () => string[];
-  getPlotIds: () => string[];
 }
 
 export interface NarrationNote {
@@ -55,6 +57,9 @@ const uuid = (): string =>
     ? crypto.randomUUID()
     : `id-${Math.floor(performance.now())}-${Math.floor(Math.random() * 1e9)}`;
 
+const descriptorName = (d: unknown): string | undefined =>
+  d && typeof d === "object" ? (d as { name?: string }).name : undefined;
+
 export class SessionStore {
   private savedStates: SavedTourguideState[] = [];
   private plots: PlotArtifact[] = [];
@@ -79,7 +84,7 @@ export class SessionStore {
       viewerState: this.hooks.getViewerState(),
       descriptorState: this.hooks.getDescriptorState(),
       tableIds: this.hooks.getTableIds(),
-      plotIds: this.hooks.getPlotIds(),
+      plotIds: this.plots.map((p) => p.id),
       annotations,
     };
     this.savedStates.push(state);
@@ -90,15 +95,28 @@ export class SessionStore {
   restoreState(id: string): SavedTourguideState {
     const found = this.savedStates.find((s) => s.id === id);
     if (!found) throw new Error(`saved state not found: ${id}`);
-    this.hooks.applyViewerState(found.viewerState);
+    this.applyViewer(found);
     return found;
+  }
+
+  // If the saved state belongs to a different dataset than the one loaded
+  // now, reload that dataset first (with the saved camera/selection
+  // overlaid); otherwise just reapply the viewer state.
+  private applyViewer(state: SavedTourguideState): void {
+    const current = descriptorName(this.hooks.getDescriptorState());
+    const saved = descriptorName(state.descriptorState);
+    if (state.descriptorState && saved && saved !== current && this.hooks.applyDescriptorState) {
+      this.hooks.applyDescriptorState(state.descriptorState, state.viewerState);
+    } else {
+      this.hooks.applyViewerState(state.viewerState);
+    }
   }
 
   /** Apply a full state object (e.g. one the bridge loaded from disk, which
    *  may not be in this tab's localStorage). Caches it locally too so the
    *  panel reflects it. */
   applyState(state: SavedTourguideState): SavedTourguideState {
-    this.hooks.applyViewerState(state.viewerState);
+    this.applyViewer(state);
     if (!this.savedStates.some((s) => s.id === state.id)) {
       this.savedStates.push(state);
       persistSavedStates(this.savedStates);
@@ -116,7 +134,7 @@ export class SessionStore {
       viewerState: this.hooks.getViewerState(),
       descriptorState: this.hooks.getDescriptorState(),
       tableIds: this.hooks.getTableIds(),
-      plotIds: this.hooks.getPlotIds(),
+      plotIds: this.plots.map((p) => p.id),
     };
   }
 

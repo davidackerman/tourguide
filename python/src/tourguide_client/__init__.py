@@ -7,7 +7,8 @@ the same HTTP Workspace API (via the local bridge) that the MCP adapter uses.
 
     s = TourguideSession.attach()
     s.get_session()
-    s.show_plot(code="plt.hist(df_mitochondria['volume_nm_3'])", title="Volumes")
+    s.ingest_dataframe("mito", df)
+    s.show_figure(fig, title="Volumes")
     s.save_session_state("interesting state")
 """
 

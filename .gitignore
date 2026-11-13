@@ -14,9 +14,11 @@ venv/
 ENV/
 env/
 
-# Pixi
+# Pixi (legacy sidecar env)
 .pixi/
 pixi.lock
+legacy/.pixi/
+legacy/pixi.lock
 
 # Environment variables
 .env
@@ -68,3 +70,7 @@ containers/
 # Web app
 web-app/node_modules/
 web-app/dist/
+
+# Bridge / launcher runtime artifacts (also written under the OS temp dir)
+tourguide-bridge-*.token
+tourguide-logs/

@@ -162,14 +162,32 @@ export function resolveDescriptorAgainstFolder(
   // The `folders` block is a yaml-time directive only — strip it from
   // the descriptor we return so downstream code (permalink encode,
   // viewer, etc.) sees a clean descriptor with absolute sources.
-  const { folders: _strip, ...rest } = d;
+  // `paths` maps the same aliases to on-disk directories so an external
+  // agent can open the data itself; compute each layer's local_path from
+  // its (pre-resolution) relative source.
+  const localPathFor = (source: string): string | undefined => {
+    if (!d.paths || /^[a-z][a-z0-9+]*:\/\//i.test(source)) return undefined;
+    const path = (/^(?:zarr|n5|precomputed):(?:\/\/)?(.*)$/i.exec(source)?.[1] ?? source).replace(/^\.?\/+/, "");
+    const aliases = Object.keys(d.paths).sort((a, b) => b.length - a.length);
+    for (const a of aliases) {
+      if (path === a || path.startsWith(a + "/")) {
+        const base = d.paths[a].replace(/\/+$/, "");
+        const rest = path.slice(a.length).replace(/^\/+/, "").replace(/\/+$/, "");
+        return rest ? `${base}/${rest}` : base;
+      }
+    }
+    return undefined;
+  };
+  const { folders: _strip, paths: _paths, ...rest } = d;
   void _strip;
+  void _paths;
   return {
     ...rest,
     layers: d.layers.map((l) => ({
       ...l,
       source: Array.isArray(l.source) ? l.source.map(resolveSource) : resolveSource(l.source),
       csv: l.csv ? resolveCsv(l.csv) : l.csv,
+      local_path: l.local_path ?? localPathFor(Array.isArray(l.source) ? l.source[0] : l.source),
     })),
   };
 }

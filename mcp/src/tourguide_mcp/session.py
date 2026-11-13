@@ -65,7 +65,7 @@ class WorkspaceSession:
             try:
                 await self.launcher.ensure_bridge()
                 await self.launcher.ensure_webapp()
-                ws = self.config.workspace_url
+                ws = self.launcher.workspace_url_with_token()
                 sep = "&" if "?" in ws else "?"
                 open_url = f"{ws}{sep}ngViewer={urllib.parse.quote(viewer_url, safe='')}"
             except WorkspaceError:
@@ -171,3 +171,12 @@ class WorkspaceSession:
         # if other tabs are open; without a pin the bridge errors on ambiguity
         # rather than guessing.
         return await self.client.call(op, params, session=self.session_id)
+
+    async def events(self, since: int = 0, wait_ms: int = 0, types: list[str] | None = None) -> Any:
+        """Recent bridge events (user selection / camera changes, actions)."""
+        if self.record is None:
+            try:
+                await self.launch_or_attach()
+            except WorkspaceError:
+                pass
+        return await self.client.events(since=since, wait_ms=wait_ms, types=types)

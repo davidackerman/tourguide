@@ -20,6 +20,13 @@ export interface DatasetLayer {
   // actually sees them, not where the raw zarr would put them.
   // Absent / zero when no NG transform was applied.
   transform_offset_nm?: [number, number, number];
+  // On-disk path of this layer's data, for local-folder layers. The tab
+  // serves those via a /local-data/ service-worker URL that nothing outside
+  // the browser can read; an external agent needs the real path to open
+  // the zarr/n5 itself. Filled from the descriptor's `paths:` block (alias
+  // -> absolute directory) when a relative source is resolved, or set
+  // directly.
+  local_path?: string;
 }
 
 export interface DatasetDescriptor {
@@ -42,6 +49,11 @@ export interface DatasetDescriptor {
   // Lets a single YAML reference data spread across multiple disk
   // locations without forcing a single common-parent pick.
   folders?: Record<string, string>;
+  // Optional alias -> absolute on-disk directory, matching `folders`
+  // aliases. Not used for loading (the browser can't open paths) — it is
+  // reported to external agents as each layer's `local_path` so they can
+  // read the data in their own environment.
+  paths?: Record<string, string>;
 }
 
 export interface CatalogEntry {

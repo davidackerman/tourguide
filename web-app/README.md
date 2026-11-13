@@ -1,5 +1,13 @@
 # Tourguide (web app)
 
+> **Note:** the web app now opens in **workspace mode** by default — no in-app
+> AI, no API keys, driven by an external agent over the Workspace API (see
+> [`../WORKSPACE.md`](../WORKSPACE.md)). Everything below about AI providers,
+> keys, Pyodide and the HF Space describes the **legacy chat mode**
+> (`?mode=chat`), which is kept for a deprecation window. In chat mode the
+> analysis backend is **empty by default**; nothing is uploaded unless you set
+> one in Settings and confirm each share.
+
 A 3D microscopy viewer with built-in structured-data browsing, natural-language queries, and Python analysis — Neuroglancer embedded in the page, an AI agent that turns "measure the mitochondria" into running code, and share links that survive a browser restart. No install required.
 
 **Live**: https://tourguide-8j4.pages.dev
@@ -117,6 +125,6 @@ Type-checking runs as part of `build`. To check without building: `npx tsc --noE
 
 **Alternative: Vercel.** Same idea, slightly more polished UX, non-commercial use only on free tier. Import at [vercel.com/new](https://vercel.com/new), Root Directory `web-app`, Vite preset auto-detected. Headers come from `vercel.json`.
 
-**Alternative: GitHub Pages.** A workflow at `.github/workflows/pages.yml` deploys on push. In repo Settings → Pages → Source, pick **GitHub Actions**. Note: GH Pages can't set COOP/COEP headers, so WebLLM may run slower or fail there. Use Cloudflare or Vercel for the local-AI tier.
+**Alternative: GitHub Pages.** Add a Pages workflow (none is checked in) and pick **GitHub Actions** as the source in repo Settings → Pages. Note: GH Pages can't set COOP/COEP headers, so WebLLM may run slower or fail there. Use Cloudflare or Vercel for the local-AI tier.
 
 **Local-network testing**: WebGPU and `navigator.userAgentData` require a secure context. `http://localhost` counts; `http://192.168.x.x:5173` does NOT. Either stick to localhost, or run `cloudflared tunnel --url http://localhost:5173` for an `https://…` URL.
