@@ -4,7 +4,8 @@ Load-bearing behavior (see the agent-workspace plan):
   1. If the bridge is healthy and a session is running, attach.
   2. If the bridge is down, start it (when a web-app dir is configured).
   3. If no session exists, open the workspace URL in a browser and wait.
-  4. Pick the most recently created session for v0 (the bridge does this).
+  4. With several tabs open, don't guess: return {ambiguous, sessions} and let
+     the caller pass session_id (or new=True).
   5. On reconnect failure, raise a clear error so the caller can relaunch.
 
 Config via environment:
@@ -421,7 +422,7 @@ class Launcher:
             ],
             "message": (
                 "Multiple workspace tabs are open. Ask which to drive, then call "
-                "launch_or_attach(session=<sessionId>) — or launch_or_attach(new=True) "
+                "launch_or_attach(session_id=<sessionId>) — or launch_or_attach(new=True) "
                 "for a fresh dedicated tab."
             ),
         }

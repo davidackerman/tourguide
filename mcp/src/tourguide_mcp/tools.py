@@ -376,6 +376,12 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
             runner = _ANALYSIS_DIR / "tg_local" / "meshify_local.py"
             cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(runner),
                    "--source", source, "--name", name, "--bridge", bridge_netloc, "--out", out.name]
+        if not runner.is_file():
+            # analysis/tg_local/ is gitignored, so a fresh clone has no runner.
+            raise RuntimeError(
+                f"meshify runner not found: {runner}. It lives in analysis/tg_local/, which is "
+                "not checked into the repo; copy it there from a machine that has it."
+            )
         if scale:
             cmd += ["--scale", scale]
         if segment_ids:
@@ -463,13 +469,14 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def fly_to_segment(
-        layer: str, segment_id: str, table: str | None = None, select: bool = True
+        layer: str, segment_id: str | int, table: str | None = None, select: bool = True
     ) -> dict:
         """Fly to an object by id, looking up its centroid (com_x_nm/com_y_nm/
         com_z_nm) in the layer's table — the one `measure` / ingest_table
         produced for that layer, or `table` explicitly. Selects the segment
         unless select=False. Prefer this over fly_to when you have an object id."""
-        params: dict[str, Any] = {"layer": layer, "segmentId": segment_id, "select": select}
+        # Ids go over the wire as strings: uint64 ids lose precision as JS numbers.
+        params: dict[str, Any] = {"layer": layer, "segmentId": str(segment_id), "select": select}
         if table is not None:
             params["table"] = table
         return await session.call("fly_to_segment", params)
@@ -525,21 +532,21 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("get_selection")
 
     @mcp.tool()
-    async def select_segments(layer: str, segment_ids: list[str]) -> dict:
+    async def select_segments(layer: str, segment_ids: list[str | int]) -> dict:
         """Set which segment IDs are highlighted/visible in a segmentation layer."""
         return await session.call(
-            "select_segments", {"layer": layer, "segmentIds": segment_ids}
+            "select_segments", {"layer": layer, "segmentIds": [str(s) for s in segment_ids]}
         )
 
     @mcp.tool()
     async def fly_to(
-        position: list[float], segment_id: str | None = None, layer: str | None = None
+        position: list[float], segment_id: str | int | None = None, layer: str | None = None
     ) -> dict:
         """Move the camera to a world-space position [x, y, z] in nanometers,
         optionally highlighting a segment in a layer."""
         params: dict[str, Any] = {"position": position}
         if segment_id is not None:
-            params["segmentId"] = segment_id
+            params["segmentId"] = str(segment_id)
         if layer is not None:
             params["layer"] = layer
         return await session.call("fly_to", params)
@@ -732,7 +739,7 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def add_narration_note(
-        text: str, position: list[float] | None = None, segment_id: str | None = None
+        text: str, position: list[float] | None = None, segment_id: str | int | None = None
     ) -> dict:
         """Add a narration note (a workspace-side annotation of what's
         interesting), optionally tied to a position/segment."""
@@ -740,7 +747,7 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         if position is not None:
             params["position"] = position
         if segment_id is not None:
-            params["segmentId"] = segment_id
+            params["segmentId"] = str(segment_id)
         return await session.call("add_narration_note", params)
 
     @mcp.tool()

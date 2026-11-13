@@ -20,22 +20,24 @@ from .session import WorkspaceSession
 from .tools import register_tools
 
 
+def _ppid(pid: int) -> int | None:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        return int(out) if out else None
+    except Exception:
+        return None
+
+
 def _ancestors(pid: int) -> set[int]:
     """Walk up the parent chain (our uv-run / Desktop wrappers) so we never
     kill a process that launched us."""
     chain: set[int] = set()
     cur = pid
     for _ in range(20):
-        try:
-            ppid = int(
-                subprocess.run(
-                    ["ps", "-o", "ppid=", "-p", str(cur)],
-                    capture_output=True, text=True, timeout=3,
-                ).stdout.strip()
-                or 0
-            )
-        except Exception:
-            break
+        ppid = _ppid(cur) or 0
         if ppid <= 1 or ppid in chain:
             break
         chain.add(ppid)
@@ -78,11 +80,33 @@ def _proc_age_seconds(pid: int) -> int | None:
 _REAP_MIN_AGE_S = int(os.environ.get("TG_MCP_REAP_MIN_AGE", "600"))
 
 
+def _is_orphan(pid: int, matched: set[int]) -> bool:
+    """True when pid's client is gone: walking up through other tourguide-mcp
+    processes (e.g. its `uv run` wrapper), the chain ends at pid 1 (re-parented
+    to init/launchd) instead of at a live client. A server whose client is
+    still running (another Claude Code window, Desktop) is not an orphan, however
+    old it is. On Linux with a user-session subreaper, orphans are re-parented
+    there rather than to pid 1 and are left alone: missing a stale server is
+    better than killing a live one."""
+    cur = pid
+    for _ in range(10):
+        ppid = _ppid(cur)
+        if ppid is None:
+            return False
+        if ppid == 1:
+            return True
+        if ppid not in matched:
+            return False
+        cur = ppid
+    return False
+
+
 def _reap_stale_servers() -> None:
-    """Kill clearly-orphaned older tourguide-mcp processes on startup so one from
-    a previous Desktop session can't linger and serve stale code. Skips its own
-    process chain and any process younger than _REAP_MIN_AGE_S (likely a sibling
-    Desktop just spawned). Opt out entirely with TG_MCP_NO_REAP=1."""
+    """Kill orphaned older tourguide-mcp processes on startup so one from a
+    previous Desktop session can't linger and serve stale code. Only orphans
+    (see _is_orphan) are touched; also skips its own process chain and anything
+    younger than _REAP_MIN_AGE_S (likely a sibling Desktop just spawned). Opt
+    out entirely with TG_MCP_NO_REAP=1."""
     if os.environ.get("TG_MCP_NO_REAP"):
         return
     me = os.getpid()
@@ -93,6 +117,7 @@ def _reap_stale_servers() -> None:
         ).stdout.split()
     except Exception:
         return
+    matched = {int(p) for p in pids if p.isdigit()}
     for raw in pids:
         try:
             pid = int(raw)
@@ -103,6 +128,8 @@ def _reap_stale_servers() -> None:
         age = _proc_age_seconds(pid)
         if age is None or age < _REAP_MIN_AGE_S:
             continue  # too young to be a stale orphan — leave Desktop's spawns alone
+        if not _is_orphan(pid, matched):
+            continue  # its client is still alive — another window's live server
         try:
             os.kill(pid, signal.SIGTERM)
         except Exception:
