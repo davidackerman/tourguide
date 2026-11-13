@@ -367,20 +367,19 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         mnb_py = os.environ.get("TG_MESHNBONE_PYTHON")
         if mnb_py and Path(mnb_py).exists():
             # Optional upgrade: mesh-n-bone (multi-LOD Draco) in its own env.
-            runner = _ANALYSIS_DIR / "tg_local" / "meshify_runner.py"
+            runner = _ANALYSIS_DIR / "meshify" / "meshify_runner.py"
             cmd = [mnb_py, str(runner), "--source", source, "--name", name,
                    "--mnb", str(Path(mnb_py).with_name("mesh-n-bone")),
                    "--num-lods", str(num_lods), "--bridge", bridge_netloc, "--out", out.name]
         else:
             # Default: in-house zmesh in the pre-loaded analysis env.
-            runner = _ANALYSIS_DIR / "tg_local" / "meshify_local.py"
+            runner = _ANALYSIS_DIR / "meshify" / "meshify_local.py"
             cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(runner),
                    "--source", source, "--name", name, "--bridge", bridge_netloc, "--out", out.name]
         if not runner.is_file():
-            # analysis/tg_local/ is gitignored, so a fresh clone has no runner.
             raise RuntimeError(
-                f"meshify runner not found: {runner}. It lives in analysis/tg_local/, which is "
-                "not checked into the repo; copy it there from a machine that has it."
+                f"meshify runner not found: {runner}. It ships in the repo under "
+                "analysis/meshify/; check that the tourguide checkout is complete."
             )
         if scale:
             cmd += ["--scale", scale]
