@@ -247,11 +247,9 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         port = urllib.parse.urlparse(session.config.bridge_url).port
         if port and port != 7723:
             url += f"&bridgePort={port}"
-        # The link carries the weaker VIEW token: it lets the recipient's tab
-        # read the shared state as a read-only viewer, never drive this one.
-        view_token = session.client.view_token
-        if view_token:
-            url += f"&bridgeToken={urllib.parse.quote(view_token)}"
+        # No token in the link: GET /share-state is served without one, and the
+        # recipient's tab shows the snapshot read-only without registering as a
+        # session (a view token there only got the tab closed and retried).
         result = await _deliver_share_link(url, "Open in Tourguide", "Tourguide")
         if not exposed:
             result["warning"] = (
@@ -360,16 +358,18 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
     async def meshify(
         source: str,
         name: str = "mesh",
-        segment_ids: list[str] | None = None,
+        segment_ids: list[str | int] | None = None,
         scale: str | None = None,
         num_lods: int = 1,
     ) -> dict:
         """Generate 3D meshes for a segmentation and add them as a layer — for
         when the source has no precomputed meshes (so selecting a segment shows
-        nothing in 3D). Reads the `source` (n5/zarr over s3/gcs/http, from
-        get_session) DIRECTLY — no staging. Picks a coarse/fast multiscale level
-        by default (tell the user which — the `ranAt` field — and that they can
-        pass `scale` e.g. "s2" for finer), serves the meshes through the bridge,
+        nothing in 3D; get_session's `hasMeshes: false`). Reads the `source`
+        (an n5 label volume on s3, e.g. COSEM `labels/…`, from get_session)
+        DIRECTLY — no staging. zarr and gcs/http sources aren't supported yet.
+        Picks a coarse/fast multiscale level by default (tell the user which —
+        the `ranAt` field — and that they can pass `scale` e.g. "s2" for
+        finer), serves the meshes through the bridge,
         and adds a segmentation layer with them. `segment_ids` defaults to ALL
         objects (pass a few ids — e.g. the largest from `measure` — to mesh just
         those at a finer scale).

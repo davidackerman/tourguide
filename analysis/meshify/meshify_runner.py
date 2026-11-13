@@ -2,8 +2,9 @@
 and serve them through the bridge, so the agent can add them as a layer.
 
 This runs in the **mesh-n-bone environment** (which has mesh-n-bone + tensorstore),
-NOT the Tourguide analysis env. mesh-n-bone v0.5.0+ reads zarr/n5 directly from
-S3/GCS/HTTP, so NO local staging is needed — point it at the layer's source URL.
+NOT the Tourguide analysis env. mesh-n-bone v0.5.0+ reads the volume directly from
+S3, so NO local staging is needed — point it at the layer's source URL. This runner
+handles n5 label volumes on s3:// (the scale pick reads N5 attributes.json).
 
 It picks a coarse/fast multiscale level by default (like the `measure` recipe),
 meshes (single-res by default), writes the precomputed mesh dir into the bridge's
@@ -85,7 +86,10 @@ def main() -> None:
     ap.add_argument("--roi", default=None, help="z0:z1,y0:y1,x0:x1 in voxels (mesh-n-bone roi)")
     ap.add_argument("--num-lods", type=int, default=1, help="LODs (1 = single-res, default)")
     ap.add_argument("--max-mem-gb", type=float, default=0.5, help="scale-pick memory budget")
-    ap.add_argument("--artifacts-dir", default=str(Path.home() / ".tourguide" / "artifacts"))
+    # Same resolution as the bridge and serve_layer.artifacts_dir(), so the
+    # bridge serves what we write.
+    ap.add_argument("--artifacts-dir", default=(os.environ.get("TG_ARTIFACTS_DIR") or "").strip()
+                    or str(Path.home() / ".tourguide" / "artifacts"))
     ap.add_argument("--bridge", default="localhost:7723")
     ap.add_argument("--mnb", default="mesh-n-bone", help="mesh-n-bone CLI command")
     ap.add_argument("--out", default=None, help="write JSON result here (also printed)")

@@ -94,11 +94,29 @@ def _is_orphan(pid: int, matched: set[int]) -> bool:
         if ppid is None:
             return False
         if ppid == 1:
-            return True
+            # Re-parented to init → orphan. But in a container the MCP client
+            # itself can be pid 1 (`docker run … claude`); its live servers
+            # also have ppid 1 and must not be killed.
+            return _pid1_is_init()
         if ppid not in matched:
             return False
         cur = ppid
     return False
+
+
+# Process names that are an init/reaper rather than an MCP client.
+_INIT_NAMES = {"launchd", "init", "systemd", "tini", "dumb-init", "docker-init",
+               "catatonit", "s6-svscan", "runit", "sh", "bash"}
+
+
+def _pid1_is_init() -> bool:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", "1"], capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+    except Exception:
+        return False
+    return os.path.basename(out).lstrip("-") in _INIT_NAMES
 
 
 def _reap_stale_servers() -> None:
@@ -178,10 +196,11 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
 MESHES — when a segmentation has none and you want 3D, use `meshify`:
   Many label volumes (e.g. COSEM n5 organelle segs) ship NO meshes, so
   selecting a segment shows nothing in the 3D panel. get_session flags this
-  per segmentation layer: `hasMeshes: false` means none (null = still
-  loading). Offer meshify when the user wants 3D and it's false. `meshify(source=…,
-  segment_ids=[…])` generates them (zmesh, in the analysis env — no external
-  install), reading the source DIRECTLY from s3/gcs/http (no staging), serves
+  per segmentation layer: `hasMeshes: false` means none (null = unknown: still
+  loading, or the source failed). Offer meshify when the user wants 3D and
+  it's false. `meshify(source=…, segment_ids=[…])` generates them (zmesh, in
+  the analysis env — no external install), reading an n5-on-s3 source DIRECTLY
+  (no staging; zarr and gcs/http aren't supported yet), serves
   them via the bridge, and adds the mesh layer. It picks a coarse/fast scale by
   default — tell the user which (the `ranAt` field) and that they can pass
   scale= for finer; pass segment_ids (e.g. the largest from `measure`) to mesh

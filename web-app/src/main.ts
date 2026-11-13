@@ -1180,7 +1180,12 @@ function startBridgeIfWorkspace(): void {
   // "access your local network" prompt in front of every visitor. Stay offline;
   // the panel says how to connect an agent. Loading data and workspace files
   // still works without a bridge.
-  const connect = Boolean(bridgeToken) || target.explicit || !isHostedPage();
+  // A share_session link (?state=<id>, no ?session) is a snapshot fetched over
+  // plain HTTP; it has no session to attach to, and registering would just get
+  // the tab closed by the bridge and retried forever.
+  const pageParams = new URLSearchParams(window.location.search);
+  const sharedView = pageParams.has("state") && !pageParams.has("session");
+  const connect = !sharedView && (Boolean(bridgeToken) || target.explicit || !isHostedPage());
   // The viewer rewrites agent-computed /artifacts/ layer URLs to this host, so
   // shared sessions fetch from the host machine (not a peer's own localhost).
   viewer.setBridgeHost(`${target.host}:${target.port}`);
@@ -1233,9 +1238,14 @@ function startBridgeIfWorkspace(): void {
     token: bridgeToken,
     viewOnly,
     viewOf,
+    sharedView,
     // The bridge reports its LAN IP on register; use it for computed-layer
     // artifact URLs so a shared session is reachable by a peer, not just us.
-    onBridgeHost: (h) => viewer.setBridgeHost(h),
+    // Not on the hosted HTTPS page: only http://localhost is exempt from
+    // mixed-content blocking, so a LAN-IP artifact URL would never load.
+    onBridgeHost: (h) => {
+      if (!isHostedPage()) viewer.setBridgeHost(h);
+    },
   });
 }
 

@@ -14,7 +14,7 @@
 // by the person at the screen) so an agent can react to them.
 
 import type { WorkspacePanelHandle } from "../workspace_ui.js";
-import { createHandlers, type WorkspaceContext } from "./handlers.js";
+import { createHandlers, knownLayerNames, type WorkspaceContext } from "./handlers.js";
 import { BrowserWsTransport } from "./transport_ws.js";
 import { ingestTableIntoDB, runQuery, type DatasetDB } from "../db.js";
 import type {
@@ -80,14 +80,20 @@ const summarizeResult = (result: unknown): string | undefined => {
 // re-ingesting on restore (the snapshot's tableIds alone can't bring data back).
 function exportTables(
   db: DatasetDB | null,
-): Array<{ name: string; columns: string[]; rows: (number | string | null)[][] }> {
+): Array<{ name: string; columns: string[]; rows: (number | string | null)[][]; layer?: string }> {
   if (!db) return [];
-  const out: Array<{ name: string; columns: string[]; rows: (number | string | null)[][] }> = [];
+  const out: Array<{ name: string; columns: string[]; rows: (number | string | null)[][]; layer?: string }> = [];
   for (const t of db.tables) {
     try {
       const cols = t.columns.map((c) => `"${c}"`).join(", ");
       const res = runQuery(db.db, `SELECT ${cols} FROM "${t.table_name}";`);
-      out.push({ name: t.table_name, columns: res.columns, rows: res.rows as (number | string | null)[][] });
+      // Keep the table→layer link (row-click highlight, fly_to_segment) too.
+      out.push({
+        name: t.table_name,
+        columns: res.columns,
+        rows: res.rows as (number | string | null)[][],
+        layer: t.layer_name,
+      });
     } catch {
       /* a table that won't export is skipped, not fatal */
     }
@@ -107,6 +113,8 @@ export function startWorkspaceBridge(
     token?: string;
     viewOnly?: boolean;
     viewOf?: string;
+    /** A share_session `?state=` snapshot: shown read-only, never connects. */
+    sharedView?: boolean;
     onBridgeHost?: (host: string) => void;
   },
 ): WorkspaceBridgeHandle {
@@ -144,17 +152,18 @@ export function startWorkspaceBridge(
     if (!state || typeof state !== "object") return;
     const s = state as {
       plots?: Array<Parameters<typeof ctx.store.addPlot>[0]>;
-      tablesData?: Array<{ name: string; columns: string[]; rows: (number | string | null)[][] }>;
+      tablesData?: Array<{ name: string; columns: string[]; rows: (number | string | null)[][]; layer?: string }>;
     };
     try {
       ctx.store.applyState(state as unknown as Parameters<typeof ctx.store.applyState>[0]);
     } catch (err) {
       console.warn("[bridge] restore viewer failed:", err);
     }
-    const layerNames = (ctx.getDescriptor()?.layers ?? []).map((l) => l.name);
+    // The viewer state was applied first, so agent-added layers are known too.
+    const layerNames = knownLayerNames(ctx);
     for (const t of s.tablesData ?? []) {
       try {
-        await ingestTableIntoDB({ getDB: ctx.getDB, setDB: ctx.setDB }, t, layerNames);
+        await ingestTableIntoDB({ getDB: ctx.getDB, setDB: ctx.setDB }, t, layerNames, t.layer);
       } catch (err) {
         console.warn("[bridge] restore table failed:", t.name, err);
       }
@@ -301,7 +310,9 @@ export function startWorkspaceBridge(
       const ids = ctx.viewer.getVisibleSegments(name);
       if (ids.length) selectionObj[name] = ids;
     }
-    const positionArr = state?.position?.map((v) => Math.round(v));
+    // World nm like the rest of the API (NG's raw position is in voxels once
+    // data loads).
+    const positionArr = ctx.viewer.getPositionNm()?.map((v) => Math.round(v));
     return {
       position: JSON.stringify(positionArr ?? null),
       selection: JSON.stringify(selectionObj),
@@ -311,8 +322,17 @@ export function startWorkspaceBridge(
     };
   }
 
+  // The viewer's own camera corrections (holds, a deferred fly_to) aren't
+  // the user moving the camera; keep them out of the event stream.
+  ctx.viewer.onProgrammaticMove(() => {
+    quietUntil = Math.max(quietUntil, Date.now() + 1500);
+  });
+
   let snapshot = currentSnapshot();
-  const poll = setInterval(() => {
+  // Nothing consumes user events or snapshots without a bridge, so a page
+  // that never connects (hosted page with no agent, shared snapshot) skips
+  // the 400 ms state serialization entirely.
+  const poll = opts.connect === false ? undefined : setInterval(() => {
     const next = currentSnapshot();
     if (Date.now() >= quietUntil) {
       if (next.dataset !== snapshot.dataset) {
@@ -336,13 +356,14 @@ export function startWorkspaceBridge(
   }, USER_EVENT_POLL_MS);
 
   if (opts.connect === false) {
-    panel.showConnectHelp();
+    if (opts.sharedView) panel.setConnectionStatus("disconnected", "Viewing a shared snapshot (read-only)");
+    else panel.showConnectHelp();
   } else {
     transport.start();
   }
   return {
     stop: () => {
-      clearInterval(poll);
+      if (poll) clearInterval(poll);
       transport.stop();
     },
   };

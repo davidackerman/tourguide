@@ -62,7 +62,7 @@ const ngSourceUrl = (source: unknown): string | undefined => {
 
 /** Every layer name the viewer and the descriptor know, for matching an
  *  ingested table to its layer (agent-added layers aren't in the descriptor). */
-const knownLayerNames = (ctx: WorkspaceContext): string[] => {
+export const knownLayerNames = (ctx: WorkspaceContext): string[] => {
   const state = ctx.viewer.getNgState() as { layers?: Array<Record<string, unknown>> } | null;
   const names = (state?.layers ?? []).map((l) => String(l.name ?? "")).filter(Boolean);
   for (const l of ctx.getDescriptor()?.layers ?? []) if (!names.includes(l.name)) names.push(l.name);
@@ -158,7 +158,8 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
           localPath: dl?.local_path,
           organelleClass: dl?.organelle_class,
           voxelSizeNm: ctx.viewer.layerVoxelSizeNm(name),
-          hasMeshes: type === "segmentation" ? ctx.viewer.layerHasMeshes(name) : undefined,
+          // null (not omitted) = unknown: still loading, or the source failed.
+          hasMeshes: type === "segmentation" ? (ctx.viewer.layerHasMeshes(name) ?? null) : undefined,
         };
       }),
       selectedSegmentsByLayer,

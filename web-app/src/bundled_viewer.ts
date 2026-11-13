@@ -116,6 +116,23 @@ export class BundledViewer {
 
   constructor(container: HTMLElement) {
     this.container = container;
+    // The user taking the controls ends every camera hold (add_layer locks,
+    // state-position pins, a fly_to waiting for data), so none of them snaps
+    // a pan or zoom back.
+    const cancelHolds = (): void => {
+      for (const cancel of [...this.cameraHolds]) cancel();
+    };
+    for (const ev of ["pointerdown", "wheel", "keydown"]) {
+      container.addEventListener(ev, cancelHolds, { capture: true, passive: true });
+    }
+  }
+
+  // Set by the workspace bridge: called right before the viewer moves the
+  // camera on its own (holds, a deferred fly_to), so that move isn't
+  // reported to the agent as the user moving the camera.
+  private programmaticMoveListener: (() => void) | null = null;
+  onProgrammaticMove(cb: () => void): void {
+    this.programmaticMoveListener = cb;
   }
 
   private ensureViewer(): NgViewer {
@@ -214,7 +231,10 @@ export class BundledViewer {
         teardown();
         // Next tick: let NG's own Position handler (which centers the camera on
         // the new space) run first, so this move lands on top of it.
-        setTimeout(() => this.flyTo(position, segmentId, layerName), 0);
+        setTimeout(() => {
+          this.programmaticMoveListener?.();
+          this.flyTo(position, segmentId, layerName);
+        }, 0);
       };
       space.changed?.add?.(onChange);
       this.cameraHolds.add(teardown);
@@ -350,6 +370,7 @@ export class BundledViewer {
       const sig = coordSpaceSignature(cs.names, cs.scales, cs.units);
       if (sig === appliedSig || !navState?.position) return;
       appliedSig = sig;
+      this.programmaticMoveListener?.();
       const cur = navState.position.value as Float32Array | undefined;
       navState.position.value = Float32Array.from(
         cs.names.map((n, i) => {
@@ -574,6 +595,7 @@ export class BundledViewer {
           const orderedF32 = Float32Array.from(ordered);
           const cur = navState.position.value as Float32Array | undefined;
           if (!cur || !sameArray(cur, orderedF32)) {
+            this.programmaticMoveListener?.();
             navState.position.value = orderedF32;
           }
         }
@@ -764,25 +786,25 @@ export class BundledViewer {
 
   // Does this layer render 3D geometry? True if any enabled data subsource
   // provides a mesh (or skeleton) source, false once every source has
-  // loaded without one, undefined while a source is still loading. Lets the
-  // agent see that a label volume ships no meshes and call `meshify`.
+  // loaded without one, undefined if unknown: a source is still loading or
+  // failed to load (a broken source isn't "ships no meshes"). Lets the agent
+  // see that a label volume has no meshes and call `meshify`.
   layerHasMeshes(layerName: string): boolean | undefined {
     const managed = this.viewer?.layerManager.getLayerByName(layerName);
     const sources = (managed?.layer as any)?.dataSources as Array<{ loadState?: any }> | undefined;
     if (!Array.isArray(sources) || sources.length === 0) return undefined;
-    let pending = false;
+    let unknown = false;
     for (const ds of sources) {
       const ls = ds.loadState;
-      if (ls === undefined) {
-        pending = true;
+      if (ls === undefined || ls.error !== undefined) {
+        unknown = true;
         continue;
       }
-      if (ls.error !== undefined) continue;
       for (const sub of ls.subsources ?? []) {
         if (sub?.enabled && sub.subsourceEntry?.subsource?.mesh !== undefined) return true;
       }
     }
-    return pending ? undefined : false;
+    return unknown ? undefined : false;
   }
 
   // Native voxel size [x, y, z] in nm of the layer's first loaded source, from

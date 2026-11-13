@@ -5,7 +5,7 @@ bridge, so the agent can add them as a layer.
 Reuses measure_objects' source/axis handling (so meshes land exactly where
 `measure` reports objects) and serve_layer.write_mesh_layer (zmesh → precomputed
 seg + legacy single-res mesh into ~/.tourguide/artifacts, served by the bridge).
-Reads the source DIRECTLY from S3 — no staging. Picks a coarse/fast scale by
+Reads the source (an n5 label volume on s3://) DIRECTLY — no staging. Picks a coarse/fast scale by
 default (like `measure`); pass --scale for finer or --ids to mesh specific
 objects (bbox-restricted, so a finer scale is affordable).
 
@@ -31,7 +31,8 @@ def main() -> None:
     ap.add_argument("--name", default="mesh", help="layer/base name")
     ap.add_argument("--ids", default=None, help="comma-separated object ids (default: all)")
     ap.add_argument("--scale", default=None, help="force a multiscale level, e.g. s2 (default: coarse/fast)")
-    ap.add_argument("--max-mem-gb", type=float, default=0.5, help="scale-pick memory budget")
+    ap.add_argument("--max-mem-gb", type=float, default=0.5,
+                    help="scale-pick memory budget (also bounds the --ids localization pass)")
     ap.add_argument("--bridge", default="localhost:7723")
     ap.add_argument("--out", default=None, help="write JSON result here (also printed)")
     args = ap.parse_args()
@@ -47,16 +48,26 @@ def main() -> None:
         # bbox at the FINEST scale that fits the budget for that small region —
         # the same ROI-unlocks-finer trick `measure` uses. (A whole-volume pick
         # would settle for a coarse scale like s4; one object's bbox affords s1/s2.)
-        loc_path, loc_scale, translate, axes, _ = mo.pick_scale(fmt, bucket, group, True, None, 0.5e9)
-        if not axes or sorted(axes) != ["x", "y", "z"]:
-            sys.exit(f"meshify_local: unexpected transform axes {axes!r}; needs a custom recipe.")
-        arr_axes = list(reversed(axes))
-        sc_loc = {ax: loc_scale[i] for i, ax in enumerate(axes)}
-        tr = {ax: translate[i] for i, ax in enumerate(axes)}
-        vol_loc = np.asarray(open_scale(loc_path).read().result())
-        keep = np.isin(vol_loc, want)
-        if not keep.any():
-            sys.exit(f"meshify_local: none of ids {want} present at {loc_path}.")
+        # Small objects can vanish under label downsampling at the coarse
+        # level, so if none of the ids show up, retry once with a 4x budget
+        # (one or two levels finer) before giving up.
+        loc_budget = args.max_mem_gb * 1e9
+        for attempt in range(2):
+            loc_path, loc_scale, translate, axes, _ = mo.pick_scale(fmt, bucket, group, True, None, loc_budget)
+            if not axes or sorted(axes) != ["x", "y", "z"]:
+                sys.exit(f"meshify_local: unexpected transform axes {axes!r}; needs a custom recipe.")
+            arr_axes = list(reversed(axes))
+            sc_loc = {ax: loc_scale[i] for i, ax in enumerate(axes)}
+            tr = {ax: translate[i] for i, ax in enumerate(axes)}
+            vol_loc = np.asarray(open_scale(loc_path).read().result())
+            keep = np.isin(vol_loc, want)
+            if keep.any():
+                break
+            loc_budget *= 4
+        else:
+            sys.exit(f"meshify_local: none of ids {want} found at {loc_path} (the finest level that fits "
+                     f"{loc_budget / 4 / 1e9:.1f} GB). Small objects can disappear at coarse levels; "
+                     "check the ids with `measure`, or raise --max-mem-gb.")
         idx = np.array(np.where(keep))
         lo_l, hi_l = idx.min(axis=1), idx.max(axis=1) + 1
         pad = 2

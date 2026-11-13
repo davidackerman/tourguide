@@ -137,8 +137,8 @@ export interface SessionSummary {
       voxelSizeNm?: number[];
       /** Segmentation layers only: whether a mesh/skeleton source is
        *  enabled. false means the label volume ships no 3D geometry (call
-       *  `meshify`); undefined means its source is still loading. */
-      hasMeshes?: boolean;
+       *  `meshify`); null means unknown (still loading, or the source failed). */
+      hasMeshes?: boolean | null;
     }>;
     selectedSegmentsByLayer: Record<string, string[]>;
     /** Camera position in world nm [x, y, z]. */

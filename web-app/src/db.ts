@@ -392,9 +392,13 @@ export async function ingestTableIntoDB(
   // stripping common suffixes the agent tends to invent
   // ("mito_volumes" → "mito"); fall back to the table name. A caller that
   // knows the layer (e.g. `measure`, which matched it by source URL) wins.
+  // Re-ingesting (e.g. adding a column) without a layer keeps the link the
+  // table already has, so a measure-made link to "mito_seg" survives.
   let resolvedLayerName = tableName;
   if (explicitLayerName) {
     resolvedLayerName = explicitLayerName;
+  } else if (existingTableMeta?.layer_name && existingTableMeta.layer_name !== tableName) {
+    resolvedLayerName = existingTableMeta.layer_name;
   } else if (knownLayerNames && knownLayerNames.length > 0) {
     const exact = knownLayerNames.find((n) => n === tableName);
     if (exact) {

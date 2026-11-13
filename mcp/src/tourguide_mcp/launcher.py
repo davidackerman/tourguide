@@ -38,6 +38,36 @@ import httpx
 
 from .client import WorkspaceClient, WorkspaceError
 
+
+def open_in_browser(url: str) -> None:
+    """Open `url` in the user's browser without letting the opener touch this
+    process's stdio. stdin/stdout are the MCP JSON-RPC stream: webbrowser's
+    openers inherit them (on Linux, xdg-open → Chrome prints "Opening in
+    existing browser session." to stdout, corrupting the channel). Best effort;
+    never raises."""
+    import sys
+
+    if sys.platform == "darwin":
+        cmd = ["open", url]
+    elif sys.platform.startswith("linux"):
+        cmd = ["xdg-open", url]
+    else:
+        cmd = None
+    if cmd is not None:
+        try:
+            subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            return
+        except Exception:
+            pass  # opener missing: fall back to webbrowser
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:7723"
 DEFAULT_WORKSPACE_URL = "http://localhost:5173/?mode=workspace"
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
@@ -139,6 +169,11 @@ class Launcher:
         token = self.client.view_token if view else self.client.token
         if token:
             q["bridgeToken"] = token
+        elif u.scheme == "https" and (u.hostname or "") not in LOOPBACK:
+            # The hosted page only connects when given a token or ?bridge= (so
+            # visitors without an agent get no local-network prompt). With a
+            # no-auth bridge there's no token, so name the bridge explicitly.
+            q.setdefault("bridge", f"localhost:{bport}")
         return urlunparse(u._replace(query=urlencode(q)))
 
     def lan_url(self) -> str | None:
@@ -402,10 +437,7 @@ class Launcher:
         await self.ensure_webapp()
         url = self.workspace_url_with_token()
         if self.config.auto_open:
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass  # headless / no browser — caller may open it manually
+            open_in_browser(url)  # headless / no browser: caller may open it manually
 
         async def _fresh_session() -> dict | None:
             for s in await self._live_sessions():

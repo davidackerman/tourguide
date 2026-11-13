@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import os
 import urllib.parse
-import webbrowser
 from typing import Any
 
 from .client import WorkspaceClient, WorkspaceError
-from .launcher import Launcher, LauncherConfig, _wait_for
+from .launcher import Launcher, LauncherConfig, _wait_for, open_in_browser
 
 # Viewer ops that, in python-viewer mode, are served by the in-process
 # Neuroglancer viewer directly instead of being relayed to a browser tab.
@@ -21,6 +20,24 @@ _VIEWER_OPS = frozenset({
     "get_viewer_state", "set_viewer_state", "fly_to", "select_segments",
     "add_layer", "get_selection", "get_session",
 })
+
+
+_NM_PER_UNIT = {"m": 1e9, "um": 1e3, "µm": 1e3, "nm": 1.0}
+
+
+def _position_nm(state: dict[str, Any]) -> list[float] | None:
+    """The NG state's camera position as world nm [x, y, z]. Raw `position`
+    is in the state's dimension units (often 4 nm voxels), but the Workspace
+    API promises nm everywhere."""
+    pos, dims = state.get("position"), state.get("dimensions") or {}
+    if not isinstance(pos, list) or len(pos) != len(dims):
+        return None
+    nm: dict[str, float] = {}
+    for (name, spec), v in zip(dims.items(), pos):
+        scale, unit = (spec + [None, None])[:2] if isinstance(spec, list) else (None, None)
+        k = _NM_PER_UNIT.get(unit or "")
+        nm[name] = round(v * scale * k, 2) if k and isinstance(scale, (int, float)) else v
+    return [nm[a] for a in ("x", "y", "z")] if all(a in nm for a in "xyz") else None
 
 
 def _trim_session_urls(result: dict[str, Any]) -> None:
@@ -71,10 +88,7 @@ class WorkspaceSession:
             except WorkspaceError:
                 pass  # no web app — viewer still works, just no tables/plots
             if self.config.auto_open:
-                try:
-                    webbrowser.open(open_url)
-                except Exception:
-                    pass
+                open_in_browser(open_url)
             # Wait (briefly) for the embedding tab to register, so workspace ops
             # have a session to route to. Not fatal if it doesn't.
             await _wait_for(self.launcher._running_session, timeout=20.0)
@@ -136,7 +150,7 @@ class WorkspaceSession:
             "viewer": {
                 "layers": [{"name": l.get("name"), "type": l.get("type")}
                            for l in st.get("layers", [])],
-                "position": st.get("position"),
+                "position": _position_nm(st),
             },
             "tables": [], "plots": [], "savedStates": [],
         }

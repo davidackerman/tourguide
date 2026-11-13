@@ -142,9 +142,10 @@ still be driven by your local agent. The page connects *out* to the bridge.
 - **Reopen restores everything.** The page auto-saves a snapshot (viewer state
   + table data + plot images) keyed by session id (`~/.tourguide/session-states`).
 - **Read-only share links.** `?session=<id>&view=1&bridgeToken=<viewToken>`
-  registers under a fresh id and never writes back. `share_session` builds the
-  short form, `?state=<id>&bridgeToken=<viewToken>`: the view token alone makes
-  the bridge treat the tab as a read-only viewer. Viewers need only a browser.
+  follows a live session: it registers under a fresh id and never writes back.
+  `share_session` builds the short snapshot form, `?state=<id>`: the tab fetches
+  that view over HTTP (no token needed) and shows it read-only without
+  connecting as a session. Viewers need only a browser.
 - **Portable files.** `export_session` / the panel's **Save workspace** button
   write the snapshot to a file; `restore_session_state(path=…)` / **Open
   workspace** applies it into the recipient's own copy.
