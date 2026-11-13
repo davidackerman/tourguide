@@ -1,4 +1,4 @@
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import type { DatasetDescriptor } from "./descriptor.js";
 import { parseDescriptor } from "./descriptor.js";
 
