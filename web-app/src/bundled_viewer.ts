@@ -715,6 +715,91 @@ export class BundledViewer {
   // to pre-fill skeleton segment-ID inputs from whatever the user has
   // selected in NG. Returns [] if the layer has no visible-segments state
   // (image layers, layers that haven't loaded yet, etc.).
+  // Camera position in world nm (x, y, z), the Workspace API's coordinate
+  // contract. NG's raw `position` is in the live coordinate space's units,
+  // which become the source's native voxels (e.g. 4 nm) once data loads, so
+  // reporting it raw would hand agents voxel indices labelled as nm.
+  getPositionNm(): [number, number, number] | undefined {
+    const nav = this.viewer?.navigationState as any;
+    const cs = nav?.coordinateSpace?.value as
+      | { names?: string[]; scales?: ArrayLike<number>; units?: string[] }
+      | undefined;
+    const pos = nav?.position?.value as Float32Array | undefined;
+    if (!cs?.names || !cs.scales || !cs.units || !pos || pos.length !== cs.names.length) return undefined;
+    const nm: Record<string, number> = {};
+    cs.names.forEach((n, i) => {
+      const k = lengthUnitToNm(cs.units![i]);
+      // Dimensionless axes are taken as nm already, matching flyTo.
+      const v = k === null ? pos[i] : pos[i] * Number(cs.scales![i]) * k;
+      nm[n] = Math.round(v * 100) / 100;
+    });
+    if (!("x" in nm && "y" in nm && "z" in nm)) return undefined;
+    return [nm.x, nm.y, nm.z];
+  }
+
+  // Does this layer render 3D geometry? True if any enabled data subsource
+  // provides a mesh (or skeleton) source, false once every source has
+  // loaded without one, undefined while a source is still loading. Lets the
+  // agent see that a label volume ships no meshes and call `meshify`.
+  layerHasMeshes(layerName: string): boolean | undefined {
+    const managed = this.viewer?.layerManager.getLayerByName(layerName);
+    const sources = (managed?.layer as any)?.dataSources as Array<{ loadState?: any }> | undefined;
+    if (!Array.isArray(sources) || sources.length === 0) return undefined;
+    let pending = false;
+    for (const ds of sources) {
+      const ls = ds.loadState;
+      if (ls === undefined) {
+        pending = true;
+        continue;
+      }
+      if (ls.error !== undefined) continue;
+      for (const sub of ls.subsources ?? []) {
+        if (sub?.enabled && sub.subsourceEntry?.subsource?.mesh !== undefined) return true;
+      }
+    }
+    return pending ? undefined : false;
+  }
+
+  // Native voxel size [x, y, z] in nm of the layer's first loaded source, from
+  // NG's model transform (multiscale sources report their finest scale). The
+  // session descriptor's voxel size can be a placeholder (add_layer bootstraps
+  // with 4 nm), so this is what agents should compute with. Undefined while
+  // the source loads or if it has no x/y/z length axes.
+  layerVoxelSizeNm(layerName: string): [number, number, number] | undefined {
+    const managed = this.viewer?.layerManager.getLayerByName(layerName);
+    const sources = (managed?.layer as any)?.dataSources as Array<{ loadState?: any }> | undefined;
+    type Space = { names?: string[]; scales?: ArrayLike<number>; units?: string[] };
+    for (const ds of sources ?? []) {
+      // inputSpace is the source's own (model) space, so it carries the native
+      // scales; outputSpace follows the viewer's global units (1 nm here).
+      const t = ds?.loadState?.transform?.value as
+        | { rank?: number; inputSpace?: Space; outputSpace?: Space; transform?: ArrayLike<number> }
+        | undefined;
+      const inS = t?.inputSpace;
+      if (!inS?.names || !inS.scales || !inS.units) continue;
+      const outNames = t?.outputSpace?.names ?? [];
+      const rank = t?.rank ?? outNames.length;
+      const nm: Record<string, number> = {};
+      inS.names.forEach((inName, i) => {
+        // Source axes may be named d0/d1/…: name each by the output axis its
+        // column of the (rank+1)² column-major matrix feeds.
+        let name = inName;
+        if (!["x", "y", "z"].includes(name) && t?.transform) {
+          for (let j = 0; j < rank; j++) {
+            if (Number(t.transform[i * (rank + 1) + j]) !== 0) {
+              name = outNames[j] ?? name;
+              break;
+            }
+          }
+        }
+        const k = lengthUnitToNm(inS.units![i]);
+        if (k !== null) nm[name] = Math.round(Number(inS.scales![i]) * k * 1e4) / 1e4;
+      });
+      if ("x" in nm && "y" in nm && "z" in nm) return [nm.x, nm.y, nm.z];
+    }
+    return undefined;
+  }
+
   getVisibleSegments(layerName: string): string[] {
     const viewer = this.viewer;
     if (!viewer) return [];

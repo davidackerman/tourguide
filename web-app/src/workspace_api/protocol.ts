@@ -132,8 +132,16 @@ export interface SessionSummary {
        *  `/local-data/` URL is not readable from outside the tab; this is. */
       localPath?: string;
       organelleClass?: string;
+      /** Native voxel size [x, y, z] in nm of this layer's source (finest
+       *  scale), once it has loaded. Prefer it over descriptor.voxelSizeNm. */
+      voxelSizeNm?: number[];
+      /** Segmentation layers only: whether a mesh/skeleton source is
+       *  enabled. false means the label volume ships no 3D geometry (call
+       *  `meshify`); undefined means its source is still loading. */
+      hasMeshes?: boolean;
     }>;
     selectedSegmentsByLayer: Record<string, string[]>;
+    /** Camera position in world nm [x, y, z]. */
     position?: number[];
   };
   tables: Array<{

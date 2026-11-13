@@ -177,7 +177,9 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
 
 MESHES — when a segmentation has none and you want 3D, use `meshify`:
   Many label volumes (e.g. COSEM n5 organelle segs) ship NO meshes, so
-  selecting a segment shows nothing in the 3D panel. `meshify(source=…,
+  selecting a segment shows nothing in the 3D panel. get_session flags this
+  per segmentation layer: `hasMeshes: false` means none (null = still
+  loading). Offer meshify when the user wants 3D and it's false. `meshify(source=…,
   segment_ids=[…])` generates them (zmesh, in the analysis env — no external
   install), reading the source DIRECTLY from s3/gcs/http (no staging), serves
   them via the bridge, and adds the mesh layer. It picks a coarse/fast scale by

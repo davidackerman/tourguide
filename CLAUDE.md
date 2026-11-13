@@ -19,8 +19,9 @@ coding agent (Claude Code, Cursor) picks it up automatically. The tools:
 - `launch_or_attach` — **call first.** Builds + starts the web app and the
   bridge if needed (with a per-launch auth token), opens the tab, attaches.
 - `get_session` — what's loaded: layers with **data source URL**, **on-disk
-  `localPath`** when known, **voxel size**; selection; camera; `ready` flag;
-  tables; plots.
+  `localPath`** when known, per-layer **`voxelSizeNm`**, and for segmentations
+  **`hasMeshes`** (false → `meshify`); selection; camera (world nm); `ready`
+  flag; tables; plots.
 - `screenshot` — **your eyes.** Returns a PNG of the current view as an image.
   Use it after every visual change to check what the user is seeing.
 - `wait_for_ready` — block until layers finish loading (after fly_to / load).

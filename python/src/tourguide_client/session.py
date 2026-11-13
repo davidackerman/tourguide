@@ -217,12 +217,19 @@ class TourguideSession:
     def run_sql(self, sql: str) -> dict:
         return self.call("run_sql", {"sql": sql})
 
-    def ingest_table(self, name: str, columns: list[str], rows: list[list]) -> dict:
+    def ingest_table(
+        self, name: str, columns: list[str], rows: list[list], layer: str | None = None
+    ) -> dict:
         """Push a table you computed into Tourguide (the core artifact-sink op).
-        Include 'object_id' + 'com_x_nm'/'com_y_nm'/'com_z_nm' for click-to-fly."""
-        return self.call("ingest_table", {"name": name, "columns": columns, "rows": rows})
+        Include 'object_id' + 'com_x_nm'/'com_y_nm'/'com_z_nm' for click-to-fly;
+        `layer` names the segmentation layer the ids belong to (row-click
+        highlight), otherwise it's guessed from the table name."""
+        params: dict[str, Any] = {"name": name, "columns": columns, "rows": rows}
+        if layer:
+            params["layer"] = layer
+        return self.call("ingest_table", params)
 
-    def ingest_dataframe(self, name: str, df: Any) -> dict:
+    def ingest_dataframe(self, name: str, df: Any, layer: str | None = None) -> dict:
         """ingest_table for a pandas DataFrame (NaN -> NULL, numpy -> python)."""
         import math
 
@@ -237,7 +244,7 @@ class TourguideSession:
                     v = None
                 row.append(v)
             rows.append(row)
-        return self.ingest_table(name, cols, rows)
+        return self.ingest_table(name, cols, rows, layer=layer)
 
     def show_table(self, sql: str, name: str | None = None) -> dict:
         params: dict[str, Any] = {"sql": sql}

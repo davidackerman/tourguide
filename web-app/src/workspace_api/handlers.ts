@@ -49,6 +49,26 @@ const MAX_SQL_ROWS = 1000;
 const firstSource = (source: string | string[] | undefined): string | undefined =>
   Array.isArray(source) ? source[0] : source;
 
+/** URL of an NG-state layer source: a string, {url}, or an array of those
+ *  (first wins: for a meshify layer that's the volume, not the mesh). */
+const ngSourceUrl = (source: unknown): string | undefined => {
+  const s = Array.isArray(source) ? source[0] : source;
+  if (typeof s === "string") return s || undefined;
+  if (s && typeof s === "object" && typeof (s as { url?: unknown }).url === "string") {
+    return (s as { url: string }).url || undefined;
+  }
+  return undefined;
+};
+
+/** Every layer name the viewer and the descriptor know, for matching an
+ *  ingested table to its layer (agent-added layers aren't in the descriptor). */
+const knownLayerNames = (ctx: WorkspaceContext): string[] => {
+  const state = ctx.viewer.getNgState() as { layers?: Array<Record<string, unknown>> } | null;
+  const names = (state?.layers ?? []).map((l) => String(l.name ?? "")).filter(Boolean);
+  for (const l of ctx.getDescriptor()?.layers ?? []) if (!names.includes(l.name)) names.push(l.name);
+  return names;
+};
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Only SELECT-shaped statements go through the query ops. Anything that
@@ -127,17 +147,22 @@ const buildSessionSummary = (ctx: WorkspaceContext): SessionSummary => {
       layers: ngLayers.map((l) => {
         const name = String(l.name ?? "");
         const dl = descLayers.get(name);
+        const type = l.type ? String(l.type) : undefined;
         return {
           name,
-          type: l.type ? String(l.type) : undefined,
+          type,
           visible: l.visible === undefined ? true : Boolean(l.visible),
-          source: dl ? firstSource(dl.source) : undefined,
+          // Descriptor layers keep their declared URL; agent-added layers
+          // (add_layer, meshify, load_url) report the live NG source.
+          source: dl ? firstSource(dl.source) : ngSourceUrl(l.source),
           localPath: dl?.local_path,
           organelleClass: dl?.organelle_class,
+          voxelSizeNm: ctx.viewer.layerVoxelSizeNm(name),
+          hasMeshes: type === "segmentation" ? ctx.viewer.layerHasMeshes(name) : undefined,
         };
       }),
       selectedSegmentsByLayer,
-      position: state?.position,
+      position: ctx.viewer.getPositionNm(),
     },
     tables: (db?.tables ?? []).map((t) => ({
       id: t.table_name,
@@ -224,8 +249,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       const deadline = Date.now() + wait;
       while (wait > 0 && Date.now() < deadline && !ctx.viewer.isReady()) await sleep(150);
       const shot = await ctx.viewer.screenshot(p?.maxWidth);
-      const position = (ctx.viewer.getNgState() as { position?: number[] } | null)?.position;
-      return { ...shot, ready: ctx.viewer.isReady(), position };
+      return { ...shot, ready: ctx.viewer.isReady(), position: ctx.viewer.getPositionNm() };
     },
 
     get_viewer_state: async () => {
@@ -370,7 +394,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
     // workspace. This is the core of the model: the agent owns compute, the
     // workspace displays the result. Shows in the structured browser with
     // click-to-fly. Creates the DB if the dataset had no tables yet.
-    ingest_table: async (p: { name: string; columns: string[]; rows: unknown[][] }) => {
+    ingest_table: async (p: { name: string; columns: string[]; rows: unknown[][]; layer?: string }) => {
       if (!p?.name) throw new Error("ingest_table: missing 'name'");
       if (!Array.isArray(p.columns) || p.columns.length === 0) {
         throw new Error("ingest_table: 'columns' must be a non-empty string array");
@@ -380,13 +404,16 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       const rows = p.rows.map((r) =>
         (r ?? []).map((v) => (v === undefined || v === null ? null : (v as number | string))),
       );
+      const layer = typeof p.layer === "string" && p.layer ? p.layer : undefined;
       await ingestTableIntoDB(
         { getDB: ctx.getDB, setDB: ctx.setDB },
         { name, columns: p.columns, rows },
-        (ctx.getDescriptor()?.layers ?? []).map((l) => l.name),
+        knownLayerNames(ctx),
+        layer,
       );
       ctx.refreshBrowser();
-      return { tableId: name, name, rowCount: rows.length, columns: p.columns };
+      const linked = ctx.getDB()?.tables.find((t) => t.table_name === name)?.layer_name;
+      return { tableId: name, name, rowCount: rows.length, columns: p.columns, layer: linked };
     },
 
     show_table: async (p: { sql: string; name?: string }) => {
@@ -401,7 +428,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
       await ingestTableIntoDB(
         { getDB: ctx.getDB, setDB: ctx.setDB },
         { name, columns: res.columns, rows },
-        (ctx.getDescriptor()?.layers ?? []).map((l) => l.name),
+        knownLayerNames(ctx),
       );
       ctx.refreshBrowser();
       return { tableId: name, name, rowCount: res.rows.length, columns: res.columns };

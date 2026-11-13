@@ -157,7 +157,7 @@ still be driven by your local agent. The page connects *out* to the bridge.
 
 | Op | Purpose |
 | --- | --- |
-| `launch_or_attach`, `get_session`, `load_descriptor`, `wait_for_ready` | session; `get_session` includes each layer's `source`, `localPath`, and a `viewer.ready` flag |
+| `launch_or_attach`, `get_session`, `load_descriptor`, `wait_for_ready` | session; `get_session` includes each layer's `source`, `localPath`, `voxelSizeNm`, `hasMeshes` (segmentations), and a `viewer.ready` flag |
 | `screenshot` | PNG of the current view (base64) — the agent's eyes |
 | `fly_to`, `fly_to_segment`, `select_segments`, `get_selection` | camera + selection; `fly_to_segment` looks the centroid up in the layer's table |
 | `add_layer`, `add_annotations` | layers; native point / line / bbox annotations, append or replace |
