@@ -8,9 +8,10 @@
 //   3. `/api/analysis/run` POST + response-shape adaptation into the
 //      existing `CustomAnalysisResult`.
 //
-// This file is ONLY imported by code paths the user explicitly opts into
-// (the "Run on backend" toggle). The default Cloudflare-only behavior of
-// the app never touches it, which keeps the static-site deploy unaffected.
+// Legacy chat mode only. Nothing here runs unless the user has set an
+// analysis backend URL in Settings (empty by default) — workspace mode never
+// contacts a backend. Everything sent here (layer URLs, table rows, code,
+// share payloads, local-folder bytes over the tunnel) leaves the machine.
 
 import type { CustomAnalysisResult } from "./analysis.js";
 

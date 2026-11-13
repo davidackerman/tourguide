@@ -39,11 +39,14 @@
         <section id="viewer">
           <div id="ng-host" class="ng-host"></div>
         </section>
+        <div id="main-divider" data-divider role="separator" aria-orientation="vertical" title="Drag to resize the panel"></div>
         <aside id="sidebar">
+          <button id="sidebar-collapse" type="button" title="Collapse panel" aria-label="Collapse panel">›</button>
           <div id="query-host"></div>
           <div id="sidebar-divider" data-divider role="separator" aria-orientation="horizontal"></div>
           <div id="browser-host"></div>
         </aside>
+        <button id="sidebar-expand" type="button" title="Show panel" aria-label="Show panel" hidden>‹</button>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

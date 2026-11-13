@@ -243,8 +243,20 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
           </p>
           <div class="welcome-backend-choice">
             <label class="welcome-radio">
+              <input type="radio" name="welcome-analysis" value="none"
+                     ${settings.analysisBackendUrl.trim() === "" ? "checked" : ""} />
+              <div>
+                <strong>None — keep everything on this machine (default)</strong>
+                <p class="hint">
+                  No data or view state is sent to any server. Heavy analysis
+                  is done by your coding agent in its own environment
+                  (see the Workspace API), or in-browser for small inputs.
+                </p>
+              </div>
+            </label>
+            <label class="welcome-radio">
               <input type="radio" name="welcome-analysis" value="default"
-                     ${settings.analysisBackendUrl.trim() === "" || settings.analysisBackendUrl.trim() === DEFAULT_ANALYSIS_BACKEND ? "checked" : ""} />
+                     ${settings.analysisBackendUrl.trim() === DEFAULT_ANALYSIS_BACKEND ? "checked" : ""} />
               <div>
                 <strong>Use the shared demo Space</strong>
                 <p class="hint">
@@ -517,13 +529,15 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
     const oaiModel = visibleOaiModel?.value.trim() ?? settings.openaiModel;
     const oaiUrl = visibleOaiUrl?.value.trim() ?? settings.openaiBaseUrl;
     const webllmModel = overlay.querySelector<HTMLSelectElement>("[data-welcome-webllm-model]")?.value ?? settings.webllmModel;
-    const analysisChoice = overlay.querySelector<HTMLInputElement>('input[name="welcome-analysis"]:checked')?.value ?? "default";
+    const analysisChoice = overlay.querySelector<HTMLInputElement>('input[name="welcome-analysis"]:checked')?.value ?? "none";
     let analysisUrl: string;
     if (analysisChoice === "custom") {
       const typed = overlay.querySelector<HTMLInputElement>("[data-welcome-analysis-url]")?.value.trim() ?? "";
       analysisUrl = typed;
-    } else {
+    } else if (analysisChoice === "default") {
       analysisUrl = DEFAULT_ANALYSIS_BACKEND;
+    } else {
+      analysisUrl = "";
     }
     const next = {
       ...settings,
@@ -536,6 +550,7 @@ export function openWelcomeDialog(opts: WelcomeOptions): void {
       openaiBaseUrl: oaiUrl,
       webllmModel,
       analysisBackendUrl: analysisUrl,
+      analysisBackendOptIn: analysisUrl !== "",
     };
     saveSettings(next);
     // Validate the picked provider's key (where we can — local

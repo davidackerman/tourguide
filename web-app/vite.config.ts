@@ -64,6 +64,12 @@ const NG_CONDITIONS = [
   "neuroglancer/layer/single_mesh:enabled",
 ];
 
+// Bind to localhost only by default: the workspace tab can read every table
+// and drive the viewer, so don't expose it to the LAN unless asked.
+// TG_HOST=0.0.0.0 (or a specific address) widens it — pair with
+// TG_BRIDGE_HOST=0.0.0.0 on the bridge to share sessions on the LAN.
+const HOST = process.env.TG_HOST || "localhost";
+
 export default defineConfig({
   base: "./",
   plugins: [immutableAssets(), crossOriginIsolationExceptEmbedded()],
@@ -79,13 +85,13 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    host: true,
+    host: HOST,
     // COOP/COEP are applied conditionally by crossOriginIsolationExceptEmbedded
     // (skipped for the ?ngViewer embed page so its cross-origin iframe loads).
   },
   preview: {
     port: 4173,
-    host: true,
+    host: HOST,
     // Allow access via the machine's LAN IP/hostname, not just localhost, so
     // others on the same network can open the workspace. Vite preview
     // otherwise rejects unknown Host headers ("host not allowed").

@@ -148,6 +148,17 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
   asks. Do NOT substitute published/precomputed segment_properties or meshes
   unless the user explicitly asks for the published values.
 
+MESHES — when a segmentation has none and you want 3D, use `meshify`:
+  Many label volumes (e.g. COSEM n5 organelle segs) ship NO meshes, so
+  selecting a segment shows nothing in the 3D panel. `meshify(source=…,
+  segment_ids=[…])` generates them (zmesh, in the analysis env — no external
+  install), reading the source DIRECTLY from s3/gcs/http (no staging), serves
+  them via the bridge, and adds the mesh layer. It picks a coarse/fast scale by
+  default — tell the user which (the `ranAt` field) and that they can pass
+  scale= for finer; pass segment_ids (e.g. the largest from `measure`) to mesh
+  just those. (Optional: set TG_MESHNBONE_PYTHON to a mesh-n-bone >=0.5.0 env to
+  use multi-LOD Draco instead.) Don't hand-roll meshing when this tool exists.
+
 LOADING WHAT THE USER DROPS IN — discern the type, don't demand a format:
   When the user says "open this in tourguide" / "load these", infer the type
   from the content or extension and route it — don't require a yaml descriptor:
@@ -200,6 +211,22 @@ copy it to the clipboard; NEVER paste the long URL into chat):
   - Coworker WITH Tourguide who wants the full session to run themselves →
     export_session writes a portable file; they load it with
     restore_session_state(path=…) and get their own copy (read-only to yours).
+
+SEEING AND REACTING:
+  - `screenshot` returns the current view as an image. Look at it after every
+    visual change (fly_to, select_segments, add_layer, meshify) to confirm the
+    user sees what you intended; call `wait_for_ready` first if chunks may
+    still be loading. `fly_to_segment(layer, id)` flies to an object by id
+    using the measured centroid — prefer it over hand-computed fly_to.
+  - `wait_for_user_action` blocks until the person selects segments, moves the
+    camera or loads a dataset. Loop on it for a "you point, I explain" session:
+    on selection_changed → run_sql for that object_id → screenshot → narrate.
+
+SECURITY (already handled for you — just don't fight it):
+  - The bridge binds loopback and needs a bearer token; launch_or_attach reads
+    or generates it and opens the tab with it. Never paste tokens into chat.
+  - The page contacts no LLM, no analysis cloud, and holds no API keys.
+    Everything you compute stays on this machine unless the user shares.
 
 Other notes:
   - Call launch_or_attach first. Do NOT offer the workspace URL as a "share"

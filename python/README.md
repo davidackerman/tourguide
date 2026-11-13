@@ -2,7 +2,7 @@
 
 Python SDK for the **Tourguide Workspace API**. Drive a running Tourguide
 visual session from a script or notebook — the same HTTP `/op` contract the
-MCP adapter uses, just synchronous.
+MCP adapter uses, synchronous.
 
 ```bash
 cd python
@@ -12,17 +12,23 @@ uv pip install -e .       # or: pip install -e .
 ```python
 from tourguide_client import TourguideSession
 
-# Bridge must be running (cd web-app && npm run bridge) and a workspace tab
-# open (http://localhost:5173/?mode=workspace).
+# Stack running (`cd web-app && npm run workspace:preview`, or let the MCP
+# launch_or_attach start it) and a workspace tab open. The bridge token is
+# read from its token file automatically; pass token=... to override.
 s = TourguideSession.attach()
 
-print(s.get_session())                          # summary: layers, selection, tables...
-s.select_segments("mito", ["12", "34"])         # highlight segments
-s.fly_to([12000, 8000, 4000], layer="mito")     # camera to a point (nm)
+info = s.get_session()                 # layers with source URLs, voxel size, tables…
+s.ingest_dataframe("mito", df)         # DataFrame with object_id + com_*_nm → click-to-fly
+s.fly_to_segment("mito_seg", 4312)     # camera + selection via the table's centroid
+s.show_figure(fig, title="Volumes")    # a matplotlib Figure, rendered here
+s.screenshot("view.png")               # PNG of the current view
+s.add_annotations([{"type": "bbox", "min": [0,0,0], "max": [500,500,500], "label": "ROI"}])
 
-s.run_sql("SELECT object_id, volume_nm_3 FROM mito ORDER BY volume_nm_3 DESC LIMIT 10")
-s.show_table("SELECT * FROM mito WHERE volume_nm_3 > 1e9", name="big_mito")
-s.show_plot(code="plt.hist(df_mitochondria['volume_nm_3']/1e9, bins=40)", title="Volumes (µm³)")
+# React to the person at the screen
+ev = s.wait_for_user_action(timeout_ms=30000)
+for e in ev["events"]:
+    if e["type"] == "selection_changed":
+        print("user selected", e["selectedSegmentsByLayer"])
 
 state = s.save_session_state("interesting state")
 s.restore_session_state(state["id"])
