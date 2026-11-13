@@ -1,6 +1,8 @@
 # Tourguide
 
-**Live**: https://tourguide-8j4.pages.dev
+**Live**: https://tourguide-8j4.pages.dev — the viewer on its own (load your
+data or the demo). To drive it from your agent, see
+[Sharing and hosting](#sharing-and-hosting).
 
 ![Tourguide demo](docs/media/tourguide-demo.gif)
 *Prompt: "Use the Tourguide MCP. Load this Neuroglancer view, measure the mitochondria, create meshes for them, plot the distribution of various parameters, then fly to the largest mitochondrion and turn it on."*
@@ -84,7 +86,8 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
   sessions on the LAN.
 - **Token auth.** Every bridge request that reads workspace state or drives
   the viewer needs a bearer token generated per launch (written 0600 to
-  `tourguide-bridge-<port>.token` in the OS temp dir, never printed). Share
+  `tourguide-bridge-<port>.token` in the OS temp dir; the bridge never prints
+  it). Share
   links carry a weaker **view token** that only permits a read-only viewer.
 - **Origin allowlist.** Browser requests are accepted only from loopback, this
   machine's own addresses, or the hosted Tourguide page. A random web page in
@@ -98,8 +101,11 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
 ## Sharing and hosting
 
 The bridge runs on **your machine**; the page can be served from anywhere
-(the live static build is on Cloudflare Pages) and still be driven by your
-local agent via `?bridge=localhost:7723&bridgeToken=…`. Each workspace has an
+and still be driven by your local agent. To use the live Cloudflare Pages
+build instead of a local preview, set
+`TOURGUIDE_WORKSPACE_URL=https://tourguide-8j4.pages.dev/` for the MCP server:
+`launch_or_attach` opens the hosted page with your token, and an HTTPS page
+looks for the bridge on `localhost:7723` (`?bridge=host:port` overrides). Each workspace has an
 addressable `?session=<id>`; reopening it restores layers, tables and plots
 from `~/.tourguide/session-states`. `share_session` produces a short link with
 the view token; `export_session` writes a portable file a colleague can load

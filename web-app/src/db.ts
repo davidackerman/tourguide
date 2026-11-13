@@ -300,6 +300,7 @@ export async function ingestTableIntoDB(
   deps: { getDB: () => DatasetDB | null; setDB: (db: DatasetDB) => void },
   tbl: { name: string; columns: string[]; rows: (number | string | null)[][] },
   knownLayerNames?: string[],
+  explicitLayerName?: string,
 ): Promise<void> {
   // Build the DB instance + table metadata first, THEN call setDB once
   // at the end. The previous flow called setDB with an empty
@@ -389,9 +390,16 @@ export async function ingestTableIntoDB(
   // Resolve the layer_name used for click-to-fly + segment highlight.
   // Prefer an exact match against the dataset's layers; otherwise try
   // stripping common suffixes the agent tends to invent
-  // ("mito_volumes" → "mito"); fall back to the table name.
+  // ("mito_volumes" → "mito"); fall back to the table name. A caller that
+  // knows the layer (e.g. `measure`, which matched it by source URL) wins.
+  // Re-ingesting (e.g. adding a column) without a layer keeps the link the
+  // table already has, so a measure-made link to "mito_seg" survives.
   let resolvedLayerName = tableName;
-  if (knownLayerNames && knownLayerNames.length > 0) {
+  if (explicitLayerName) {
+    resolvedLayerName = explicitLayerName;
+  } else if (existingTableMeta?.layer_name && existingTableMeta.layer_name !== tableName) {
+    resolvedLayerName = existingTableMeta.layer_name;
+  } else if (knownLayerNames && knownLayerNames.length > 0) {
     const exact = knownLayerNames.find((n) => n === tableName);
     if (exact) {
       resolvedLayerName = exact;

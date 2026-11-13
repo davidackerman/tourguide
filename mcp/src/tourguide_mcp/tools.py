@@ -159,7 +159,8 @@ async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> tuple[str, str]:
     cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(recipe),
            *args, "--out", out.name]
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd, stdin=asyncio.subprocess.DEVNULL,  # keep off the MCP stdio pipe
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
     text = stderr.decode(errors="replace")
@@ -169,12 +170,29 @@ async def _run_recipe_to_csv(recipe: Path, args: list[str]) -> tuple[str, str]:
 
 
 def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
+    async def _layer_for_source(source: str) -> str | None:
+        """Name of the open layer that reads `source`, so a recipe's table links
+        to it (click-to-fly highlight) whatever the table is called."""
+        try:
+            summary = await session.call("get_session")
+        except Exception:
+            return None
+        if not isinstance(summary, dict):
+            return None
+        want = source.rstrip("/")
+        for layer in (summary.get("viewer") or {}).get("layers") or []:
+            if (layer.get("source") or "").rstrip("/") == want and layer.get("name"):
+                return layer["name"]
+        return None
+
     async def _run_and_ingest(recipe: Path, source: str, name: str, extra: list[str]) -> dict:
         csv_path, stderr = await _run_recipe_to_csv(recipe, [source, *extra])
         columns, rows = _load_table(csv_path)
-        result = await session.call(
-            "ingest_table", {"name": name, "columns": columns, "rows": rows}
-        )
+        params: dict[str, Any] = {"name": name, "columns": columns, "rows": rows}
+        layer = await _layer_for_source(source)
+        if layer:
+            params["layer"] = layer
+        result = await session.call("ingest_table", params)
         if isinstance(result, dict):
             result["rowCount"] = len(rows)
             result["csvPath"] = csv_path  # reuse for plots/more analysis — no recompute
@@ -229,11 +247,9 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         port = urllib.parse.urlparse(session.config.bridge_url).port
         if port and port != 7723:
             url += f"&bridgePort={port}"
-        # The link carries the weaker VIEW token: it lets the recipient's tab
-        # read the shared state as a read-only viewer, never drive this one.
-        view_token = session.client.view_token
-        if view_token:
-            url += f"&bridgeToken={urllib.parse.quote(view_token)}"
+        # No token in the link: GET /share-state is served without one, and the
+        # recipient's tab shows the snapshot read-only without registering as a
+        # session (a view token there only got the tab closed and retried).
         result = await _deliver_share_link(url, "Open in Tourguide", "Tourguide")
         if not exposed:
             result["warning"] = (
@@ -342,16 +358,18 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
     async def meshify(
         source: str,
         name: str = "mesh",
-        segment_ids: list[str] | None = None,
+        segment_ids: list[str | int] | None = None,
         scale: str | None = None,
         num_lods: int = 1,
     ) -> dict:
         """Generate 3D meshes for a segmentation and add them as a layer — for
         when the source has no precomputed meshes (so selecting a segment shows
-        nothing in 3D). Reads the `source` (n5/zarr over s3/gcs/http, from
-        get_session) DIRECTLY — no staging. Picks a coarse/fast multiscale level
-        by default (tell the user which — the `ranAt` field — and that they can
-        pass `scale` e.g. "s2" for finer), serves the meshes through the bridge,
+        nothing in 3D; get_session's `hasMeshes: false`). Reads the `source`
+        (an n5 label volume on s3, e.g. COSEM `labels/…`, from get_session)
+        DIRECTLY — no staging. zarr and gcs/http sources aren't supported yet.
+        Picks a coarse/fast multiscale level by default (tell the user which —
+        the `ranAt` field — and that they can pass `scale` e.g. "s2" for
+        finer), serves the meshes through the bridge,
         and adds a segmentation layer with them. `segment_ids` defaults to ALL
         objects (pass a few ids — e.g. the largest from `measure` — to mesh just
         those at a finer scale).
@@ -367,26 +385,36 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         mnb_py = os.environ.get("TG_MESHNBONE_PYTHON")
         if mnb_py and Path(mnb_py).exists():
             # Optional upgrade: mesh-n-bone (multi-LOD Draco) in its own env.
-            runner = _ANALYSIS_DIR / "tg_local" / "meshify_runner.py"
+            runner = _ANALYSIS_DIR / "meshify" / "meshify_runner.py"
             cmd = [mnb_py, str(runner), "--source", source, "--name", name,
                    "--mnb", str(Path(mnb_py).with_name("mesh-n-bone")),
                    "--num-lods", str(num_lods), "--bridge", bridge_netloc, "--out", out.name]
         else:
             # Default: in-house zmesh in the pre-loaded analysis env.
-            runner = _ANALYSIS_DIR / "tg_local" / "meshify_local.py"
+            runner = _ANALYSIS_DIR / "meshify" / "meshify_local.py"
             cmd = ["uv", "run", "--project", str(_ANALYSIS_DIR), "python", str(runner),
                    "--source", source, "--name", name, "--bridge", bridge_netloc, "--out", out.name]
+        if not runner.is_file():
+            raise RuntimeError(
+                f"meshify runner not found: {runner}. It ships in the repo under "
+                "analysis/meshify/; check that the tourguide checkout is complete."
+            )
         if scale:
             cmd += ["--scale", scale]
         if segment_ids:
             cmd += ["--ids", ",".join(str(s) for s in segment_ids)]
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd, stdin=asyncio.subprocess.DEVNULL,  # keep off the MCP stdio pipe
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"meshify failed:\n{stderr.decode(errors='replace')[-2000:]}")
-        result = json.loads(Path(out.name).read_text())
+        out_path = Path(out.name)
+        try:
+            if proc.returncode != 0:
+                raise RuntimeError(f"meshify failed:\n{stderr.decode(errors='replace')[-2000:]}")
+            result = json.loads(out_path.read_text())
+        finally:
+            out_path.unlink(missing_ok=True)  # the result is consumed here; don't leave temp files
         # mesh-n-bone returns separate volume+mesh sources; the in-house mesher
         # returns one self-contained precomputed source (voxels + mesh).
         layer_source = ([result["volume_source"], result["mesh_source"]]
@@ -463,13 +491,14 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def fly_to_segment(
-        layer: str, segment_id: str, table: str | None = None, select: bool = True
+        layer: str, segment_id: str | int, table: str | None = None, select: bool = True
     ) -> dict:
         """Fly to an object by id, looking up its centroid (com_x_nm/com_y_nm/
         com_z_nm) in the layer's table — the one `measure` / ingest_table
         produced for that layer, or `table` explicitly. Selects the segment
         unless select=False. Prefer this over fly_to when you have an object id."""
-        params: dict[str, Any] = {"layer": layer, "segmentId": segment_id, "select": select}
+        # Ids go over the wire as strings: uint64 ids lose precision as JS numbers.
+        params: dict[str, Any] = {"layer": layer, "segmentId": str(segment_id), "select": select}
         if table is not None:
             params["table"] = table
         return await session.call("fly_to_segment", params)
@@ -525,21 +554,21 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("get_selection")
 
     @mcp.tool()
-    async def select_segments(layer: str, segment_ids: list[str]) -> dict:
+    async def select_segments(layer: str, segment_ids: list[str | int]) -> dict:
         """Set which segment IDs are highlighted/visible in a segmentation layer."""
         return await session.call(
-            "select_segments", {"layer": layer, "segmentIds": segment_ids}
+            "select_segments", {"layer": layer, "segmentIds": [str(s) for s in segment_ids]}
         )
 
     @mcp.tool()
     async def fly_to(
-        position: list[float], segment_id: str | None = None, layer: str | None = None
+        position: list[float], segment_id: str | int | None = None, layer: str | None = None
     ) -> dict:
         """Move the camera to a world-space position [x, y, z] in nanometers,
         optionally highlighting a segment in a layer."""
         params: dict[str, Any] = {"position": position}
         if segment_id is not None:
-            params["segmentId"] = segment_id
+            params["segmentId"] = str(segment_id)
         if layer is not None:
             params["layer"] = layer
         return await session.call("fly_to", params)
@@ -609,12 +638,16 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         path: str | None = None,
         columns: list[str] | None = None,
         rows: list[list] | None = None,
+        layer: str | None = None,
     ) -> dict:
         """Push a table YOU computed into Tourguide. This is the core of the
         workspace model: you read the data and compute in your OWN environment,
         then send the result here to display. The table appears in the
         structured browser with click-to-fly (include an 'object_id' column and
-        'com_x_nm'/'com_y_nm'/'com_z_nm' for navigation). Returns the table id.
+        'com_x_nm'/'com_y_nm'/'com_z_nm' for navigation). Pass `layer` (the
+        segmentation layer the object_ids belong to) so clicking a row also
+        highlights the object; otherwise it's guessed from the table name.
+        Returns the table id and the linked layer.
 
         PREFER `path` for anything beyond a few rows: write the table to a file
         in your environment (.csv, or .json as list-of-records / {columns,rows})
@@ -626,7 +659,10 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
             columns, rows = _load_table(path)
         if not columns or rows is None:
             raise ValueError("ingest_table: provide `path`, or both `columns` and `rows`")
-        return await session.call("ingest_table", {"name": name, "columns": columns, "rows": rows})
+        params: dict[str, Any] = {"name": name, "columns": columns, "rows": rows}
+        if layer:
+            params["layer"] = layer
+        return await session.call("ingest_table", params)
 
     @mcp.tool()
     async def show_table(sql: str, name: str | None = None) -> dict:
@@ -732,7 +768,7 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
 
     @mcp.tool()
     async def add_narration_note(
-        text: str, position: list[float] | None = None, segment_id: str | None = None
+        text: str, position: list[float] | None = None, segment_id: str | int | None = None
     ) -> dict:
         """Add a narration note (a workspace-side annotation of what's
         interesting), optionally tied to a position/segment."""
@@ -740,7 +776,7 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         if position is not None:
             params["position"] = position
         if segment_id is not None:
-            params["segmentId"] = segment_id
+            params["segmentId"] = str(segment_id)
         return await session.call("add_narration_note", params)
 
     @mcp.tool()

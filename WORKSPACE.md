@@ -57,7 +57,9 @@ down by default:
   `<tmpdir>/tourguide-bridge-<port>.token`. The tab gets it via
   `?bridgeToken=` (the launcher and `npm run workspace` supply it); the MCP
   adapter and SDK read the file. `TG_BRIDGE_NO_AUTH=1` disables (single-user
-  machines only). Tokens are never printed to stdout or logs.
+  machines only). The bridge never prints or logs the tokens;
+  `npm run workspace[:preview]` prints the tab URL (token included) to your
+  terminal.
 - **View token.** A second, weaker token that only lets a tab register as a
   read-only viewer (`?view=1`). `share_session` links carry this one, never
   the full token. Read-only is enforced server-side: a viewer never persists,
@@ -81,7 +83,7 @@ down by default:
 - `?mode=workspace` (**default**) — agent-driven: chat composer, AI provider
   chrome, in-browser compute buttons and the upload-based Share button are
   hidden; shows agent connection status + the **Agent Actions** history panel,
-  docked plots, share links, and Download / Load workspace.
+  docked plots, share links, and Save / Open workspace.
 - `?mode=chat` — legacy chat (in-app LLM with a user-supplied key). Deprecated;
   logs a warning.
 
@@ -125,10 +127,14 @@ The bridge runs on **your machine**; the page can be served from anywhere and
 still be driven by your local agent. The page connects *out* to the bridge.
 
 - **Hosted page → local bridge.** Serve the static build anywhere (the live
-  build is on Cloudflare Pages) and open it with
-  `?bridge=localhost:7723&bridgeToken=<token>`; the page connects to your local
-  bridge (localhost is mixed-content-exempt, the bridge answers Chrome's
-  Private-Network-Access preflight, and the hosted origin is on the allowlist).
+  build is on Cloudflare Pages). Set
+  `TOURGUIDE_WORKSPACE_URL=https://tourguide-8j4.pages.dev/` and
+  `launch_or_attach` opens it with `?bridgeToken=<token>`. A page served over
+  HTTPS from a non-local host looks for the bridge on `localhost:7723`
+  (localhost is mixed-content-exempt, the bridge answers Chrome's
+  Private-Network-Access preflight, and the hosted origin is on the allowlist);
+  `?bridge=host:port` overrides. Opened without a token, the hosted page
+  doesn't try to connect at all; it shows how to set up an agent.
 - **Unique, addressable sessions.** Each workspace carries a `?session=<id>`
   (minted on first open). Reopening the link returns to the same session; the
   bridge keys routing on the id, so concurrent tabs don't collide.
@@ -136,11 +142,13 @@ still be driven by your local agent. The page connects *out* to the bridge.
 - **Reopen restores everything.** The page auto-saves a snapshot (viewer state
   + table data + plot images) keyed by session id (`~/.tourguide/session-states`).
 - **Read-only share links.** `?session=<id>&view=1&bridgeToken=<viewToken>`
-  registers under a fresh id and never writes back. `share_session` builds this
-  link (short `?state=<id>` form). Viewers need only a browser.
-- **Portable files.** `export_session` / the panel's Download button write the
-  snapshot to a file; `restore_session_state(path=…)` / Load applies it into
-  the recipient's own copy.
+  follows a live session: it registers under a fresh id and never writes back.
+  `share_session` builds the short snapshot form, `?state=<id>`: the tab fetches
+  that view over HTTP (no token needed) and shows it read-only without
+  connecting as a session. Viewers need only a browser.
+- **Portable files.** `export_session` / the panel's **Save workspace** button
+  write the snapshot to a file; `restore_session_state(path=…)` / **Open
+  workspace** applies it into the recipient's own copy.
 - **Agent-computed layers.** The agent writes a result (a zarr, meshes from
   `meshify`) to `~/.tourguide/artifacts` (`TG_ARTIFACTS_DIR`); the bridge serves
   it at `/artifacts/…` and `add_layer` renders it. Layer URLs are rewritten to
@@ -150,7 +158,7 @@ still be driven by your local agent. The page connects *out* to the bridge.
 
 | Op | Purpose |
 | --- | --- |
-| `launch_or_attach`, `get_session`, `load_descriptor`, `wait_for_ready` | session; `get_session` includes each layer's `source`, `localPath`, and a `viewer.ready` flag |
+| `launch_or_attach`, `get_session`, `load_descriptor`, `wait_for_ready` | session; `get_session` includes each layer's `source`, `localPath`, `voxelSizeNm`, `hasMeshes` (segmentations), and a `viewer.ready` flag |
 | `screenshot` | PNG of the current view (base64) — the agent's eyes |
 | `fly_to`, `fly_to_segment`, `select_segments`, `get_selection` | camera + selection; `fly_to_segment` looks the centroid up in the layer's table |
 | `add_layer`, `add_annotations` | layers; native point / line / bbox annotations, append or replace |

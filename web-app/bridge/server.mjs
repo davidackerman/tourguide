@@ -711,7 +711,7 @@ server.listen(PORT, HOST, () => {
   if (TOKEN) {
     // Never print the tokens themselves: stdout may be captured to a log file.
     log(`  auth: bearer token required — read it from ${tokenFilePath()} (mode 0600)`);
-    log(`  open the workspace as: http://localhost:5173/?mode=workspace&bridgeToken=<token>`);
+    log(`  open the workspace as: http://localhost:<4173 preview | 5173 dev/launcher>/?mode=workspace&bridgeToken=<token>`);
   } else {
     log(`  auth: DISABLED (TG_BRIDGE_NO_AUTH=1)`);
   }

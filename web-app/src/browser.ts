@@ -1,6 +1,7 @@
 import type { DatasetDB, IngestedTable, QueryResult } from "./db.js";
 import { runQuery } from "./db.js";
 import type { BundledViewer } from "./bundled_viewer.js";
+import { bridgeHttpBase } from "./bridge_url.js";
 
 // Columns that count as 'navigable numeric' — sortable, displayed in
 // the structured browser. Canonical names (with explicit nm units)
@@ -262,14 +263,13 @@ function flyFromRow(viewer: BundledViewer, table: IngestedTable, row: Record<str
     // it and flies. Otherwise drive the in-page bundled viewer directly.
     const params = new URLSearchParams(window.location.search);
     if (params.get("ngViewer")) {
-      const port = params.get("bridgePort") || "7723";
       let token = "";
       try {
-        token = new URLSearchParams(window.location.search).get("bridgeToken") || sessionStorage.getItem("tourguide.bridgeToken") || "";
+        token = params.get("bridgeToken") || sessionStorage.getItem("tourguide.bridgeToken") || "";
       } catch {
         /* no storage */
       }
-      void fetch(`http://${window.location.hostname}:${port}/viewer-fly${token ? `?token=${encodeURIComponent(token)}` : ""}`, {
+      void fetch(`${bridgeHttpBase()}/viewer-fly${token ? `?token=${encodeURIComponent(token)}` : ""}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ position: [px, py, pz], layer: table.layer_name, segmentId }),
