@@ -22,6 +22,7 @@ import { registerServiceWorker, isFsAccessSupported } from "./local_folder.js";
 import { createShareLink, fetchHealth, fetchShareLink } from "./remote_analysis.js";
 import { openWelcomeDialog, hasSeenWelcome } from "./welcome_ui.js";
 import { resolveMode, applyModeToDocument, isWorkspaceMode } from "./mode.js";
+import { bridgeHttpBase, bridgeWsUrl, isHostedPage, resolveBridgeTarget } from "./bridge_url.js";
 import { renderWorkspacePanel, type WorkspacePanelHandle } from "./workspace_ui.js";
 import { SessionStore } from "./workspace_api/session_state.js";
 import { startWorkspaceBridge } from "./workspace_api/bridge.js";
@@ -239,10 +240,8 @@ async function maybeLoadSharedState(): Promise<boolean> {
   const params = new URLSearchParams(window.location.search);
   const id = params.get("state");
   if (!id) return false;
-  const port = params.get("bridgePort") || "7723";
-  const host = window.location.hostname || "localhost";
   try {
-    const res = await fetch(`http://${host}:${port}/share-state/${encodeURIComponent(id)}`);
+    const res = await fetch(`${bridgeHttpBase()}/share-state/${encodeURIComponent(id)}`);
     if (!res.ok) return false;
     viewer.applyNgState((await res.json()) as Record<string, unknown>);
     return true;
@@ -264,15 +263,33 @@ function renderEmbeddedViewer(url: string): void {
   ngHost.appendChild(frame);
 }
 
+// The demo catalog lists a synthetic placeholder first and a real
+// OpenOrganelle dataset second; "Load demo" means the real one.
+function demoEntryIndex(): number {
+  const realIdx = entries.findIndex((e) => !/synthetic/i.test(e.name));
+  return realIdx >= 0 ? realIdx : entries.length > 0 ? 0 : -1;
+}
+
+function loadDemoEntry(): void {
+  const idx = demoEntryIndex();
+  if (idx < 0) return;
+  select.value = String(idx);
+  void loadEntry(entries[idx], idx);
+}
+
+const escapeHtml = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
 function renderEmptyViewerState(): void {
+  const demo = entries[demoEntryIndex()];
   ngHost.innerHTML = `
     <div class="empty-viewer">
       <div class="empty-viewer-card">
         <h2>No dataset loaded</h2>
-        <p>${isWorkspaceMode() ? "Ask the agent to load data, or load it yourself:" : "Pick how you'd like to start:"}</p>
+        <p>${isWorkspaceMode() ? "Load your own data or the demo — or have your agent load it:" : "Pick how you'd like to start:"}</p>
         <div class="empty-viewer-actions">
           <button class="btn-primary" data-empty-action="load">+ Load your data</button>
-          <button class="btn-secondary" data-empty-action="catalog" ${entries.length === 0 ? "disabled" : ""}>Browse demo catalog</button>
+          <button class="btn-secondary" data-empty-action="catalog" ${demo ? "" : "disabled"}>Load demo dataset${demo ? ` (${escapeHtml(demo.name)})` : ""}</button>
           <button class="btn-secondary" data-empty-action="welcome">Show welcome again</button>
         </div>
         <p class="hint">
@@ -284,12 +301,7 @@ function renderEmptyViewerState(): void {
     </div>
   `;
   ngHost.querySelector("[data-empty-action='load']")?.addEventListener("click", () => loadBtn.click());
-  ngHost.querySelector("[data-empty-action='catalog']")?.addEventListener("click", () => {
-    if (entries.length > 0) {
-      select.value = "0";
-      void loadEntry(entries[0], 0);
-    }
-  });
+  ngHost.querySelector("[data-empty-action='catalog']")?.addEventListener("click", loadDemoEntry);
   ngHost.querySelector("[data-empty-action='welcome']")?.addEventListener("click", () => {
     openWelcomeDialog(makeWelcomeOptions());
   });
@@ -301,17 +313,7 @@ function renderEmptyViewerState(): void {
 function makeWelcomeOptions(): Parameters<typeof openWelcomeDialog>[0] {
   return {
     onOpenLoader: () => loadBtn.click(),
-    onLoadDemo: () => {
-      // Prefer a non-synthetic catalog entry — the demo catalog has
-      // 'demo_synthetic' first (placeholder) and a real OpenOrganelle
-      // dataset second. Pick whichever real entry we can find.
-      const realIdx = entries.findIndex((e) => !/synthetic|demo_synthetic/i.test(e.name));
-      const idx = realIdx >= 0 ? realIdx : 0;
-      if (entries[idx]) {
-        select.value = String(idx);
-        void loadEntry(entries[idx], idx);
-      }
-    },
+    onLoadDemo: loadDemoEntry,
     onSettingsChanged: () => {
       backend = backendFromSettings(loadSettings());
       updateBackendIndicator();
@@ -1104,7 +1106,7 @@ const NG_DEMO_BASE = "https://neuroglancer-demo.appspot.com/";
 copyNgBtn.addEventListener("click", async () => {
   const ngState = viewer.getNgState();
   if (!ngState) {
-    copyNgBtn.textContent = "✗ no NG state";
+    copyNgBtn.textContent = "Load a dataset first";
     setTimeout(() => (copyNgBtn.textContent = "📋 Copy NG"), 2000);
     return;
   }
@@ -1124,36 +1126,17 @@ copyNgBtn.addEventListener("click", async () => {
 // this session. The browser is the source of truth for workspace state;
 // the bridge just relays ops and streams the action history.
 // ---------------------------------------------------------------------------
-// Resolve the bridge WebSocket URL. Default: the page's own host (local dev +
-// LAN sharing, where the page and bridge share a host). Override: a HOSTED page
-// must point at the user's LOCAL bridge — the bridge runs on their machine, not
-// on the static host. `?bridge=host[:port]` (or the persisted Connect setting)
-// forces it; localhost is mixed-content-exempt so ws://localhost works from an
-// HTTPS page. See memory: public-page-drives-local-bridge.
-function resolveBridgeWsUrl(): string {
-  const params = new URLSearchParams(window.location.search);
-  const port = params.get("bridgePort") || "7723";
-  let stored = "";
-  try {
-    stored = localStorage.getItem("tg.bridgeUrl") || "";
-  } catch {
-    /* localStorage may be unavailable (private mode) — fall through */
-  }
-  const override = params.get("bridge") || stored;
-  if (override) {
-    const [oHost, oPort] = override.replace(/^wss?:\/\//, "").replace(/\/.*$/, "").split(":");
-    return `ws://${oHost || "localhost"}:${oPort || port}/browser`;
-  }
-  const host = window.location.hostname || "localhost";
-  return `ws://${host}:${port}/browser`;
-}
+// The bridge address (page host locally / on the LAN, localhost on the hosted
+// HTTPS build, `?bridge=` to override) lives in bridge_url.ts.
 
 // Each workspace gets a unique, addressable session id carried in the URL
 // (?session=<id>). Reopening or sharing that URL returns to the same id, and
 // the bridge keys routing on it — so concurrent tabs/users don't collide
 // (the old default routed to "most-recently-created", which let a second tab
 // steal commands). Minted and written into the URL on first open if absent.
-function resolveSessionId(): string {
+// With no bridge there's nothing for the id to address, so it isn't written
+// into the URL (a copied link would carry a session that refers to nothing).
+function resolveSessionId(writeToUrl = true): string {
   const params = new URLSearchParams(window.location.search);
   let id = params.get("session");
   if (!id) {
@@ -1161,12 +1144,14 @@ function resolveSessionId(): string {
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `session-${Date.now()}`;
-    params.set("session", id);
-    history.replaceState(
-      null,
-      "",
-      window.location.pathname + "?" + params.toString() + window.location.hash,
-    );
+    if (writeToUrl) {
+      params.set("session", id);
+      history.replaceState(
+        null,
+        "",
+        window.location.pathname + "?" + params.toString() + window.location.hash,
+      );
+    }
   }
   return id;
 }
@@ -1188,15 +1173,22 @@ function resolveBridgeToken(): string | undefined {
 
 function startBridgeIfWorkspace(): void {
   if (!isWorkspaceMode() || !workspacePanel) return;
-  const bridgeWsUrl = resolveBridgeWsUrl();
+  const target = resolveBridgeTarget();
   const bridgeToken = resolveBridgeToken();
+  // A visitor on the hosted build who didn't come from the launcher (no token,
+  // no ?bridge=) has no bridge to find, and probing localhost would put Chrome's
+  // "access your local network" prompt in front of every visitor. Stay offline;
+  // the panel says how to connect an agent. Loading data and workspace files
+  // still works without a bridge.
+  // A share_session link (?state=<id>, no ?session) is a snapshot fetched over
+  // plain HTTP; it has no session to attach to, and registering would just get
+  // the tab closed by the bridge and retried forever.
+  const pageParams = new URLSearchParams(window.location.search);
+  const sharedView = pageParams.has("state") && !pageParams.has("session");
+  const connect = !sharedView && (Boolean(bridgeToken) || target.explicit || !isHostedPage());
   // The viewer rewrites agent-computed /artifacts/ layer URLs to this host, so
   // shared sessions fetch from the host machine (not a peer's own localhost).
-  try {
-    viewer.setBridgeHost(new URL(bridgeWsUrl.replace(/^ws/, "http")).host);
-  } catch {
-    /* malformed bridge URL — artifact rewriting stays a no-op */
-  }
+  viewer.setBridgeHost(`${target.host}:${target.port}`);
 
   // Read-only share (?view=1): register under a FRESH id so the viewer never
   // collides with or hijacks the owner's live session, view the shared session
@@ -1206,7 +1198,7 @@ function startBridgeIfWorkspace(): void {
   const viewOnly = viewParams.get("view") === "1";
   const sessionId = viewOnly
     ? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `view-${Date.now()}`)
-    : resolveSessionId();
+    : resolveSessionId(connect);
   const viewOf = viewOnly ? viewParams.get("session") || undefined : undefined;
 
   const store = new SessionStore(
@@ -1241,13 +1233,19 @@ function startBridgeIfWorkspace(): void {
   };
 
   startWorkspaceBridge(ctx, workspacePanel, {
-    bridgeWsUrl,
+    bridgeWsUrl: bridgeWsUrl(target),
+    connect,
     token: bridgeToken,
     viewOnly,
     viewOf,
+    sharedView,
     // The bridge reports its LAN IP on register; use it for computed-layer
     // artifact URLs so a shared session is reachable by a peer, not just us.
-    onBridgeHost: (h) => viewer.setBridgeHost(h),
+    // Not on the hosted HTTPS page: only http://localhost is exempt from
+    // mixed-content blocking, so a LAN-IP artifact URL would never load.
+    onBridgeHost: (h) => {
+      if (!isHostedPage()) viewer.setBridgeHost(h);
+    },
   });
 }
 

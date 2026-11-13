@@ -4,7 +4,8 @@ Load-bearing behavior (see the agent-workspace plan):
   1. If the bridge is healthy and a session is running, attach.
   2. If the bridge is down, start it (when a web-app dir is configured).
   3. If no session exists, open the workspace URL in a browser and wait.
-  4. Pick the most recently created session for v0 (the bridge does this).
+  4. With several tabs open, don't guess: return {ambiguous, sessions} and let
+     the caller pass session_id (or new=True).
   5. On reconnect failure, raise a clear error so the caller can relaunch.
 
 Config via environment:
@@ -36,6 +37,36 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 
 from .client import WorkspaceClient, WorkspaceError
+
+
+def open_in_browser(url: str) -> None:
+    """Open `url` in the user's browser without letting the opener touch this
+    process's stdio. stdin/stdout are the MCP JSON-RPC stream: webbrowser's
+    openers inherit them (on Linux, xdg-open → Chrome prints "Opening in
+    existing browser session." to stdout, corrupting the channel). Best effort;
+    never raises."""
+    import sys
+
+    if sys.platform == "darwin":
+        cmd = ["open", url]
+    elif sys.platform.startswith("linux"):
+        cmd = ["xdg-open", url]
+    else:
+        cmd = None
+    if cmd is not None:
+        try:
+            subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            return
+        except Exception:
+            pass  # opener missing: fall back to webbrowser
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
 
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:7723"
 DEFAULT_WORKSPACE_URL = "http://localhost:5173/?mode=workspace"
@@ -138,6 +169,11 @@ class Launcher:
         token = self.client.view_token if view else self.client.token
         if token:
             q["bridgeToken"] = token
+        elif u.scheme == "https" and (u.hostname or "") not in LOOPBACK:
+            # The hosted page only connects when given a token or ?bridge= (so
+            # visitors without an agent get no local-network prompt). With a
+            # no-auth bridge there's no token, so name the bridge explicitly.
+            q.setdefault("bridge", f"localhost:{bport}")
         return urlunparse(u._replace(query=urlencode(q)))
 
     def lan_url(self) -> str | None:
@@ -178,6 +214,7 @@ class Launcher:
         install = await asyncio.create_subprocess_exec(
             "npm", "install",
             cwd=self.config.webapp_dir,
+            stdin=subprocess.DEVNULL,  # never share the MCP stdio pipe; see ensure_bridge
             stdout=log,
             stderr=subprocess.STDOUT,
         )
@@ -218,10 +255,16 @@ class Launcher:
         # process (e.g. when the client restarts the server); stdout/err go to
         # a log file so a failure is diagnosable instead of silent. The token
         # travels in the environment, never on the command line or in logs.
+        # stdin must be DEVNULL: an inherited stdin is the MCP JSON-RPC pipe,
+        # and Node puts it in non-blocking mode for as long as it runs. The
+        # flag is shared, so this server's next idle stdin read comes back
+        # empty, is taken as EOF, and the server exits silently ("Connection
+        # closed" on the call after a first-run launch_or_attach).
         log = open(self.bridge_log, "ab")
         self._bridge_proc = subprocess.Popen(
             ["npm", "run", "bridge"],
             cwd=self.config.webapp_dir,
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
@@ -326,6 +369,7 @@ class Launcher:
             build = await asyncio.create_subprocess_exec(
                 "npm", "run", "build",
                 cwd=self.config.webapp_dir,
+                stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
@@ -338,6 +382,7 @@ class Launcher:
         self._webapp_proc = subprocess.Popen(
             cmd,
             cwd=self.config.webapp_dir,
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -392,10 +437,7 @@ class Launcher:
         await self.ensure_webapp()
         url = self.workspace_url_with_token()
         if self.config.auto_open:
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass  # headless / no browser — caller may open it manually
+            open_in_browser(url)  # headless / no browser: caller may open it manually
 
         async def _fresh_session() -> dict | None:
             for s in await self._live_sessions():
@@ -421,7 +463,7 @@ class Launcher:
             ],
             "message": (
                 "Multiple workspace tabs are open. Ask which to drive, then call "
-                "launch_or_attach(session=<sessionId>) — or launch_or_attach(new=True) "
+                "launch_or_attach(session_id=<sessionId>) — or launch_or_attach(new=True) "
                 "for a fresh dedicated tab."
             ),
         }

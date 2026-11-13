@@ -5,6 +5,7 @@ uv.lock
 
 # agent scratch scripts + their outputs (pre-convention; disposable)
 _*
+!__init__.py
 tg_local/
 
 # per-eval run folders: keep scripts/tables/plots/README, ignore heavy regenerables

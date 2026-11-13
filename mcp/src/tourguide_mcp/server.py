@@ -20,22 +20,24 @@ from .session import WorkspaceSession
 from .tools import register_tools
 
 
+def _ppid(pid: int) -> int | None:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        return int(out) if out else None
+    except Exception:
+        return None
+
+
 def _ancestors(pid: int) -> set[int]:
     """Walk up the parent chain (our uv-run / Desktop wrappers) so we never
     kill a process that launched us."""
     chain: set[int] = set()
     cur = pid
     for _ in range(20):
-        try:
-            ppid = int(
-                subprocess.run(
-                    ["ps", "-o", "ppid=", "-p", str(cur)],
-                    capture_output=True, text=True, timeout=3,
-                ).stdout.strip()
-                or 0
-            )
-        except Exception:
-            break
+        ppid = _ppid(cur) or 0
         if ppid <= 1 or ppid in chain:
             break
         chain.add(ppid)
@@ -78,11 +80,51 @@ def _proc_age_seconds(pid: int) -> int | None:
 _REAP_MIN_AGE_S = int(os.environ.get("TG_MCP_REAP_MIN_AGE", "600"))
 
 
+def _is_orphan(pid: int, matched: set[int]) -> bool:
+    """True when pid's client is gone: walking up through other tourguide-mcp
+    processes (e.g. its `uv run` wrapper), the chain ends at pid 1 (re-parented
+    to init/launchd) instead of at a live client. A server whose client is
+    still running (another Claude Code window, Desktop) is not an orphan, however
+    old it is. On Linux with a user-session subreaper, orphans are re-parented
+    there rather than to pid 1 and are left alone: missing a stale server is
+    better than killing a live one."""
+    cur = pid
+    for _ in range(10):
+        ppid = _ppid(cur)
+        if ppid is None:
+            return False
+        if ppid == 1:
+            # Re-parented to init → orphan. But in a container the MCP client
+            # itself can be pid 1 (`docker run … claude`); its live servers
+            # also have ppid 1 and must not be killed.
+            return _pid1_is_init()
+        if ppid not in matched:
+            return False
+        cur = ppid
+    return False
+
+
+# Process names that are an init/reaper rather than an MCP client.
+_INIT_NAMES = {"launchd", "init", "systemd", "tini", "dumb-init", "docker-init",
+               "catatonit", "s6-svscan", "runit", "sh", "bash"}
+
+
+def _pid1_is_init() -> bool:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", "1"], capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+    except Exception:
+        return False
+    return os.path.basename(out).lstrip("-") in _INIT_NAMES
+
+
 def _reap_stale_servers() -> None:
-    """Kill clearly-orphaned older tourguide-mcp processes on startup so one from
-    a previous Desktop session can't linger and serve stale code. Skips its own
-    process chain and any process younger than _REAP_MIN_AGE_S (likely a sibling
-    Desktop just spawned). Opt out entirely with TG_MCP_NO_REAP=1."""
+    """Kill orphaned older tourguide-mcp processes on startup so one from a
+    previous Desktop session can't linger and serve stale code. Only orphans
+    (see _is_orphan) are touched; also skips its own process chain and anything
+    younger than _REAP_MIN_AGE_S (likely a sibling Desktop just spawned). Opt
+    out entirely with TG_MCP_NO_REAP=1."""
     if os.environ.get("TG_MCP_NO_REAP"):
         return
     me = os.getpid()
@@ -93,6 +135,7 @@ def _reap_stale_servers() -> None:
         ).stdout.split()
     except Exception:
         return
+    matched = {int(p) for p in pids if p.isdigit()}
     for raw in pids:
         try:
             pid = int(raw)
@@ -103,6 +146,8 @@ def _reap_stale_servers() -> None:
         age = _proc_age_seconds(pid)
         if age is None or age < _REAP_MIN_AGE_S:
             continue  # too young to be a stale orphan — leave Desktop's spawns alone
+        if not _is_orphan(pid, matched):
+            continue  # its client is still alive — another window's live server
         try:
             os.kill(pid, signal.SIGTERM)
         except Exception:
@@ -150,9 +195,12 @@ MEASURING PROPERTIES — use the predesigned tools, not shell scripts:
 
 MESHES — when a segmentation has none and you want 3D, use `meshify`:
   Many label volumes (e.g. COSEM n5 organelle segs) ship NO meshes, so
-  selecting a segment shows nothing in the 3D panel. `meshify(source=…,
-  segment_ids=[…])` generates them (zmesh, in the analysis env — no external
-  install), reading the source DIRECTLY from s3/gcs/http (no staging), serves
+  selecting a segment shows nothing in the 3D panel. get_session flags this
+  per segmentation layer: `hasMeshes: false` means none (null = unknown: still
+  loading, or the source failed). Offer meshify when the user wants 3D and
+  it's false. `meshify(source=…, segment_ids=[…])` generates them (zmesh, in
+  the analysis env — no external install), reading an n5-on-s3 source DIRECTLY
+  (no staging; zarr and gcs/http aren't supported yet), serves
   them via the bridge, and adds the mesh layer. It picks a coarse/fast scale by
   default — tell the user which (the `ranAt` field) and that they can pass
   scale= for finer; pass segment_ids (e.g. the largest from `measure`) to mesh

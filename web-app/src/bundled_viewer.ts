@@ -58,6 +58,20 @@ function sameArray(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
   return true;
 }
 
+// nm per base unit for a length unit; null for anything else (time, channel).
+function lengthUnitToNm(unit: string | undefined): number | null {
+  switch (unit) {
+    case "m": return 1e9;
+    case "µm": case "um": case "micrometer": return 1e3;
+    case "nm": case "nanometer": return 1;
+    default: return null;
+  }
+}
+
+function coordSpaceSignature(names: string[], scales: ArrayLike<number>, units: string[]): string {
+  return names.map((n, i) => `${n}:${Number(scales[i])}${units[i]}`).join(",");
+}
+
 export class BundledViewer {
   private viewer: NgViewer | null = null;
   private container: HTMLElement;
@@ -102,6 +116,23 @@ export class BundledViewer {
 
   constructor(container: HTMLElement) {
     this.container = container;
+    // The user taking the controls ends every camera hold (add_layer locks,
+    // state-position pins, a fly_to waiting for data), so none of them snaps
+    // a pan or zoom back.
+    const cancelHolds = (): void => {
+      for (const cancel of [...this.cameraHolds]) cancel();
+    };
+    for (const ev of ["pointerdown", "wheel", "keydown"]) {
+      container.addEventListener(ev, cancelHolds, { capture: true, passive: true });
+    }
+  }
+
+  // Set by the workspace bridge: called right before the viewer moves the
+  // camera on its own (holds, a deferred fly_to), so that move isn't
+  // reported to the agent as the user moving the camera.
+  private programmaticMoveListener: (() => void) | null = null;
+  onProgrammaticMove(cb: () => void): void {
+    this.programmaticMoveListener = cb;
   }
 
   private ensureViewer(): NgViewer {
@@ -160,6 +191,7 @@ export class BundledViewer {
     if (ngStateOverride) {
       this.currentState = ngStateOverride as unknown as ReturnType<typeof descriptorToNgState>;
       viewer.state.restoreState(ngStateOverride);
+      this.keepStatePosition(ngStateOverride);
       return;
     }
     const state = descriptorToNgState(d);
@@ -181,6 +213,34 @@ export class BundledViewer {
     // camera straight back to the pre-add position. Snapshot the set first;
     // each cancel mutates it.
     for (const cancel of [...this.cameraHolds]) cancel();
+    // NG drops position writes until the coordinate space is valid (i.e. a
+    // source has loaded), then centers on the data. A fly_to sent right after
+    // add_layer was therefore lost. Apply it once the space becomes valid; a
+    // newer flyTo / applyNgState cancels the pending one via cameraHolds.
+    const space = (viewer.navigationState as any).coordinateSpace;
+    if (space?.value && space.value.valid === false) {
+      let done = false;
+      const teardown = (): void => {
+        if (done) return;
+        done = true;
+        space.changed?.remove?.(onChange);
+        this.cameraHolds.delete(teardown);
+      };
+      const onChange = (): void => {
+        if (space.value?.valid === false) return;
+        teardown();
+        // Next tick: let NG's own Position handler (which centers the camera on
+        // the new space) run first, so this move lands on top of it.
+        setTimeout(() => {
+          this.programmaticMoveListener?.();
+          this.flyTo(position, segmentId, layerName);
+        }, 0);
+      };
+      space.changed?.add?.(onChange);
+      this.cameraHolds.add(teardown);
+      setTimeout(teardown, 120000);
+      return;
+    }
     // NG's `navigationState.position.value` is in *output dim units*, not nm.
     // Even though we declare dimensions at 1 nm/unit, NG often inherits the
     // source zarr's native scale (e.g. z at 2.62 nm/unit). So we must:
@@ -263,9 +323,79 @@ export class BundledViewer {
   // descriptor has set up the layer scaffolding.
   applyNgState(state: Record<string, unknown>): void {
     const viewer = this.ensureViewer();
+    // An explicit state wins over in-flight add_layer camera holds.
+    for (const cancel of [...this.cameraHolds]) cancel();
     const rewritten = this.rewriteStateArtifacts(state);
     viewer.state.restoreState(rewritten);
     this.currentState = rewritten as any;
+    this.keepStatePosition(rewritten);
+  }
+
+  // A full restoreState re-creates every layer, and as their sources resolve
+  // NG can swap the global coordinate space for the layers' native one (the
+  // state says 1 nm/unit, the n5 is 4×4×5.24 nm). NG rescales the zoom but
+  // keeps position's raw numbers, so the camera lands 4–5× off, often outside
+  // the volume. Pin the state's position in world nm, read with the state's
+  // OWN dimensions, and re-express it each time the coordinate space changes
+  // during the hold. Only a units change re-applies it, so a user pan sticks.
+  private keepStatePosition(state: Record<string, unknown>, holdMs = 10000): void {
+    const dims = state.dimensions as Record<string, [number, string]> | undefined;
+    const pos = state.position as number[] | undefined;
+    if (!dims || typeof dims !== "object" || !Array.isArray(pos)) return;
+    const names = Object.keys(dims);
+    if (names.length !== pos.length) return;
+    const worldNm: Record<string, number> = {};
+    names.forEach((n, i) => {
+      const [scale, unit] = Array.isArray(dims[n]) ? dims[n] : [NaN, ""];
+      const k = lengthUnitToNm(unit);
+      if (k !== null && Number.isFinite(Number(scale)) && Number.isFinite(pos[i])) {
+        worldNm[n] = pos[i] * Number(scale) * k;
+      }
+    });
+    if (Object.keys(worldNm).length === 0) return;
+
+    const navState = this.ensureViewer().navigationState as any;
+    let appliedSig = coordSpaceSignature(
+      names,
+      names.map((n) => Number(dims[n][0])),
+      names.map((n) => String(dims[n][1])),
+    );
+    let active = true;
+    const reapply = (): void => {
+      if (!active) return;
+      const cs = navState?.coordinateSpace?.value as
+        | { valid?: boolean; names?: string[]; scales?: ArrayLike<number>; units?: string[] }
+        | undefined;
+      if (!cs || cs.valid === false || !cs.names?.length || !cs.scales || !cs.units) return;
+      const sig = coordSpaceSignature(cs.names, cs.scales, cs.units);
+      if (sig === appliedSig || !navState?.position) return;
+      appliedSig = sig;
+      this.programmaticMoveListener?.();
+      const cur = navState.position.value as Float32Array | undefined;
+      navState.position.value = Float32Array.from(
+        cs.names.map((n, i) => {
+          const k = lengthUnitToNm(cs.units![i]);
+          const scale = Number(cs.scales![i]);
+          return n in worldNm && k !== null && scale > 0 ? worldNm[n] / (scale * k) : (cur?.[i] ?? 0);
+        }),
+      );
+    };
+
+    const signal = navState?.coordinateSpace?.changed;
+    signal?.add?.(reapply);
+    const teardown = (): void => {
+      if (!active) return;
+      active = false;
+      signal?.remove?.(reapply);
+      this.cameraHolds.delete(teardown);
+    };
+    this.cameraHolds.add(teardown);
+    // Paths that change the space without firing the signal get caught by
+    // these timed checks; each is a no-op unless the units actually changed.
+    reapply();
+    requestAnimationFrame(reapply);
+    for (const ms of [100, 400, 1000, 3000]) setTimeout(reapply, ms);
+    setTimeout(teardown, holdMs);
   }
 
   // Add a Neuroglancer segmentation layer that only renders the mesh
@@ -465,6 +595,7 @@ export class BundledViewer {
           const orderedF32 = Float32Array.from(ordered);
           const cur = navState.position.value as Float32Array | undefined;
           if (!cur || !sameArray(cur, orderedF32)) {
+            this.programmaticMoveListener?.();
             navState.position.value = orderedF32;
           }
         }
@@ -631,6 +762,91 @@ export class BundledViewer {
   // to pre-fill skeleton segment-ID inputs from whatever the user has
   // selected in NG. Returns [] if the layer has no visible-segments state
   // (image layers, layers that haven't loaded yet, etc.).
+  // Camera position in world nm (x, y, z), the Workspace API's coordinate
+  // contract. NG's raw `position` is in the live coordinate space's units,
+  // which become the source's native voxels (e.g. 4 nm) once data loads, so
+  // reporting it raw would hand agents voxel indices labelled as nm.
+  getPositionNm(): [number, number, number] | undefined {
+    const nav = this.viewer?.navigationState as any;
+    const cs = nav?.coordinateSpace?.value as
+      | { names?: string[]; scales?: ArrayLike<number>; units?: string[] }
+      | undefined;
+    const pos = nav?.position?.value as Float32Array | undefined;
+    if (!cs?.names || !cs.scales || !cs.units || !pos || pos.length !== cs.names.length) return undefined;
+    const nm: Record<string, number> = {};
+    cs.names.forEach((n, i) => {
+      const k = lengthUnitToNm(cs.units![i]);
+      // Dimensionless axes are taken as nm already, matching flyTo.
+      const v = k === null ? pos[i] : pos[i] * Number(cs.scales![i]) * k;
+      nm[n] = Math.round(v * 100) / 100;
+    });
+    if (!("x" in nm && "y" in nm && "z" in nm)) return undefined;
+    return [nm.x, nm.y, nm.z];
+  }
+
+  // Does this layer render 3D geometry? True if any enabled data subsource
+  // provides a mesh (or skeleton) source, false once every source has
+  // loaded without one, undefined if unknown: a source is still loading or
+  // failed to load (a broken source isn't "ships no meshes"). Lets the agent
+  // see that a label volume has no meshes and call `meshify`.
+  layerHasMeshes(layerName: string): boolean | undefined {
+    const managed = this.viewer?.layerManager.getLayerByName(layerName);
+    const sources = (managed?.layer as any)?.dataSources as Array<{ loadState?: any }> | undefined;
+    if (!Array.isArray(sources) || sources.length === 0) return undefined;
+    let unknown = false;
+    for (const ds of sources) {
+      const ls = ds.loadState;
+      if (ls === undefined || ls.error !== undefined) {
+        unknown = true;
+        continue;
+      }
+      for (const sub of ls.subsources ?? []) {
+        if (sub?.enabled && sub.subsourceEntry?.subsource?.mesh !== undefined) return true;
+      }
+    }
+    return unknown ? undefined : false;
+  }
+
+  // Native voxel size [x, y, z] in nm of the layer's first loaded source, from
+  // NG's model transform (multiscale sources report their finest scale). The
+  // session descriptor's voxel size can be a placeholder (add_layer bootstraps
+  // with 4 nm), so this is what agents should compute with. Undefined while
+  // the source loads or if it has no x/y/z length axes.
+  layerVoxelSizeNm(layerName: string): [number, number, number] | undefined {
+    const managed = this.viewer?.layerManager.getLayerByName(layerName);
+    const sources = (managed?.layer as any)?.dataSources as Array<{ loadState?: any }> | undefined;
+    type Space = { names?: string[]; scales?: ArrayLike<number>; units?: string[] };
+    for (const ds of sources ?? []) {
+      // inputSpace is the source's own (model) space, so it carries the native
+      // scales; outputSpace follows the viewer's global units (1 nm here).
+      const t = ds?.loadState?.transform?.value as
+        | { rank?: number; inputSpace?: Space; outputSpace?: Space; transform?: ArrayLike<number> }
+        | undefined;
+      const inS = t?.inputSpace;
+      if (!inS?.names || !inS.scales || !inS.units) continue;
+      const outNames = t?.outputSpace?.names ?? [];
+      const rank = t?.rank ?? outNames.length;
+      const nm: Record<string, number> = {};
+      inS.names.forEach((inName, i) => {
+        // Source axes may be named d0/d1/…: name each by the output axis its
+        // column of the (rank+1)² column-major matrix feeds.
+        let name = inName;
+        if (!["x", "y", "z"].includes(name) && t?.transform) {
+          for (let j = 0; j < rank; j++) {
+            if (Number(t.transform[i * (rank + 1) + j]) !== 0) {
+              name = outNames[j] ?? name;
+              break;
+            }
+          }
+        }
+        const k = lengthUnitToNm(inS.units![i]);
+        if (k !== null) nm[name] = Math.round(Number(inS.scales![i]) * k * 1e4) / 1e4;
+      });
+      if ("x" in nm && "y" in nm && "z" in nm) return [nm.x, nm.y, nm.z];
+    }
+    return undefined;
+  }
+
   getVisibleSegments(layerName: string): string[] {
     const viewer = this.viewer;
     if (!viewer) return [];

@@ -35,7 +35,12 @@ export interface WorkspacePanelHandle {
   onDownloadWorkspace(cb: () => unknown): void;
   /** Apply a workspace file the user loaded (into their own copy). */
   onLoadWorkspace(cb: (state: unknown) => void): void;
+  /** No bridge to connect to (hosted page, no launcher link): say how to
+   *  connect an agent and what still works without one. */
+  showConnectHelp(): void;
 }
+
+const SETUP_URL = "https://github.com/davidackerman/tourguide#install";
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connected: "Agent connected",
@@ -54,10 +59,17 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
         <span class="conn-label" data-conn-label>No agent connected</span>
         <span class="conn-detail hint" data-conn-detail></span>
       </div>
+      <div class="workspace-connect-help hint" data-connect-help hidden>
+        <p>A coding agent on your machine (Claude Code, Cursor, …) drives this
+        workspace through the <code>tourguide</code> MCP server. Install it, then
+        ask the agent to open Tourguide — <a href="${SETUP_URL}" target="_blank" rel="noopener">setup</a>.</p>
+        <p>Without an agent you can still load data (<b>+ Load</b>) or open a
+        workspace file someone shared (<b>⬆ Open workspace</b> below).</p>
+      </div>
       <div class="workspace-share" data-share hidden></div>
       <div class="workspace-io">
-        <button class="btn-secondary btn-xs" data-download-ws title="Download this workspace (layers + tables + plots) as a portable file — share it, and anyone can load it into their own copy (no bridge needed)">⬇ Download</button>
-        <button class="btn-secondary btn-xs" data-load-ws title="Load a workspace file into your own copy">⬆ Load</button>
+        <button class="btn-secondary btn-xs" data-download-ws title="Download this workspace (layers + tables + plots) as a portable file — share it, and anyone can load it into their own copy (no bridge needed)">⬇ Save workspace</button>
+        <button class="btn-secondary btn-xs" data-load-ws title="Open a workspace file into your own copy">⬆ Open workspace</button>
       </div>
       <div class="workspace-plots" data-plots hidden>
         <header class="workspace-actions-header">
@@ -88,6 +100,7 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
   const plotsSection = container.querySelector<HTMLDivElement>("[data-plots]")!;
   const plotsList = container.querySelector<HTMLDivElement>("[data-plots-list]")!;
   const shareSection = container.querySelector<HTMLDivElement>("[data-share]")!;
+  const connectHelp = container.querySelector<HTMLDivElement>("[data-connect-help]")!;
 
   let entries: ActionHistoryEntry[] = [];
   let restoreCb: ((id: string) => void) | null = null;
@@ -220,6 +233,11 @@ export function renderWorkspacePanel(container: HTMLElement): WorkspacePanelHand
   return {
     setConnectionStatus(status, detail = "") {
       setConnDom(status, detail);
+      if (status === "connected") connectHelp.hidden = true;
+    },
+    showConnectHelp() {
+      setConnDom("disconnected", "");
+      connectHelp.hidden = false;
     },
     addActionEntry(entry) {
       entries.push(entry);

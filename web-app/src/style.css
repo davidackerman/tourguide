@@ -2094,6 +2094,7 @@ body[data-mode="workspace"] #backend-indicator {
 
 .workspace-conn {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   padding: 0.6rem 0.8rem;
@@ -2125,9 +2126,29 @@ body[data-mode="workspace"] #backend-indicator {
 .conn-label {
   font-weight: 600;
 }
+/* Detail goes on its own line under the label (it can be a long error),
+   indented past the dot. */
 .conn-detail {
-  margin-left: auto;
+  flex-basis: 100%;
+  margin-top: -0.25rem;
+  padding-left: calc(10px + 0.5rem);
   font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.conn-detail:empty {
+  display: none;
+}
+.workspace-connect-help {
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.workspace-connect-help p {
+  margin: 0 0 0.4rem;
+}
+.workspace-connect-help p:last-child {
+  margin-bottom: 0;
 }
 
 .workspace-actions {
@@ -2181,7 +2202,6 @@ body[data-mode="workspace"] #settings-btn,
 body[data-mode="workspace"] #backend-indicator,
 body[data-mode="workspace"] #dataset-select,
 body[data-mode="workspace"] .topbar-label,
-body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="catalog"],
 body[data-mode="workspace"] .empty-viewer-actions [data-empty-action="welcome"] {
   display: none !important;
 }

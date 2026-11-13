@@ -103,7 +103,11 @@ export class BrowserWsTransport {
     try {
       ws = new WebSocket(this.url());
     } catch (err) {
-      this.scheduleReconnect(`connect failed: ${(err as Error).message}`);
+      // A synchronous throw is a malformed URL or a SecurityError (e.g. an
+      // insecure ws:// to a non-localhost host from an HTTPS page). The same
+      // URL fails the same way every time, so stop rather than retry forever.
+      this.stopped = true;
+      this.opts.onStatus("disconnected", `can't open ${this.opts.bridgeWsUrl}: ${(err as Error).message}`);
       return;
     }
     this.ws = ws;
@@ -145,12 +149,14 @@ export class BrowserWsTransport {
 
     ws.onclose = (ev) => {
       if (this.ws === ws) this.ws = null;
-      // A handshake that never opened is almost always the bridge refusing
-      // us (401: missing/wrong token). Say so instead of "closed".
+      // A handshake that never opened is either nothing listening (bridge not
+      // running) or the bridge refusing us (401: missing/wrong token). The
+      // browser can't tell those apart, so name both.
+      const where = this.opts.bridgeWsUrl.replace(/^ws:\/\//, "").replace(/\/browser$/, "");
       const detail = !opened
         ? this.opts.token
-          ? "bridge refused the connection (wrong token?)"
-          : "bridge refused the connection — open this tab via the launcher, or add ?bridgeToken=… to the URL"
+          ? `no bridge answering at ${where} — not running, or this tab's token is from an earlier launch`
+          : `no bridge answering at ${where} without a token — open this tab with launch_or_attach, or add ?bridgeToken=… to the URL`
         : ev.reason
           ? `bridge closed: ${ev.reason}`
           : "bridge connection closed";
