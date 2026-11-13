@@ -100,6 +100,9 @@ export function startWorkspaceBridge(
   panel: WorkspacePanelHandle,
   opts: {
     bridgeWsUrl: string;
+    /** false = don't open the WebSocket (hosted page with no agent). Everything
+     *  local (workspace file load/download, the panel) still works. */
+    connect?: boolean;
     /** Bearer (or view) token the bridge expects. */
     token?: string;
     viewOnly?: boolean;
@@ -332,7 +335,11 @@ export function startWorkspaceBridge(
     snapshot = next;
   }, USER_EVENT_POLL_MS);
 
-  transport.start();
+  if (opts.connect === false) {
+    panel.showConnectHelp();
+  } else {
+    transport.start();
+  }
   return {
     stop: () => {
       clearInterval(poll);
