@@ -196,6 +196,31 @@ export class BundledViewer {
     // camera straight back to the pre-add position. Snapshot the set first;
     // each cancel mutates it.
     for (const cancel of [...this.cameraHolds]) cancel();
+    // NG drops position writes until the coordinate space is valid (i.e. a
+    // source has loaded), then centers on the data. A fly_to sent right after
+    // add_layer was therefore lost. Apply it once the space becomes valid; a
+    // newer flyTo / applyNgState cancels the pending one via cameraHolds.
+    const space = (viewer.navigationState as any).coordinateSpace;
+    if (space?.value && space.value.valid === false) {
+      let done = false;
+      const teardown = (): void => {
+        if (done) return;
+        done = true;
+        space.changed?.remove?.(onChange);
+        this.cameraHolds.delete(teardown);
+      };
+      const onChange = (): void => {
+        if (space.value?.valid === false) return;
+        teardown();
+        // Next tick: let NG's own Position handler (which centers the camera on
+        // the new space) run first, so this move lands on top of it.
+        setTimeout(() => this.flyTo(position, segmentId, layerName), 0);
+      };
+      space.changed?.add?.(onChange);
+      this.cameraHolds.add(teardown);
+      setTimeout(teardown, 120000);
+      return;
+    }
     // NG's `navigationState.position.value` is in *output dim units*, not nm.
     // Even though we declare dimensions at 1 nm/unit, NG often inherits the
     // source zarr's native scale (e.g. z at 2.62 nm/unit). So we must:
