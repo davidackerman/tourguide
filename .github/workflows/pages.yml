@@ -1,12 +1,16 @@
 name: Pages
 
 # The site at https://davidackerman.github.io/tourguide/: the workspace web app
-# (web-app/) built by Vite, as coresample's Pages workflow publishes its page.
-# Pull requests build and check it; pushes to main also publish it to the
-# gh-pages branch, which GitHub Pages serves.
+# (web-app/) built by Vite. Pull requests build and check it; pushes to main
+# also deploy it with GitHub's Pages actions (repo Settings → Pages → Source:
+# GitHub Actions).
 #
 # Only the page is hosted. The bridge and the MCP server run on the user's own
 # machine, and the hosted page connects out to the bridge on localhost.
+#
+# The build job runs `npm ci` (third-party install scripts) with a read-only
+# token and no persisted git credentials. Only the deploy job, which runs no
+# repo code, may publish, and it can't write to the repository.
 on:
   push:
     branches: [main]
@@ -20,18 +24,21 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # pushes the gh-pages branch
+  contents: read
 
 concurrency:
   group: pages-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede stale PR builds, but never cancel a deploy that's under way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  site:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -59,14 +66,24 @@ jobs:
           if grep -qE '(src|href)="/assets/' web-app/dist/index.html; then
             echo "::error::index.html has root-absolute /assets/ URLs; keep vite base './'"; exit 1
           fi
-          touch web-app/dist/.nojekyll   # Jekyll would drop _-prefixed files
           du -sh web-app/dist
 
-      - uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: web-app/dist
-          force_orphan: true
-          full_commit_message: "Deploy ${{ github.sha }}: the Tourguide workspace page"
+          path: web-app/dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write      # publish the artifact
+      id-token: write   # prove the deployment came from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

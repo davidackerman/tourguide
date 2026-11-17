@@ -19,10 +19,11 @@ function immutableAssets(): PluginOption {
   };
 }
 
-// The bundled JS Neuroglancer needs cross-origin isolation (COOP/COEP) for
-// SharedArrayBuffer — but that isolation BLOCKS embedding a cross-origin
-// Python-NG viewer in an iframe. In embedded mode (?ngViewer=…) we don't use
-// the bundled viewer, so serve that page WITHOUT COEP so the iframe can load.
+// Dev/preview serve with cross-origin isolation (COOP/COEP), which legacy chat
+// mode's in-browser WebLLM wants for SharedArrayBuffer. The workspace viewer
+// doesn't need it: the GitHub Pages build can't send these headers and renders
+// the same. Isolation BLOCKS embedding a cross-origin Python-NG viewer in an
+// iframe, so embedded mode (?ngViewer=…) is served WITHOUT COEP.
 function crossOriginIsolationExceptEmbedded(): PluginOption {
   const apply = (server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => {
     server.middlewares.use((req, res, next) => {

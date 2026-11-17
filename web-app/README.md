@@ -116,7 +116,7 @@ Type-checking runs as part of `build`. To check without building: `npx tsc --noE
 
 ## Deploy your own copy
 
-**This repo: GitHub Pages.** `.github/workflows/pages.yml` builds `web-app/` on every push to `main` and publishes it to the `gh-pages` branch (repo Settings → Pages → Deploy from a branch → `gh-pages`, `/`), so the live page is https://davidackerman.github.io/tourguide/. Pull requests build and check it without publishing. The site lives under `/tourguide/`, so keep Vite's `base: "./"` (relative asset URLs; the workflow checks it). GitHub Pages can't set COOP/COEP headers. Workspace mode doesn't need them (Neuroglancer renders without cross-origin isolation); legacy chat mode's in-browser WebLLM runs slower or not at all.
+**This repo: GitHub Pages.** `.github/workflows/pages.yml` builds `web-app/` and deploys it with GitHub's Pages actions whenever a push to `main` changes `web-app/` or the workflow (repo Settings → Pages → Source: **GitHub Actions**), so the live page is https://davidackerman.github.io/tourguide/. Pull requests build and check it without deploying. The site lives under `/tourguide/`, so keep Vite's `base: "./"` (relative asset URLs; the workflow checks it). GitHub Pages can't set COOP/COEP headers. Workspace mode doesn't need them (Neuroglancer renders without cross-origin isolation); legacy chat mode's in-browser WebLLM runs slower or not at all.
 
 **Alternative: Cloudflare Pages** (custom headers, a preview URL per PR). Workers & Pages → Create → Pages → Connect to Git; **Root directory** `web-app`, build `npm run build`, output `dist`. `public/_headers` (COOP/COEP cross-origin isolation, for full-speed WebLLM) and `public/_redirects` (single-page-app fallback) are Cloudflare-only.
 
