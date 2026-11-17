@@ -174,7 +174,7 @@ async function collectEntries(
 // --- local-folder walk ------------------------------------------------------
 
 async function collectLocal(url: string, onProgress: (msg: string) => void): Promise<FileEntry[]> {
-  // url like "https://tourguide-8j4.pages.dev/local-data/<id>/<subpath>/"
+  // url like "https://davidackerman.github.io/tourguide/local-data/<id>/<subpath>/"
   const m = /\/local-data\/([^/]+)(?:\/(.*?))?\/?$/.exec(url);
   if (!m) throw new Error(`Cannot parse local-folder URL: ${url}`);
   const id = decodeURIComponent(m[1]);

@@ -12,7 +12,7 @@ short_description: Cloud analysis backend for the tourguide web-app.
 
 # Tourguide Analysis Backend
 
-The optional cloud-compute backend for the [tourguide web app](https://tourguide-8j4.pages.dev). The web app normally runs analysis browser-side via Pyodide, but Pyodide is capped at ~1.5 GB of usable input memory. When a query needs more — or wants to use the Seung-lab stack (cc3d, fastmorph, fastremap, edt, kimimaro, zmesh), or read a format Pyodide doesn't support (N5, certain precomputed scales) — the request gets routed here.
+The optional cloud-compute backend for the [tourguide web app](https://davidackerman.github.io/tourguide/). The web app normally runs analysis browser-side via Pyodide, but Pyodide is capped at ~1.5 GB of usable input memory. When a query needs more — or wants to use the Seung-lab stack (cc3d, fastmorph, fastremap, edt, kimimaro, zmesh), or read a format Pyodide doesn't support (N5, certain precomputed scales) — the request gets routed here.
 
 **No setup required to *use* this backend.** The web app already points at it by default. First request wakes the Space (20–60 s cold start), after which it stays hot for ~48 h.
 

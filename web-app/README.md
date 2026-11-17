@@ -10,7 +10,7 @@
 
 A 3D microscopy viewer with built-in structured-data browsing, natural-language queries, and Python analysis — Neuroglancer embedded in the page, an AI agent that turns "measure the mitochondria" into running code, and share links that survive a browser restart. No install required.
 
-**Live**: https://tourguide-8j4.pages.dev
+**Live**: https://davidackerman.github.io/tourguide/
 
 This README is the user-feature guide. For the optional cloud-compute backend, see [`../hf-space/README.md`](../hf-space/README.md). For development / building / deploying your own copy, scroll to the bottom.
 
@@ -35,7 +35,7 @@ This README is the user-feature guide. For the optional cloud-compute backend, s
 
 ## Quick start
 
-1. Go to the [live URL](https://tourguide-8j4.pages.dev).
+1. Go to the [live URL](https://davidackerman.github.io/tourguide/).
 2. Click **Load demo dataset** to pull a public HeLa-2 sample, or **+ Load** to paste a zarr / n5 / precomputed URL, a YAML descriptor or a Neuroglancer state.
 3. To have an agent drive it, set up the `tourguide` MCP server: see [`../README.md`](../README.md#install).
 
@@ -79,7 +79,7 @@ You can run the entire stack on your own machine — no cloud — if you want fu
 
 | Cloud version | Local equivalent |
 |---|---|
-| Cloudflare Pages (frontend) | `npm run build && npm run preview` — serves on `http://localhost:4173` |
+| GitHub Pages (frontend) | `npm run build && npm run preview` — serves on `http://localhost:4173` |
 | HF Space (analysis backend) | `cd ../hf-space && uvicorn app:app --port 7860` — same code as the Space |
 | Gemini / Claude / OpenAI API (LLM) | Local Ollama via the OpenAI-compatible backend (`http://localhost:11434/v1`), or in-browser WebLLM |
 | S3 / GCS / HTTPS (data) | Local folder via the browser's File System Access API (Settings → Load my data → folder picker) |
@@ -116,16 +116,10 @@ Type-checking runs as part of `build`. To check without building: `npx tsc --noE
 
 ## Deploy your own copy
 
-**Recommended: Cloudflare Pages.** No bandwidth cap, no commercial-use restrictions, custom headers work. Setup:
+**This repo: GitHub Pages.** `.github/workflows/pages.yml` builds `web-app/` and deploys it with GitHub's Pages actions whenever a push to `main` changes `web-app/` or the workflow (repo Settings → Pages → Source: **GitHub Actions**), so the live page is https://davidackerman.github.io/tourguide/. Pull requests build and check it without deploying. The site lives under `/tourguide/`, so keep Vite's `base: "./"` (relative asset URLs; the workflow checks it). GitHub Pages can't set COOP/COEP headers. Workspace mode doesn't need them (Neuroglancer renders without cross-origin isolation); legacy chat mode's in-browser WebLLM runs slower or not at all.
 
-1. [dash.cloudflare.com](https://dash.cloudflare.com) → Workers & Pages → Create → Pages → Connect to Git.
-2. Pick the repo. **Root directory:** `web-app`. **Framework preset:** Vite (or set manually: build command `npm run build`, output `dist`).
-3. Deploy. URL is `https://<project>.pages.dev`. Every PR gets a preview URL. Custom domain support is free.
-
-`public/_headers` applies COOP/COEP cross-origin isolation, which WebLLM needs for full-speed in-browser inference. `public/_redirects` makes deep-link share URLs work as a single-page app.
+**Alternative: Cloudflare Pages** (custom headers, a preview URL per PR). Workers & Pages → Create → Pages → Connect to Git; **Root directory** `web-app`, build `npm run build`, output `dist`. `public/_headers` (COOP/COEP cross-origin isolation, for full-speed WebLLM) and `public/_redirects` (single-page-app fallback) are Cloudflare-only.
 
 **Alternative: Vercel.** Same idea, slightly more polished UX, non-commercial use only on free tier. Import at [vercel.com/new](https://vercel.com/new), Root Directory `web-app`, Vite preset auto-detected. Headers come from `vercel.json`.
-
-**Alternative: GitHub Pages.** Add a Pages workflow (none is checked in) and pick **GitHub Actions** as the source in repo Settings → Pages. Note: GH Pages can't set COOP/COEP headers, so WebLLM may run slower or fail there. Use Cloudflare or Vercel for the local-AI tier.
 
 **Local-network testing**: WebGPU and `navigator.userAgentData` require a secure context. `http://localhost` counts; `http://192.168.x.x:5173` does NOT. Either stick to localhost, or run `cloudflared tunnel --url http://localhost:5173` for an `https://…` URL.

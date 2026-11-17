@@ -66,8 +66,12 @@ down by default:
   never answers ops, and is never an op target.
 - **Origin allowlist.** Requests with an `Origin` are accepted from loopback,
   this machine's own addresses (a LAN-served page), and
-  `TG_BRIDGE_ALLOWED_ORIGINS` (default: the hosted Tourguide page). CORS
-  echoes allowed origins only.
+  `TG_BRIDGE_ALLOWED_ORIGINS` (default: the hosted page's origin,
+  `https://davidackerman.github.io`, plus the old Cloudflare one). CORS echoes
+  allowed origins only. An origin has no path, so the owner's other GitHub
+  Pages sites on that origin pass this check too and share the page's browser
+  storage (including a remembered bridge token); the per-launch token is
+  still required to drive the bridge.
 - **Unauthenticated, read-only by design:** `GET /health`, `GET /artifacts/*`
   (Neuroglancer fetches chunks itself and cannot attach a token) and `GET
   /share-state/<id>` (unguessable ids). They expose only agent-computed
@@ -127,8 +131,8 @@ The bridge runs on **your machine**; the page can be served from anywhere and
 still be driven by your local agent. The page connects *out* to the bridge.
 
 - **Hosted page → local bridge.** Serve the static build anywhere (the live
-  build is on Cloudflare Pages). Set
-  `TOURGUIDE_WORKSPACE_URL=https://tourguide-8j4.pages.dev/` and
+  build is on GitHub Pages, published by `.github/workflows/pages.yml`). Set
+  `TOURGUIDE_WORKSPACE_URL=https://davidackerman.github.io/tourguide/` and
   `launch_or_attach` opens it with `?bridgeToken=<token>`. A page served over
   HTTPS from a non-local host looks for the bridge on `localhost:7723`
   (localhost is mixed-content-exempt, the bridge answers Chrome's

@@ -120,7 +120,8 @@ function machineAddresses() {
 }
 
 const EXTRA_ORIGINS = new Set(
-  (process.env.TG_BRIDGE_ALLOWED_ORIGINS ?? "https://tourguide-8j4.pages.dev")
+  // The hosted page (GitHub Pages; the old Cloudflare Pages copy until it's retired).
+  (process.env.TG_BRIDGE_ALLOWED_ORIGINS ?? "https://davidackerman.github.io,https://tourguide-8j4.pages.dev")
     .split(",")
     .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean),

@@ -1,6 +1,6 @@
 # Tourguide
 
-**Live**: https://tourguide-8j4.pages.dev — the viewer on its own (load your
+**Live**: https://davidackerman.github.io/tourguide/ — the viewer on its own (load your
 data or the demo). To drive it from your agent, see
 [Sharing and hosting](#sharing-and-hosting).
 
@@ -87,11 +87,16 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
 - **Token auth.** Every bridge request that reads workspace state or drives
   the viewer needs a bearer token generated per launch (written 0600 to
   `tourguide-bridge-<port>.token` in the OS temp dir; the bridge never prints
-  it). Share
-  links carry a weaker **view token** that only permits a read-only viewer.
+  it). Read-only `?view=1` links carry a weaker **view token** that only
+  permits a viewer; `share_session` snapshot links carry no token.
 - **Origin allowlist.** Browser requests are accepted only from loopback, this
-  machine's own addresses, or the hosted Tourguide page. A random web page in
-  the same browser can't drive your workspace.
+  machine's own addresses, or the hosted page's origin. A random web page in
+  the same browser can't drive your workspace. The hosted page's origin,
+  `https://davidackerman.github.io`, is shared with the owner's other GitHub
+  Pages sites (browsers isolate by domain, not path), so those pass the origin
+  check and share the page's browser storage. Driving the bridge still needs
+  the per-launch token. For an origin of its own, serve the page from a custom
+  domain or set `TG_BRIDGE_ALLOWED_ORIGINS`.
 - **Read-only SQL.** `run_sql` refuses writes; `ingest_table` is the only way in.
 - **Read-only viewers are server-enforced.** A `?view=1` tab can look but
   never persists or answers ops.
@@ -101,9 +106,9 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
 ## Sharing and hosting
 
 The bridge runs on **your machine**; the page can be served from anywhere
-and still be driven by your local agent. To use the live Cloudflare Pages
-build instead of a local preview, set
-`TOURGUIDE_WORKSPACE_URL=https://tourguide-8j4.pages.dev/` for the MCP server:
+and still be driven by your local agent. To use the live build (GitHub
+Pages) instead of a local preview, set
+`TOURGUIDE_WORKSPACE_URL=https://davidackerman.github.io/tourguide/` for the MCP server:
 `launch_or_attach` opens the hosted page with your token, and an HTTPS page
 looks for the bridge on `localhost:7723` (`?bridge=host:port` overrides). Each workspace has an
 addressable `?session=<id>`; reopening it restores layers, tables and plots

@@ -186,11 +186,12 @@ async def _rate_limit_handler(_request: Request, exc: RateLimitExceeded) -> Resp
     )
 
 
-# Allow the Cloudflare Pages origin plus local dev. In prod we could tighten
+# Allow the hosted page (GitHub Pages; the old Cloudflare Pages copy) plus local dev. In prod we could tighten
 # this; since this is a research tool the allow-list is intentionally loose.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://davidackerman.github.io",
         "https://tourguide-8j4.pages.dev",
         "http://localhost:5173",
         "http://localhost:4173",

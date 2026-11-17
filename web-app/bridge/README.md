@@ -40,8 +40,11 @@ targets and never persist.
   (Neuroglancer can't attach headers); they serve derived data by unguessable
   id and are only reachable off-machine when LAN-bound.
 - Requests with an `Origin` outside loopback / this machine's addresses /
-  `TG_BRIDGE_ALLOWED_ORIGINS` (default: the hosted Tourguide page) are refused
-  (403); CORS echoes allowed origins only.
+  `TG_BRIDGE_ALLOWED_ORIGINS` are refused (403); CORS echoes allowed origins
+  only. The default allows the hosted page's origin,
+  `https://davidackerman.github.io` (plus the old Cloudflare one). That origin
+  is shared with the owner's other GitHub Pages sites, which therefore pass
+  this check; the bearer token still gates every op.
 - 64 MB body limit (413).
 
 ## Run

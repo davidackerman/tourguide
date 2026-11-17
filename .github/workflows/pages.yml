@@ -1,0 +1,89 @@
+name: Pages
+
+# The site at https://davidackerman.github.io/tourguide/: the workspace web app
+# (web-app/) built by Vite. Pull requests build and check it; pushes to main
+# also deploy it with GitHub's Pages actions (repo Settings → Pages → Source:
+# GitHub Actions).
+#
+# Only the page is hosted. The bridge and the MCP server run on the user's own
+# machine, and the hosted page connects out to the bridge on localhost.
+#
+# The build job runs `npm ci` (third-party install scripts) with a read-only
+# token and no persisted git credentials. Only the deploy job, which runs no
+# repo code, may publish, and it can't write to the repository.
+on:
+  push:
+    branches: [main]
+    paths:
+      - web-app/**
+      - .github/workflows/pages.yml
+  pull_request:
+    paths:
+      - web-app/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  # Supersede stale PR builds, but never cancel a deploy that's under way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-app/package-lock.json
+
+      # `npm run build` type-checks first (tsc --noEmit && vite build), so a
+      # type error stops the deploy.
+      - name: Build the page
+        working-directory: web-app
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # Fail here, not as a blank page on the site.
+      - name: Check the site
+        run: |
+          for f in index.html catalog.json sw.js datasets/jrc_hela-2.yaml; do
+            [ -f "web-app/dist/$f" ] || { echo "::error::web-app/dist/$f is missing"; exit 1; }
+          done
+          # The site lives under /tourguide/, so asset URLs must stay relative
+          # (vite base "./"); a root-absolute /assets/ URL would 404 there.
+          if grep -qE '(src|href)="/assets/' web-app/dist/index.html; then
+            echo "::error::index.html has root-absolute /assets/ URLs; keep vite base './'"; exit 1
+          fi
+          du -sh web-app/dist
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          path: web-app/dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write      # publish the artifact
+      id-token: write   # prove the deployment came from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
