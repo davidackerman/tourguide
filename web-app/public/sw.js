@@ -171,13 +171,19 @@ async function serveSynthesized(id, path, request) {
   });
 }
 
+// Paths are matched relative to the worker's scope, so the site works under a
+// subpath (GitHub Pages serves it at /tourguide/) as well as at the root.
+const SCOPE_PATH = new URL(self.registration.scope).pathname; // "/" or "/tourguide/"
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  if (!url.pathname.startsWith(SCOPE_PATH)) return;
+  const rel = "/" + url.pathname.slice(SCOPE_PATH.length); // "/local-data/<id>/…"
 
   // /synthesized/<id>/<path...> — zarr files written by the analysis worker
   // into the tourguide-synthesized IndexedDB store.
-  const mSynth = /^\/synthesized\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
+  const mSynth = /^\/synthesized\/([^/]+)(?:\/(.*))?$/.exec(rel);
   if (mSynth) {
     const id = decodeURIComponent(mSynth[1]);
     const path = mSynth[2] ? decodeURIComponent(mSynth[2]) : "";
@@ -186,7 +192,7 @@ self.addEventListener("fetch", (event) => {
   }
 
   // /local-data/<id>/<path...> — files under a FileSystemDirectoryHandle.
-  const m = /^\/local-data\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
+  const m = /^\/local-data\/([^/]+)(?:\/(.*))?$/.exec(rel);
   if (!m) return;
   const id = decodeURIComponent(m[1]);
   const path = m[2] ? decodeURIComponent(m[2]) : "";

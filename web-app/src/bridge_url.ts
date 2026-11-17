@@ -5,7 +5,7 @@
 //   - Page from the local preview/dev server (http://localhost:4173), or from
 //     another machine on the LAN (http://10.x.y.z:4173, a share link): the
 //     bridge is on the host that served the page.
-//   - Page served over HTTPS from a public host (the Cloudflare Pages build):
+//   - Page served over HTTPS from a public host (the GitHub Pages build):
 //     the bridge can only be on THIS machine's loopback. Browsers block
 //     ws://<public host> from an HTTPS page (mixed content) but exempt
 //     localhost, so default to localhost.

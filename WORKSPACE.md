@@ -127,8 +127,8 @@ The bridge runs on **your machine**; the page can be served from anywhere and
 still be driven by your local agent. The page connects *out* to the bridge.
 
 - **Hosted page → local bridge.** Serve the static build anywhere (the live
-  build is on Cloudflare Pages). Set
-  `TOURGUIDE_WORKSPACE_URL=https://tourguide-8j4.pages.dev/` and
+  build is on GitHub Pages, published by `.github/workflows/pages.yml`). Set
+  `TOURGUIDE_WORKSPACE_URL=https://davidackerman.github.io/tourguide/` and
   `launch_or_attach` opens it with `?bridgeToken=<token>`. A page served over
   HTTPS from a non-local host looks for the bridge on `localhost:7723`
   (localhost is mixed-content-exempt, the bridge answers Chrome's

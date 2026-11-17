@@ -1,6 +1,6 @@
 # Tourguide
 
-**Live**: https://tourguide-8j4.pages.dev — the viewer on its own (load your
+**Live**: https://davidackerman.github.io/tourguide/ — the viewer on its own (load your
 data or the demo). To drive it from your agent, see
 [Sharing and hosting](#sharing-and-hosting).
 
@@ -101,9 +101,9 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
 ## Sharing and hosting
 
 The bridge runs on **your machine**; the page can be served from anywhere
-and still be driven by your local agent. To use the live Cloudflare Pages
-build instead of a local preview, set
-`TOURGUIDE_WORKSPACE_URL=https://tourguide-8j4.pages.dev/` for the MCP server:
+and still be driven by your local agent. To use the live build (GitHub
+Pages) instead of a local preview, set
+`TOURGUIDE_WORKSPACE_URL=https://davidackerman.github.io/tourguide/` for the MCP server:
 `launch_or_attach` opens the hosted page with your token, and an HTTPS page
 looks for the bridge on `localhost:7723` (`?bridge=host:port` overrides). Each workspace has an
 addressable `?session=<id>`; reopening it restores layers, tables and plots
