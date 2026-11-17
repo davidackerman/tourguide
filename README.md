@@ -87,11 +87,16 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
 - **Token auth.** Every bridge request that reads workspace state or drives
   the viewer needs a bearer token generated per launch (written 0600 to
   `tourguide-bridge-<port>.token` in the OS temp dir; the bridge never prints
-  it). Share
-  links carry a weaker **view token** that only permits a read-only viewer.
+  it). Read-only `?view=1` links carry a weaker **view token** that only
+  permits a viewer; `share_session` snapshot links carry no token.
 - **Origin allowlist.** Browser requests are accepted only from loopback, this
-  machine's own addresses, or the hosted Tourguide page. A random web page in
-  the same browser can't drive your workspace.
+  machine's own addresses, or the hosted page's origin. A random web page in
+  the same browser can't drive your workspace. The hosted page's origin,
+  `https://davidackerman.github.io`, is shared with the owner's other GitHub
+  Pages sites (browsers isolate by domain, not path), so those pass the origin
+  check and share the page's browser storage. Driving the bridge still needs
+  the per-launch token. For an origin of its own, serve the page from a custom
+  domain or set `TG_BRIDGE_ALLOWED_ORIGINS`.
 - **Read-only SQL.** `run_sql` refuses writes; `ingest_table` is the only way in.
 - **Read-only viewers are server-enforced.** A `?view=1` tab can look but
   never persists or answers ops.

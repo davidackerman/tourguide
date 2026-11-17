@@ -66,8 +66,12 @@ down by default:
   never answers ops, and is never an op target.
 - **Origin allowlist.** Requests with an `Origin` are accepted from loopback,
   this machine's own addresses (a LAN-served page), and
-  `TG_BRIDGE_ALLOWED_ORIGINS` (default: the hosted Tourguide page). CORS
-  echoes allowed origins only.
+  `TG_BRIDGE_ALLOWED_ORIGINS` (default: the hosted page's origin,
+  `https://davidackerman.github.io`, plus the old Cloudflare one). CORS echoes
+  allowed origins only. An origin has no path, so the owner's other GitHub
+  Pages sites on that origin pass this check too and share the page's browser
+  storage (including a remembered bridge token); the per-launch token is
+  still required to drive the bridge.
 - **Unauthenticated, read-only by design:** `GET /health`, `GET /artifacts/*`
   (Neuroglancer fetches chunks itself and cannot attach a token) and `GET
   /share-state/<id>` (unguessable ids). They expose only agent-computed
