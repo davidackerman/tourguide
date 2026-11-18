@@ -436,17 +436,36 @@ if (isWorkspaceMode()) {
 }
 
 async function loadEntry(entry: CatalogEntry, index: number): Promise<void> {
-  let descriptor: DatasetDescriptor;
-  const baseUrl = new URL(CATALOG_URL, window.location.href).toString();
   try {
-    descriptor = await fetchDescriptor(entry, baseUrl);
+    await applyEntry(entry, index);
   } catch (err) {
     console.error(`Failed to load ${entry.name}:`, err);
-    return;
   }
+}
+
+/** Fetch a catalog entry's descriptor and load it. Throws on failure. */
+async function applyEntry(entry: CatalogEntry, index: number): Promise<DatasetDescriptor> {
+  const baseUrl = new URL(CATALOG_URL, window.location.href).toString();
+  const descriptor = await fetchDescriptor(entry, baseUrl);
   currentIsCustom = false;
   currentCatalogIndex = index;
+  select.value = String(index);
   await applyDescriptor(descriptor, baseUrl);
+  return descriptor;
+}
+
+/** Load a catalog dataset by name, for the agent's load_dataset tool. "demo"
+ *  or no name means the same dataset as the "Load demo dataset" button. */
+async function loadCatalogDataset(name?: string): Promise<DatasetDescriptor> {
+  const want = (name ?? "").trim().toLowerCase();
+  const idx = !want || want === "demo"
+    ? demoEntryIndex()
+    : entries.findIndex((e) => e.name.toLowerCase() === want);
+  if (idx < 0) {
+    const names = entries.map((e) => e.name).join(", ") || "none";
+    throw new Error(`No dataset named '${name}' in this page's catalog. Available: ${names}.`);
+  }
+  return applyEntry(entries[idx], idx);
 }
 
 // True while the very first applyDescriptor call (from permalink or default
@@ -1225,6 +1244,7 @@ function startBridgeIfWorkspace(): void {
     },
     getDescriptor: () => currentDescriptor,
     loadDescriptor: (d) => loadDescriptorDirect(d),
+    loadDataset: (name) => loadCatalogDataset(name),
     refreshBrowser: () => {
       if (currentDB) renderStructuredBrowser(browserHost, { db: currentDB, viewer });
     },

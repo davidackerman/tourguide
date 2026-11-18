@@ -469,6 +469,27 @@ def register_tools(mcp: FastMCP, session: WorkspaceSession) -> None:
         return await session.call("load_descriptor", {"descriptor": descriptor, "wait": wait})
 
     @mcp.tool()
+    async def load_dataset(name: str = "demo", wait: bool = True) -> dict:
+        """Load one of the page's BUILT-IN datasets by name — use this when the
+        user asks for "the demo" / "the HeLa demo" instead of assembling layers
+        yourself. name="demo" (the default) or "jrc_hela-2" loads the HeLa-2
+        demo: the FIB-SEM volume (zarr) plus seven organelle segmentations
+        (mito, ER, golgi, nucleus, endosome, PM, vesicle). An unknown name
+        returns the available ones. Waits (up to 30 s) for the layers to load
+        unless wait=False."""
+        try:
+            return await session.call("load_descriptor", {"dataset": name, "wait": wait})
+        except Exception as e:
+            if "missing 'descriptor'" in str(e):
+                # A tab opened before load_dataset existed only knows inline
+                # descriptors.
+                raise RuntimeError(
+                    "The Tourguide tab is running an older build. Ask the user to "
+                    "reload it (or call launch_or_attach(new=True)), then retry."
+                ) from e
+            raise
+
+    @mcp.tool()
     async def wait_for_ready(timeout_ms: int = 30000) -> dict:
         """Block until every layer has loaded what the current view needs (or
         the timeout passes). Use after fly_to / add_layer before a screenshot."""

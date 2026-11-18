@@ -37,6 +37,8 @@ coding agent (Claude Code, Cursor) picks it up automatically. The tools:
 - `show_plot(png_path="hist.png")` — display a figure **you rendered**.
   Inline `png=` for tiny images only.
 - `load_url(url)` — apply a Neuroglancer link in one step.
+- `load_dataset()` — load the built-in HeLa-2 demo (zarr EM + seven organelle
+  segmentations). Use it for "the demo" rather than assembling layers.
 - `share_session` / `share_view` / `export_session` — hand the view (short
   Tourguide link with a read-only view token / plain Neuroglancer link) or the
   whole session (portable file) to a colleague. Never paste long URLs in chat.

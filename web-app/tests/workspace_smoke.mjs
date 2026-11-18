@@ -159,6 +159,14 @@ async function main() {
     const wr = await postOp("wait_for_ready", { timeoutMs: 300 });
     assert(wr.ok === true && wr.result?.ready === false, "wait_for_ready times out cleanly with no dataset");
 
+    // load_descriptor by catalog name (the MCP load_dataset tool): an unknown
+    // name is refused with the catalog's names, so the agent can pick one.
+    const noDs = await postOp("load_descriptor", { dataset: "no_such_dataset", wait: false });
+    assert(
+      noDs.ok === false && /jrc_hela-2/.test(noDs.error?.message ?? ""),
+      "load_descriptor with an unknown dataset lists the catalog",
+    );
+
     // Events: the action stream is exposed over GET /events for pollers.
     const ev = await (await fetch(`${BRIDGE}/events?since=0`, { headers: AUTH })).json();
     assert(

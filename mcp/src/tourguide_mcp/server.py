@@ -221,6 +221,18 @@ LOADING WHAT THE USER DROPS IN — discern the type, don't demand a format:
     load_descriptor.
   Only ask the user if the type is genuinely ambiguous.
 
+THE DEMO — "load the demo" / "the HeLa(-2) demo": call load_dataset() (no
+  args). It's built into the page: the jrc_hela-2 FIB-SEM volume plus seven
+  organelle segmentations, already set up. Don't search for saved states or
+  assemble layers yourself for it.
+
+ZARR OVER N5 — when you add layers yourself and a dataset has both a .zarr
+  and an .n5 copy (COSEM/OpenOrganelle buckets often do), use the zarr for
+  anything it contains (e.g. em/fibsem-uint8 in jrc_hela-2.zarr/recon-1/em/,
+  not the n5's fibsem-uint16). Fall back to the n5 only for what the zarr
+  lacks — for jrc_hela-2 that's the whole-cell organelle segmentations
+  (mito_seg, er_seg, …), which exist only in the n5.
+
 INGEST BIG TABLES BY PATH — never stream rows through your tokens:
   Re-emitting hundreds of rows as a tool argument is the single slowest thing
   you can do (it cost minutes in testing). The recipes already write a CSV —
