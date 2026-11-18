@@ -162,7 +162,7 @@ still be driven by your local agent. The page connects *out* to the bridge.
 
 | Op | Purpose |
 | --- | --- |
-| `launch_or_attach`, `get_session`, `load_descriptor`, `wait_for_ready` | session; `get_session` includes each layer's `source`, `localPath`, `voxelSizeNm`, `hasMeshes` (segmentations), and a `viewer.ready` flag |
+| `launch_or_attach`, `get_session`, `load_descriptor`, `wait_for_ready` | session; `load_descriptor` takes an inline `descriptor` or a catalog `dataset` name (`"demo"` = HeLa-2); `get_session` includes each layer's `source`, `localPath`, `voxelSizeNm`, `hasMeshes` (segmentations), and a `viewer.ready` flag |
 | `screenshot` | PNG of the current view (base64) — the agent's eyes |
 | `fly_to`, `fly_to_segment`, `select_segments`, `get_selection` | camera + selection; `fly_to_segment` looks the centroid up in the layer's table |
 | `add_layer`, `add_annotations` | layers; native point / line / bbox annotations, append or replace |
@@ -176,7 +176,7 @@ still be driven by your local agent. The page connects *out* to the bridge.
 
 The MCP adapter adds, on top: file-path variants (`ingest_table(path=)`,
 `show_plot(png_path=)`, `set_viewer_state(path=)`, `add_annotations(path=)`),
-`load_url`, the compute tools (`measure`, `run_recipe`, `list_recipes`,
+`load_url`, `load_dataset` (the built-in demo), the compute tools (`measure`, `run_recipe`, `list_recipes`,
 `meshify` — run in the agent-side `analysis/` env), the share tools
 (`share_session`, `share_view`, `export_session`), and the event tools
 (`get_recent_events`, `wait_for_user_action`). The SDK adds

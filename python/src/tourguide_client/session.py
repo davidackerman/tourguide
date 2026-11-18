@@ -157,6 +157,10 @@ class TourguideSession:
     def load_descriptor(self, descriptor: dict, wait: bool = True) -> dict:
         return self.call("load_descriptor", {"descriptor": descriptor, "wait": wait})
 
+    def load_dataset(self, name: str = "demo", wait: bool = True) -> dict:
+        """Load a built-in dataset from the page's catalog ("demo" = HeLa-2)."""
+        return self.call("load_descriptor", {"dataset": name, "wait": wait})
+
     def wait_for_ready(self, timeout_ms: int = 30000) -> dict:
         return self.call("wait_for_ready", {"timeoutMs": timeout_ms})
 

@@ -33,6 +33,9 @@ export interface WorkspaceContext {
   setDB: (db: DatasetDB) => void;
   getDescriptor: () => DatasetDescriptor | null;
   loadDescriptor: (d: DatasetDescriptor) => void;
+  /** Load a dataset from the page's own catalog by name ("demo" or omitted:
+   *  the real demo dataset). Rejects with the available names if unknown. */
+  loadDataset: (name?: string) => Promise<DatasetDescriptor>;
   /** Re-render the structured table browser after a DB change. */
   refreshBrowser: () => void;
   /** Display a rendered plot artifact in the workspace UI. */
@@ -213,9 +216,24 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
 
     get_session: async () => buildSessionSummary(ctx),
 
-    load_descriptor: async (p: { descriptor: DatasetDescriptor; wait?: boolean; timeoutMs?: number }) => {
-      if (!p?.descriptor) throw new Error("load_descriptor: missing 'descriptor'");
-      ctx.loadDescriptor(p.descriptor);
+    // `descriptor` loads an inline descriptor; `dataset` loads one from the
+    // page's catalog by name (e.g. the built-in demo), exactly as the page's
+    // own "Load demo dataset" button does.
+    load_descriptor: async (p: {
+      descriptor?: DatasetDescriptor;
+      dataset?: string;
+      wait?: boolean;
+      timeoutMs?: number;
+    }) => {
+      let name: string;
+      if (p?.descriptor) {
+        ctx.loadDescriptor(p.descriptor);
+        name = p.descriptor.name;
+      } else if (p && "dataset" in p) {
+        name = (await ctx.loadDataset(p.dataset)).name;
+      } else {
+        throw new Error("load_descriptor: pass 'descriptor' or 'dataset'");
+      }
       let ready = false;
       if (p.wait !== false) {
         const deadline = Date.now() + (p.timeoutMs ?? 30_000);
@@ -228,7 +246,7 @@ export function createHandlers(ctx: WorkspaceContext): HandlerMap {
           await sleep(250);
         }
       }
-      return { name: p.descriptor.name, ready };
+      return { name, ready };
     },
 
     // Block until every layer has loaded the chunks for the current view,

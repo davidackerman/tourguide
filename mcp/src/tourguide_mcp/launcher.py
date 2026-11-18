@@ -327,11 +327,36 @@ class Launcher:
         except Exception:
             return True
 
+    def _build_is_stale(self) -> bool:
+        """True when web-app sources are newer than the production build, so a
+        preview server already up is serving old code (e.g. after a git pull or
+        merge: it stays up across MCP restarts)."""
+        if not self.config.webapp_dir:
+            return False
+        root = Path(self.config.webapp_dir)
+        built_index = root / "dist" / "index.html"
+        try:
+            built = built_index.stat().st_mtime
+        except OSError:
+            return True
+        inputs = [root / f for f in ("index.html", "package-lock.json", "vite.config.ts")]
+        for sub in ("src", "public"):
+            inputs.extend(q for q in (root / sub).rglob("*") if q.is_file())
+        for q in inputs:
+            try:
+                if q.stat().st_mtime > built:
+                    return True
+            except OSError:
+                continue
+        return False
+
     async def ensure_webapp(self, timeout: float = 240.0) -> None:
         """Start the web app if it isn't already serving the right thing.
 
         Idempotent for a *preview* server: if the production build is already
-        up at the workspace URL we attach to it (no needless rebuild). But if a
+        up at the workspace URL we attach to it (no needless rebuild), unless the
+        web-app sources changed since that build — then it's rebuilt and
+        restarted, so a merge or pull reaches the page. But if a
         Vite *dev* server is squatting on the port, we kill it and start preview
         anyway — otherwise it renders Neuroglancer image chunks black, and its
         mere reachability would otherwise defeat the preview default. Set
@@ -339,7 +364,10 @@ class Launcher:
         port = str(urlparse(self.config.workspace_url).port or 5173)
         mode = await self._reachable_mode()
         if mode == self.config.webapp_mode:
-            return  # already serving exactly what we want — attach.
+            # Already serving what we want — attach, unless it's a preview of
+            # an out-of-date build (then fall through: evict, rebuild, serve).
+            if mode != "preview" or not self._build_is_stale():
+                return
         if not self.config.webapp_dir:
             # Can't auto-start (and won't evict a server we can't replace).
             if mode is not None:
@@ -356,7 +384,8 @@ class Launcher:
             )
         if mode is not None:
             # Wrong server on the port (typically a dev server when we want
-            # preview). Evict it so the build below can claim the port.
+            # preview), or a preview of a stale build. Evict it so the build
+            # below can claim the port.
             self._kill_port(port)
             await _wait_for(lambda: self._is_port_free(port), timeout=10.0)
         # Pin the port so the URL we open matches the server we start.

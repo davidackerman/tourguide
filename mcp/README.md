@@ -79,7 +79,7 @@ With several workspace tabs open, `launch_or_attach` returns
 
 ## Tools
 
-Session: `launch_or_attach`, `get_session`, `load_descriptor`, `load_url`,
+Session: `launch_or_attach`, `get_session`, `load_descriptor`, `load_dataset`, `load_url`,
 `wait_for_ready`.
 Seeing: `screenshot`.
 Viewer: `fly_to`, `fly_to_segment`, `select_segments`, `get_selection`,

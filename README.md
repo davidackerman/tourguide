@@ -68,7 +68,7 @@ and notebooks: [`python/`](python/). Recipes and the analysis environment:
 
 | Group | Tools |
 | --- | --- |
-| Session | `launch_or_attach` (multi-tab aware), `get_session`, `load_descriptor`, `load_url`, `wait_for_ready` |
+| Session | `launch_or_attach` (multi-tab aware), `get_session`, `load_descriptor`, `load_dataset`, `load_url`, `wait_for_ready` |
 | Seeing | `screenshot` (returns an image) |
 | Viewer | `fly_to`, `fly_to_segment`, `select_segments`, `get_selection`, `add_layer`, `add_annotations` (point / line / bbox), `get_viewer_state`, `set_viewer_state` |
 | Compute (runs in the agent's env) | `measure`, `run_recipe`, `list_recipes`, `meshify` |
